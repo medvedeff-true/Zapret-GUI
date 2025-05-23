@@ -7,6 +7,7 @@ import subprocess
 import re
 import urllib.request
 import zipfile
+import tempfile
 
 from PyQt6.QtCore import Qt, QSettings, QUrl, QSize
 from PyQt6.QtGui import QDesktopServices, QIcon, QPixmap
@@ -101,6 +102,13 @@ class SettingsDialog(QDialog):
         # — Новые кнопки: Установить/Удалить/Обновить —
         btn_layout = QHBoxLayout()
         self.install_btn = QPushButton()
+        self.install_btn.setStyleSheet(
+            "QPushButton {"
+            "  border: 1px solid green;"
+            "  border-radius: 4px;"
+            "  padding: 2px 6px;"
+            "}"
+        )
         self.remove_btn = QPushButton()
         self.update_btn = QPushButton()
         for btn in (self.install_btn, self.remove_btn, self.update_btn):
@@ -160,56 +168,46 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, self.t('Settings'), 'service.bat не найден')
 
     def install_service(self):
-        script = os.path.join(os.path.dirname(__file__), 'core', 'service.bat')
-        cmd = f'echo 1| "{script}"'
-        subprocess.Popen(['cmd.exe', '/c', cmd], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        script = os.path.join(
+            os.path.dirname(__file__),
+            'core', 'fast', 'install_service.bat'
+        )
+        if not os.path.exists(script):
+            QMessageBox.warning(self, self.t('Settings'),
+                                'install_service.bat не найден')
+            return
+        subprocess.Popen(
+            ['cmd.exe', '/c', script],
+            creationflags=subprocess.CREATE_NEW_CONSOLE
+        )
 
     def remove_service(self):
-        script = os.path.join(os.path.dirname(__file__), 'core', 'service.bat')
-        cmd = f'echo 2| "{script}"'
-        subprocess.Popen(['cmd.exe', '/c', cmd], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        script = os.path.join(
+            os.path.dirname(__file__),
+            'core', 'fast', 'uninstall.bat'
+        )
+        if not os.path.exists(script):
+            QMessageBox.warning(self, self.t('Settings'),
+                                'remove_service.bat не найден')
+            return
+        subprocess.Popen(
+            ['cmd.exe', '/c', script],
+            creationflags=subprocess.CREATE_NEW_CONSOLE
+        )
 
     def check_updates(self):
-        # читаем локальную версию из service.bat
-        script = os.path.join(os.path.dirname(__file__), 'core', 'service.bat')
-        local_ver = '0'
-        with open(script, encoding='utf-8') as f:
-            m = re.search(r'LOCAL_VERSION=(\S+)', f.read())
-            if m: local_ver = m.group(1)
-
-        # скачиваем версию из GitHub
-        url_v = 'https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/.service/version.txt'
-        try:
-            resp = urllib.request.urlopen(url_v, timeout=5)
-            remote_ver = resp.read().decode().strip()
-        except Exception:
-            QMessageBox.warning(self, self.t('Settings'), 'Не удалось проверить обновления')
+        script = os.path.join(
+            os.path.dirname(__file__),
+            'core', 'fast', 'update_service.bat'
+        )
+        if not os.path.exists(script):
+            QMessageBox.warning(self, self.t('Settings'),
+                                'update_service.bat не найден')
             return
-
-        if remote_ver == local_ver:
-            QMessageBox.information(self, self.t('Settings'), f'Вы уже на последней версии {local_ver}')
-            return
-
-        # скачать ZIP-архив релиза
-        zip_url = f'https://github.com/Flowseal/zapret-discord-youtube/archive/refs/tags/{remote_ver}.zip'
-        zip_path = os.path.join(APP_DIR, f'update_{remote_ver}.zip')
-        try:
-            urllib.request.urlretrieve(zip_url, zip_path)
-            # распаковать .bat в core/
-            with zipfile.ZipFile(zip_path, 'r') as z:
-                for member in z.namelist():
-                    if member.lower().endswith('.bat') and 'service' not in os.path.basename(member).lower():
-                        src = z.open(member)
-                        dst_path = os.path.join(os.path.dirname(__file__), 'core', os.path.basename(member))
-                        with open(dst_path, 'wb') as out:
-                            out.write(src.read())
-            QMessageBox.information(self, self.t('Settings'), f'Обновлено до {remote_ver}')
-            # уведомим главное окно обновить список
-            parent = self.parent()
-            if parent and hasattr(parent, 'reload_presets'):
-                parent.reload_presets()
-        except Exception as e:
-            QMessageBox.warning(self, self.t('Settings'), 'Ошибка при скачивании обновления:\n' + str(e))
+        subprocess.Popen(
+            ['cmd.exe', '/c', script],
+            creationflags=subprocess.CREATE_NEW_CONSOLE
+        )
 
     def closeEvent(self, event):
         self.save_settings()
@@ -296,7 +294,7 @@ class MainWindow(QWidget):
         self.cb.addItems(self.presets.keys())
 
     def retranslate_ui(self):
-        self.setWindowTitle('EzUnBlock GUI')
+        self.setWindowTitle('Zapret GUI')
         if self.toggle_btn.isChecked():
             self.status_lbl.setText(self.t('On: {}', self.cb.currentText()))
             self.toggle_btn.setStyleSheet("border-radius:30px; background-color:red;")
