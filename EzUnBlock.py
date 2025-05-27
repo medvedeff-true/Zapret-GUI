@@ -15,6 +15,8 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QDialog, QCheckBox, QMessageBox
 )
+from PyQt6.QtCore import QSize, QTimer
+from PyQt6.QtGui import QIcon
 
 # ————————————————————————————————————————————————
 APP_DIR = os.path.join(os.path.expanduser('~'), 'Zapret Gui')
@@ -284,6 +286,26 @@ class MainWindow(QWidget):
         )
         self.powered_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.powered_lbl)
+        # --- Настройка кнопки запуска по умолчанию ---
+        self.toggle_btn.setFixedSize(80, 80)
+        self.toggle_btn.setIcon(QIcon.fromTheme("media-playback-start"))
+        self.toggle_btn.setIconSize(QSize(40, 40))
+        self.blink_on = False
+
+        def blink_init():
+            color = "#ffffff" if self.blink_on else "#222222"
+            self.toggle_btn.setStyleSheet(f"""
+                QPushButton {{
+                    border: 2px solid {color};
+                    border-radius: 40px;
+                    background-color: green;
+                }}
+            """)
+            self.blink_on = not self.blink_on
+
+        self.blink_timer = QTimer(self)
+        self.blink_timer.timeout.connect(blink_init)
+        self.blink_timer.start(800)
 
     def reload_presets(self):
         self.presets = {'General':'general.bat','Discord':'discord.bat'}
@@ -308,23 +330,49 @@ class MainWindow(QWidget):
         self.settings.setValue('last_profile', profile)
         script = os.path.join(self.core_dir, self.presets[profile])
 
+        if not os.path.exists(script):
+            QMessageBox.warning(self, "Ошибка", f"Не найден файл:\n{script}")
+            self.toggle_btn.setChecked(False)
+            return
+
+        # Функция мигания
+        def blink():
+            color = "#ffffff" if self.blink_on else "#222222"
+            bg_color = "red" if self.toggle_btn.isChecked() else "green"
+            self.toggle_btn.setStyleSheet(f"""
+                QPushButton {{
+                    border: 2px solid {color};
+                    border-radius: 40px;
+                    background-color: {bg_color};
+                }}
+            """)
+            self.blink_on = not self.blink_on
+
         if checked:
-            if os.path.exists(script):
-                self.process = subprocess.Popen(
-                    ["cmd.exe","/c", script],
-                    creationflags=subprocess.CREATE_NEW_CONSOLE
-                )
-                self.status_lbl.setText(self.t('On: {}', profile))
-                self.toggle_btn.setStyleSheet("border-radius:30px; background-color:red;")
-            else:
-                self.toggle_btn.setChecked(False)
+            # Запуск батника
+            self.process = subprocess.Popen(
+                ["cmd.exe", "/c", script],
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+            self.status_lbl.setText(self.t('On: {}', profile))
         else:
-            if self.process:
-                try: self.process.terminate()
-                except: pass
-                self.process = None
+            # Завершение процесса (по названию окна)
+            os.system(f'taskkill /FI "WINDOWTITLE eq zapret: {profile}" /T /F')
             self.status_lbl.setText(self.t('Off'))
-            self.toggle_btn.setStyleSheet("border-radius:30px; background-color:green;")
+
+        # Всегда устанавливаем нужные параметры кнопки
+        self.toggle_btn.setFixedSize(80, 80)
+        self.toggle_btn.setIcon(QIcon.fromTheme("media-playback-start"))
+        self.toggle_btn.setIconSize(QSize(40, 40))
+        self.blink_on = False
+
+        # Перезапускаем мигание
+        if hasattr(self, 'blink_timer') and self.blink_timer.isActive():
+            self.blink_timer.stop()
+
+        self.blink_timer = QTimer(self)
+        self.blink_timer.timeout.connect(blink)
+        self.blink_timer.start(800)
 
     def open_settings(self):
         dlg = SettingsDialog(self, self.settings)
