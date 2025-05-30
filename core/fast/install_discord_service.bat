@@ -1,19 +1,19 @@
 @echo off
 setlocal EnableDelayedExpansion
 
-:: — Повышаем права до администратора
+:: Поднятие прав
 net session >nul 2>&1 || (
   powershell -Command "Start-Process '%~f0' -Verb RunAs"
   exit /b
 )
 
-:: — Переходим в папку core
+:: Переход в core
 cd /d "%~dp0\.."
 
 set "BIN_PATH=%CD%\bin\"
 set "LISTS_PATH=%CD%\lists\"
 
-:: — Файл профиля Discord
+:: Чтение discord.bat
 set "file=discord.bat"
 if not exist "!file!" (
   powershell -Command "Write-Host 'Файл discord.bat не найден' -ForegroundColor Red"
@@ -21,32 +21,28 @@ if not exist "!file!" (
   exit /b
 )
 
-:: — Ищем строку запуска winws.exe внутри discord.bat
+:: Поиск строки запуска winws.exe
 set "args="
 for /f "tokens=*" %%A in ('findstr /i /c:"winws.exe" "!file!"') do set "line=%%A"
 
-:: — Парсим всё после winws.exe (флаги и параметры)
+:: Парсинг строки
 for %%a in (!line!) do (
   set "token=%%~a"
-  if /i "!token:~-8!" neq "winws.exe" if /i "!token!" neq "start" (
+  if /i "!token!" neq "start" if /i "!token!" neq "start" if /i "!token:~-8!" neq "winws.exe" (
     set "args=!args! !token!"
   )
 )
 
-:: — Удаляем прошлую службу zapret, если она есть
-sc stop zapret >nul 2>&1
-sc delete zapret >nul 2>&1
+:: Удаление предыдущего сервиса
+sc stop zapret_discord >nul 2>&1
+sc delete zapret_discord >nul 2>&1
 
-:: — Создаём новую службу zapret с аргументами из discord.bat
-sc create zapret ^
-    binPath= "\"%BIN_PATH%winws.exe\"!args!" ^
-    DisplayName= "zapret" start= auto
-sc description zapret "Zapret DPI bypass software"
+:: Установка сервиса
+sc create zapret_discord binPath= "\"%BIN_PATH%winws.exe\"!args!" DisplayName= "zapret_discord" start= auto
+sc description zapret_discord "Zapret DPI bypass for Discord"
+sc start zapret_discord
 
-:: — Запускаем службу
-sc start zapret
-
-:: — Уведомление об успехе
-powershell -Command "Write-Host 'Discord service installed' -ForegroundColor Green"
+:: Уведомление
+powershell -Command "Write-Host 'Discord service successfully installed.' -ForegroundColor Green"
 timeout /t 5 /nobreak >nul
 exit /b

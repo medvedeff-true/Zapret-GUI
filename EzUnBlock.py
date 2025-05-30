@@ -4,21 +4,13 @@
 import sys
 import os
 import subprocess
-import re
-import urllib.request
-import zipfile
-import tempfile
-
-from PyQt6.QtCore import Qt, QSettings, QUrl, QSize
-from PyQt6.QtGui import QDesktopServices, QIcon, QPixmap
+from PyQt6.QtCore import Qt, QSettings, QSize, QTimer
+from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QDialog, QCheckBox, QMessageBox
 )
-from PyQt6.QtCore import QSize, QTimer
-from PyQt6.QtGui import QIcon
 
-# ————————————————————————————————————————————————
 APP_DIR = os.path.join(os.path.expanduser('~'), 'Zapret Gui')
 os.makedirs(APP_DIR, exist_ok=True)
 SETTINGS_FILE = os.path.join(APP_DIR, 'settings.ini')
@@ -30,7 +22,7 @@ translations = {
         'Start minimized': 'Запускать свернутым',
         'Service mode': 'Сервисный режим',
         'Install Service': 'Установить сервис',
-        'Remove Service': 'Удалить сервис',
+        'Remove Services': 'Удалить сервисы',
         'Check Updates': 'Проверить обновления',
         'About:': 'Подробнее:',
         'Off': 'Выключен',
@@ -42,14 +34,13 @@ translations = {
         'Start minimized': 'Start minimized',
         'Service mode': 'Service mode',
         'Install Service': 'Install Service',
-        'Remove Service': 'Remove Service',
+        'Remove Service': 'Remove Services',
         'Check Updates': 'Check Updates',
         'About:': 'About:',
         'Off': 'Off',
         'On: {}': 'On: {}',
     }
 }
-# ————————————————————————————————————————————————
 
 
 class SettingsDialog(QDialog):
@@ -61,6 +52,7 @@ class SettingsDialog(QDialog):
         self.load_settings()
         self.retranslate_ui()
 
+
     def t(self, key, *args):
         return translations[self.lang].get(key, key).format(*args)
 
@@ -71,22 +63,24 @@ class SettingsDialog(QDialog):
         layout.setSpacing(8)
         layout.setContentsMargins(12, 12, 12, 12)
 
-        # — Языковые кнопки —
-        hl = QHBoxLayout(); hl.addStretch()
+        # Языковые кнопки
+        hl = QHBoxLayout();
+        hl.addStretch()
         flag_dir = os.path.join(os.path.dirname(__file__), 'flags')
         for code in ('ru', 'en'):
             pix = QPixmap(os.path.join(flag_dir, f'{code}.png')).scaled(
                 24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
             )
             btn = QPushButton()
-            btn.setIcon(QIcon(pix)); btn.setIconSize(QSize(24, 24))
-            btn.setFixedSize(36, 36)
+            btn.setIcon(QIcon(pix));
+            btn.setIconSize(QSize(24, 24))
+            btn.setFixedSize(31, 31)
             btn.clicked.connect(lambda _, c=code: self.change_lang(c))
             hl.addWidget(btn)
         hl.addStretch()
         layout.addLayout(hl)
 
-        # — Чекбоксы автозапуска и сворачивания —
+        # Чекбоксы
         cb_layout = QHBoxLayout()
         self.autostart_cb = QCheckBox()
         self.minimized_cb = QCheckBox()
@@ -95,39 +89,65 @@ class SettingsDialog(QDialog):
         cb_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addLayout(cb_layout)
 
-        # — Сервисный режим —
+        # Кнопка сервисного режима
         self.svc_btn = QPushButton()
         self.svc_btn.setFixedHeight(30)
         self.svc_btn.clicked.connect(self.on_service_mode)
         layout.addWidget(self.svc_btn)
 
-        # — Новые кнопки: Установить/Удалить/Обновить —
+        # Кнопки установки/удаления
         btn_layout = QHBoxLayout()
-        self.install_btn = QPushButton()
-        self.install_btn.setStyleSheet(
-            "QPushButton {"
-            "  border: 1px solid green;"
-            "  border-radius: 4px;"
-            "  padding: 2px 6px;"
-            "}"
-        )
-        self.remove_btn = QPushButton()
-        self.update_btn = QPushButton()
-        for btn in (self.install_btn, self.remove_btn, self.update_btn):
-            btn.setFixedHeight(28)
-            btn_layout.addWidget(btn)
-        self.install_btn.clicked.connect(self.install_service)
+
+        # Кнопка General
+        self.install_general_btn = QPushButton("Установить сервис\nGeneral")
+        self.install_general_btn.setFixedHeight(50)
+        self.install_general_btn.setStyleSheet("""
+            QPushButton {
+                border: 1px solid green;
+                border-radius: 4px;
+            }
+        """)
+        self.install_general_btn.clicked.connect(self.install_service)
+        btn_layout.addWidget(self.install_general_btn)
+
+        # Кнопка удалить
+        self.remove_btn = QPushButton("Удалить сервисы")
+        self.remove_btn.setFixedHeight(50)
+        self.remove_btn.setStyleSheet("""
+            QPushButton {
+                border: 1px solid red;
+                border-radius: 4px;
+            }
+        """)
         self.remove_btn.clicked.connect(self.remove_service)
-        self.update_btn.clicked.connect(self.check_updates)
+        btn_layout.addWidget(self.remove_btn)
+
+        # Кнопка Discord
+        self.install_discord_btn = QPushButton("Установить сервис\nDiscord")
+        self.install_discord_btn.setFixedHeight(50)
+        self.install_discord_btn.setStyleSheet("""
+            QPushButton {
+                border: 1px solid green;
+                border-radius: 4px;
+            }
+        """)
+        self.install_discord_btn.clicked.connect(self.install_discord_service)
+        btn_layout.addWidget(self.install_discord_btn)
+
         layout.addLayout(btn_layout)
 
-        # — «Подробнее: …» —
+        # Кнопка обновления
+        self.update_btn = QPushButton()
+        self.update_btn.setFixedHeight(30)
+        self.update_btn.clicked.connect(self.check_updates)
+        layout.addWidget(self.update_btn)
+
+        # Подпись
         self.about_label = QLabel()
         self.about_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.about_label.setTextFormat(Qt.TextFormat.RichText)
         self.about_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
         self.about_label.setOpenExternalLinks(True)
-        layout.addStretch()
         layout.addWidget(self.about_label)
 
     def load_settings(self):
@@ -143,13 +163,14 @@ class SettingsDialog(QDialog):
         self.autostart_cb.setText(self.t('Autostart program'))
         self.minimized_cb.setText(self.t('Start minimized'))
         self.svc_btn.setText(self.t('Service mode'))
-        self.install_btn.setText(self.t('Install Service'))
-        self.remove_btn.setText(self.t('Remove Service'))
+        self.install_general_btn.setText(self.t('Install Service') + "\nGeneral")
+        self.install_discord_btn.setText(self.t('Install Service') + "\nDiscord")
+        self.remove_btn.setText(self.t('Remove Services'))
         self.update_btn.setText(self.t('Check Updates'))
         self.about_label.setText(
             f'{self.t("About:")} '
-            '<a href="https://zapret.org/">Zapret</a> & '
-            '<a href="https://github.com/medvedeff-true?tab=repositories">Medvedeff</a>'
+            '<a href="https://zapret.org/" style="color:#3399ff;">Zapret</a> & '
+            '<a href="https://github.com/medvedeff-true?tab=repositories" style="color:#3399ff;">Medvedeff</a>'
         )
 
     def change_lang(self, lang_code):
@@ -170,46 +191,32 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, self.t('Settings'), 'service.bat не найден')
 
     def install_service(self):
-        script = os.path.join(
-            os.path.dirname(__file__),
-            'core', 'fast', 'install_service.bat'
-        )
+        script = os.path.join(os.path.dirname(__file__), 'core', 'fast', 'install_service.bat')
         if not os.path.exists(script):
-            QMessageBox.warning(self, self.t('Settings'),
-                                'install_service.bat не найден')
+            QMessageBox.warning(self, self.t('Settings'), 'install_service.bat не найден')
             return
-        subprocess.Popen(
-            ['cmd.exe', '/c', script],
-            creationflags=subprocess.CREATE_NEW_CONSOLE
-        )
+        subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE)
+
+    def install_discord_service(self):
+        script = os.path.join(os.path.dirname(__file__), 'core', 'fast', 'install_discord_service.bat')
+        if not os.path.exists(script):
+            QMessageBox.warning(self, self.t('Settings'), 'install_discord_service.bat не найден')
+            return
+        subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE)
 
     def remove_service(self):
-        script = os.path.join(
-            os.path.dirname(__file__),
-            'core', 'fast', 'uninstall.bat'
-        )
+        script = os.path.join(os.path.dirname(__file__), 'core', 'fast', 'uninstall.bat')
         if not os.path.exists(script):
-            QMessageBox.warning(self, self.t('Settings'),
-                                'remove_service.bat не найден')
+            QMessageBox.warning(self, self.t('Settings'), 'remove_service.bat не найден')
             return
-        subprocess.Popen(
-            ['cmd.exe', '/c', script],
-            creationflags=subprocess.CREATE_NEW_CONSOLE
-        )
+        subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE)
 
     def check_updates(self):
-        script = os.path.join(
-            os.path.dirname(__file__),
-            'core', 'fast', 'update_service.bat'
-        )
+        script = os.path.join(os.path.dirname(__file__), 'core', 'fast', 'update_service.bat')
         if not os.path.exists(script):
-            QMessageBox.warning(self, self.t('Settings'),
-                                'update_service.bat не найден')
+            QMessageBox.warning(self, self.t('Settings'), 'update_service.bat не найден')
             return
-        subprocess.Popen(
-            ['cmd.exe', '/c', script],
-            creationflags=subprocess.CREATE_NEW_CONSOLE
-        )
+        subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE)
 
     def closeEvent(self, event):
         self.save_settings()
@@ -220,8 +227,6 @@ class MainWindow(QWidget):
     def __init__(self, settings):
         super().__init__()
         self.settings = settings
-
-        # загружаем настройки
         self.lang = settings.value('lang', 'ru')
         self.autostart = settings.value('autostart', False, type=bool)
         self.minimized = settings.value('minimized', False, type=bool)
@@ -239,6 +244,23 @@ class MainWindow(QWidget):
         else:
             self.show()
 
+    def open_instruction(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Инструкция")
+        dialog.setFixedSize(400, 300)
+        dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowType.WindowMaximizeButtonHint)
+        layout = QVBoxLayout(dialog)
+
+        label1 = QLabel("1. Выберите из выпадающего списка профиль настроек, по умолчанию это General", dialog)
+        label1.setWordWrap(True)
+        layout.addWidget(label1)
+
+        label2 = QLabel("2. Нажмите на большую зелёную кнопку, после чего обход блокировок будет запущен.", dialog)
+        label2.setWordWrap(True)
+        layout.addWidget(label2)
+
+        dialog.exec()
+
     def t(self, key, *args):
         return translations[self.lang].get(key, key).format(*args)
 
@@ -248,36 +270,67 @@ class MainWindow(QWidget):
         self.retranslate_ui()
 
     def init_ui(self):
-        self.setFixedSize(300, 300)
+        self.setFixedSize(300, 320)
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         layout.setContentsMargins(12, 12, 12, 12)
 
-        # статус
         self.status_lbl = QLabel()
         self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.status_lbl)
 
-        # кнопка запуска .bat
-        self.toggle_btn = QPushButton(); self.toggle_btn.setFixedSize(60,60)
+        self.toggle_btn = QPushButton()
         self.toggle_btn.setCheckable(True)
+        self.toggle_btn.setFixedSize(100, 100)
+
+        # Кастомная иконка
+        icon_path = os.path.join(os.path.dirname(__file__), 'flags', 'toggle.ico')
+        if os.path.exists(icon_path):
+            icon = QIcon(icon_path)
+        else:
+            icon = QIcon.fromTheme("media-playback-start")
+        self.toggle_btn.setIcon(icon)
+        self.toggle_btn.setIconSize(QSize(48, 48))
+
+        # Стиль кнопки (центр + круглая + без смещений)
+        self.toggle_btn.setStyleSheet("""
+            QPushButton {
+                border: 2px solid #ffffff;
+                border-radius: 50px;
+                background-color: green;
+                padding-left: 7px;
+                padding-right: 0px;
+            }
+            QPushButton::icon {
+                alignment: center;
+            }
+        """)
+        self.toggle_btn.setContentsMargins(0, 0, 0, 0)
+
         self.toggle_btn.clicked.connect(self.on_toggle)
-        hl = QHBoxLayout(); hl.addStretch(); hl.addWidget(self.toggle_btn); hl.addStretch()
+        hl = QHBoxLayout();
+        hl.addStretch();
+        hl.addWidget(self.toggle_btn);
+        hl.addStretch()
         layout.addLayout(hl)
 
-        # выбор пресета
         self.cb = QComboBox()
         self.reload_presets()
         self.cb.setCurrentText(self.last_profile)
         self.cb.currentTextChanged.connect(lambda t: self.settings.setValue('last_profile', t))
         layout.addWidget(self.cb)
 
-        # кнопка настроек
-        self.settings_btn = QPushButton(); self.settings_btn.setFixedHeight(30)
+        self.settings_btn = QPushButton()
+        self.settings_btn.setFixedHeight(30)
         self.settings_btn.clicked.connect(self.open_settings)
         layout.addWidget(self.settings_btn)
 
-        # powered by
+        # Кнопка "Инструкция"
+        self.instruction_btn = QPushButton("Инструкция")
+        self.instruction_btn.setFixedHeight(30)
+        self.instruction_btn.clicked.connect(self.open_instruction)
+        layout.addWidget(self.instruction_btn)
+
         self.powered_lbl = QLabel(
             '<span style="color:white;">Powered by </span>'
             '<span style="color:green;">Medvedeff</span>'
@@ -286,31 +339,17 @@ class MainWindow(QWidget):
         )
         self.powered_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.powered_lbl)
-        # --- Настройка кнопки запуска по умолчанию ---
-        self.toggle_btn.setFixedSize(80, 80)
-        self.toggle_btn.setIcon(QIcon.fromTheme("media-playback-start"))
-        self.toggle_btn.setIconSize(QSize(40, 40))
+
+        # Мигание
         self.blink_on = False
-
-        def blink_init():
-            color = "#ffffff" if self.blink_on else "#222222"
-            self.toggle_btn.setStyleSheet(f"""
-                QPushButton {{
-                    border: 2px solid {color};
-                    border-radius: 40px;
-                    background-color: green;
-                }}
-            """)
-            self.blink_on = not self.blink_on
-
         self.blink_timer = QTimer(self)
-        self.blink_timer.timeout.connect(blink_init)
+        self.blink_timer.timeout.connect(self.update_blink)
         self.blink_timer.start(800)
 
     def reload_presets(self):
-        self.presets = {'General':'general.bat','Discord':'discord.bat'}
+        self.presets = {'General': 'general.bat', 'Discord': 'discord.bat'}
         for fn in sorted(os.listdir(self.core_dir)):
-            if fn.lower().endswith('.bat') and fn not in ('general.bat','discord.bat','service.bat'):
+            if fn.lower().endswith('.bat') and fn not in ('general.bat', 'discord.bat', 'service.bat'):
                 self.presets[os.path.splitext(fn)[0]] = fn
         self.cb.clear()
         self.cb.addItems(self.presets.keys())
@@ -319,65 +358,44 @@ class MainWindow(QWidget):
         self.setWindowTitle('Zapret GUI')
         if self.toggle_btn.isChecked():
             self.status_lbl.setText(self.t('On: {}', self.cb.currentText()))
-            self.toggle_btn.setStyleSheet("border-radius:30px; background-color:red;")
         else:
             self.status_lbl.setText(self.t('Off'))
-            self.toggle_btn.setStyleSheet("border-radius:30px; background-color:green;")
         self.settings_btn.setText(self.t('Settings'))
+
+
+    def update_blink(self):
+        color = "#ffffff" if self.blink_on else "#222222"
+        bg_color = "red" if self.toggle_btn.isChecked() else "green"
+        self.toggle_btn.setStyleSheet(f"""
+            QPushButton {{
+                border: 2px solid {color};
+                border-radius: 50px;
+                background-color: {bg_color};
+                padding-left: 7px;
+                padding-right: 0px;
+            }}
+        """)
+        self.blink_on = not self.blink_on
 
     def on_toggle(self, checked):
         profile = self.cb.currentText()
         self.settings.setValue('last_profile', profile)
         script = os.path.join(self.core_dir, self.presets[profile])
-
         if not os.path.exists(script):
             QMessageBox.warning(self, "Ошибка", f"Не найден файл:\n{script}")
             self.toggle_btn.setChecked(False)
             return
 
-        # Функция мигания
-        def blink():
-            color = "#ffffff" if self.blink_on else "#222222"
-            bg_color = "red" if self.toggle_btn.isChecked() else "green"
-            self.toggle_btn.setStyleSheet(f"""
-                QPushButton {{
-                    border: 2px solid {color};
-                    border-radius: 40px;
-                    background-color: {bg_color};
-                }}
-            """)
-            self.blink_on = not self.blink_on
-
         if checked:
-            # Запуск батника
-            self.process = subprocess.Popen(
-                ["cmd.exe", "/c", script],
-                creationflags=subprocess.CREATE_NEW_CONSOLE
-            )
+            self.process = subprocess.Popen(["cmd.exe", "/c", script], creationflags=subprocess.CREATE_NEW_CONSOLE)
             self.status_lbl.setText(self.t('On: {}', profile))
         else:
-            # Завершение процесса (по названию окна)
             os.system(f'taskkill /FI "WINDOWTITLE eq zapret: {profile}" /T /F')
             self.status_lbl.setText(self.t('Off'))
-
-        # Всегда устанавливаем нужные параметры кнопки
-        self.toggle_btn.setFixedSize(80, 80)
-        self.toggle_btn.setIcon(QIcon.fromTheme("media-playback-start"))
-        self.toggle_btn.setIconSize(QSize(40, 40))
-        self.blink_on = False
-
-        # Перезапускаем мигание
-        if hasattr(self, 'blink_timer') and self.blink_timer.isActive():
-            self.blink_timer.stop()
-
-        self.blink_timer = QTimer(self)
-        self.blink_timer.timeout.connect(blink)
-        self.blink_timer.start(800)
 
     def open_settings(self):
         dlg = SettingsDialog(self, self.settings)
         dlg.exec()
-        # после — только автозапуск
         self.autostart = self.settings.value('autostart', False, type=bool)
         self.set_autostart(self.autostart)
 
@@ -391,8 +409,10 @@ class MainWindow(QWidget):
             if enable:
                 winreg.SetValueEx(reg, name, 0, winreg.REG_SZ, f'"{exe}"')
             else:
-                try: winreg.DeleteValue(reg, name)
-                except FileNotFoundError: pass
+                try:
+                    winreg.DeleteValue(reg, name)
+                except FileNotFoundError:
+                    pass
             winreg.CloseKey(reg)
         except Exception as e:
             print("Autostart error:", e)
