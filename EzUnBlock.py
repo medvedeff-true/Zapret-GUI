@@ -81,7 +81,6 @@ class SettingsDialog(QDialog):
         layout.setSpacing(8)
         layout.setContentsMargins(12, 12, 12, 12)
 
-        # Языковые кнопки
         hl = QHBoxLayout();
         hl.addStretch()
         flag_dir = os.path.join(os.path.dirname(__file__), 'flags')
@@ -98,7 +97,6 @@ class SettingsDialog(QDialog):
         hl.addStretch()
         layout.addLayout(hl)
 
-        # Чекбоксы
         cb_layout = QHBoxLayout()
         self.autostart_cb = QCheckBox()
         self.minimized_cb = QCheckBox()
@@ -107,16 +105,13 @@ class SettingsDialog(QDialog):
         cb_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addLayout(cb_layout)
 
-        # Кнопка сервисного режима
         self.svc_btn = QPushButton()
         self.svc_btn.setFixedHeight(30)
         self.svc_btn.clicked.connect(self.on_service_mode)
         layout.addWidget(self.svc_btn)
 
-        # Кнопки установки/удаления
         btn_layout = QHBoxLayout()
 
-        # Кнопка General
         self.install_general_btn = QPushButton("Установить сервис\nGeneral")
         self.install_general_btn.setFixedHeight(50)
         self.install_general_btn.setStyleSheet("""
@@ -128,7 +123,6 @@ class SettingsDialog(QDialog):
         self.install_general_btn.clicked.connect(self.install_service)
         btn_layout.addWidget(self.install_general_btn)
 
-        # Кнопка удалить
         self.remove_btn = QPushButton("Удалить сервисы")
         self.remove_btn.setFixedHeight(50)
         self.remove_btn.setStyleSheet("""
@@ -140,7 +134,6 @@ class SettingsDialog(QDialog):
         self.remove_btn.clicked.connect(self.remove_service)
         btn_layout.addWidget(self.remove_btn)
 
-        # Кнопка Discord
         self.install_discord_btn = QPushButton("Установить сервис\nDiscord")
         self.install_discord_btn.setFixedHeight(50)
         self.install_discord_btn.setStyleSheet("""
@@ -154,13 +147,11 @@ class SettingsDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
-        # Кнопка обновления
         self.update_btn = QPushButton()
         self.update_btn.setFixedHeight(30)
         self.update_btn.clicked.connect(self.check_updates)
         layout.addWidget(self.update_btn)
 
-        # Подпись
         self.about_label = QLabel()
         self.about_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.about_label.setTextFormat(Qt.TextFormat.RichText)
@@ -304,7 +295,6 @@ class MainWindow(QWidget):
         self.toggle_btn.setCheckable(True)
         self.toggle_btn.setFixedSize(100, 100)
 
-        # Кастомная иконка
         icon_path = os.path.join(os.path.dirname(__file__), 'flags', 'toggle.ico')
         if os.path.exists(icon_path):
             icon = QIcon(icon_path)
@@ -313,7 +303,6 @@ class MainWindow(QWidget):
         self.toggle_btn.setIcon(icon)
         self.toggle_btn.setIconSize(QSize(48, 48))
 
-        # Стиль кнопки (центр + круглая + без смещений)
         self.toggle_btn.setStyleSheet("""
             QPushButton {
                 border: 2px solid #ffffff;
@@ -346,7 +335,6 @@ class MainWindow(QWidget):
         self.settings_btn.clicked.connect(self.open_settings)
         layout.addWidget(self.settings_btn)
 
-        # Кнопка "Инструкция"
         self.instruction_btn = QPushButton("Инструкция")
         self.instruction_btn.setFixedHeight(30)
         self.instruction_btn.clicked.connect(self.open_instruction)
