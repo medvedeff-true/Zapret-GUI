@@ -8,8 +8,9 @@ from PyQt6.QtCore import Qt, QSettings, QSize, QTimer
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QComboBox, QDialog, QCheckBox, QMessageBox
+    QPushButton, QLabel, QComboBox, QDialog, QCheckBox, QMessageBox, QSizePolicy
 )
+from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextBrowser
 
 APP_DIR = os.path.join(os.path.expanduser('~'), 'Zapret Gui')
 os.makedirs(APP_DIR, exist_ok=True)
@@ -27,6 +28,14 @@ translations = {
         'About:': 'Подробнее:',
         'Off': 'Выключен',
         'On: {}': 'Включён: {}',
+        'Instruction': 'Инструкция',
+        'Instruction Text': """
+        <b>1.</b> Выберите из выпадающего списка профиль настроек, затем нажмите на <span style="color:green;"><b>большую зелёную кнопку</b></span>, после чего обход блокировок будет запущен. <i>(По умолчанию используется профиль General).</i><br><br>
+        <b>2.</b> Если выбранный профиль не сработал — выключите обход, нажав на <span style="color:red;"><b>красную кнопку</b></span>, выберите другой профиль и снова включите. Повторяйте, пока не найдёте рабочий.<br><br>
+        <b>3.</b> В разделе <b>«Настройки»</b> можно установить службу General или Discord. Это означает, что вместо обычного окна запустится служба Windows, работающая в фоне. 
+        Но работа служб <i>зависит от провайдера</i>. Если сайты не открываются — удалите службу кнопкой «Удалить сервисы».<br><br>
+        <span style="color:#cc0000;"><b>4. ПРИМЕЧАНИЕ:</b> Для обхода блокировки Discord <u>используйте только</u> профиль или службу Discord. Остальные профили не помогут.</span>
+        """,
     },
     'en': {
         'Settings': 'Settings',
@@ -39,6 +48,15 @@ translations = {
         'About:': 'About:',
         'Off': 'Off',
         'On: {}': 'On: {}',
+        'Instruction': 'Instruction',
+        'Instruction Text': """
+        <b>1.</b> Select a profile from the dropdown list, then click the <span style="color:green;"><b>large green button</b></span> to start bypassing blocks. <i>(Default profile is General).</i><br><br>
+        <b>2.</b> If the selected profile doesn't work, turn it off with the <span style="color:red;"><b>red button</b></span>, select another one and try again. Repeat until one works.<br><br>
+        <b>3.</b> In the <b>“Settings”</b> tab you can install either the General or Discord service. This launches a Windows service in the background instead of the console. 
+        But service functionality <i>depends on your provider</i>. If it doesn’t help — uninstall the service using the appropriate button.<br><br>
+        <span style="color:#cc0000;"><b>4. NOTE:</b> To unblock Discord, <u>only use</u> the Discord profile or service. Other profiles won't work.</span>
+        """
+
     }
 }
 
@@ -244,22 +262,25 @@ class MainWindow(QWidget):
         else:
             self.show()
 
+    from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextBrowser
+
     def open_instruction(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle("Инструкция")
-        dialog.setFixedSize(400, 300)
+        dialog.setWindowTitle(self.t('Instruction'))
+        dialog.setFixedSize(400, 410)
         dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowType.WindowMaximizeButtonHint)
+        dialog.setModal(False)
+
         layout = QVBoxLayout(dialog)
 
-        label1 = QLabel("1. Выберите из выпадающего списка профиль настроек, по умолчанию это General", dialog)
-        label1.setWordWrap(True)
-        layout.addWidget(label1)
+        browser = QTextBrowser(dialog)
+        browser.setHtml(
+            f"<html><body style='font-family:Segoe UI; font-size:10.5pt'>{self.t('Instruction Text')}</body></html>")
+        browser.setOpenExternalLinks(True)
+        browser.setStyleSheet("border: none; background: transparent;")
+        layout.addWidget(browser)
 
-        label2 = QLabel("2. Нажмите на большую зелёную кнопку, после чего обход блокировок будет запущен.", dialog)
-        label2.setWordWrap(True)
-        layout.addWidget(label2)
-
-        dialog.exec()
+        dialog.show()
 
     def t(self, key, *args):
         return translations[self.lang].get(key, key).format(*args)
@@ -361,7 +382,7 @@ class MainWindow(QWidget):
         else:
             self.status_lbl.setText(self.t('Off'))
         self.settings_btn.setText(self.t('Settings'))
-
+        self.instruction_btn.setText(self.t('Instruction'))
 
     def update_blink(self):
         color = "#ffffff" if self.blink_on else "#222222"
@@ -422,6 +443,9 @@ def main():
     app = QApplication(sys.argv)
     settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
     win = MainWindow(settings)
+    icon_path = os.path.join(os.path.dirname(__file__), 'flags', 'z.ico')
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
     sys.exit(app.exec())
 
 if __name__ == '__main__':

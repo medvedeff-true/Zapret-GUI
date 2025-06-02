@@ -10,7 +10,7 @@ net session >nul 2>&1 || (
 
 :: —————————————————————————————————————————————————————
 echo.
-echo [*] Попытка остановить и удалить службы zapret и zapret_discord...
+echo [*] Trying to remove services: zapret and zapret_discord...
 
 :: Остановка и удаление службы zapret
 sc stop zapret >nul 2>&1
