@@ -1,6 +1,9 @@
+## [Русский](#русский) | [English](#english)
+
+## Русский
 # Zapret GUI
 
-**Zapret GUI** — это простая графическая оболочка для обхода интернет-блокировок с помощью Утилиты Zapret [Оригинальное приложение](https://github.com/Flowseal/zapret-discord-youtube).  
+**Zapret GUI** — это простая графическая оболочка для обхода интернет-блокировок с помощью Утилиты Zapret ([Оригинальное приложение](https://github.com/Flowseal/zapret-discord-youtube)).  
 Создано на Python + PyQt6.
 
 ![preview](https://github.com/user-attachments/assets/666ce6e0-3428-4d58-bdf8-25aa43b45f57)
@@ -40,9 +43,26 @@
 
 ---
 
-## ⚠️⚠️⚠️
+## 🌐 Оригинальные репозитории
 
+### 1. [Zapret](https://github.com/bol-van/zapret)
+### 2. [zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube)
+### 3. [Winsw](https://github.com/winsw/winsw)
 
+---
+
+### ⚠️В случае введения юридических или технических ограничений со стороны провайдеров или государственных органов, автор не несёт ответственности за последствия использования этой утилиты. Скачивая приложение, Вы соглашаетесь с этим.
+
+---
+
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+
+## English
 # Zapret GUI
 
 **Zapret GUI** is a simple graphical interface for bypassing internet restrictions using pre-configured profiles (like `General`, `Discord`, etc.).  
@@ -85,5 +105,13 @@ No installation required. Just:
 
 ---
 
-## ⚠️⚠️⚠️
+## 🌐 Original repositories
+
+### 1. [Zapret](https://github.com/bol-van/zapret)
+### 2. [zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube)
+### 3. [Winsw](https://github.com/winsw/winsw)
+
+---
+
+### ⚠️In case of legal or technical restrictions imposed by providers or governmental authorities, the author is not responsible for the consequences of using this utility. By downloading the application, you agree to this. 
 
