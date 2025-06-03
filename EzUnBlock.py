@@ -386,6 +386,20 @@ class MainWindow(QWidget):
         """)
         self.blink_on = not self.blink_on
 
+    def is_winws_running(self):
+        """
+        Проверяет через tasklist, запущен ли процесс winws.exe
+        """
+        try:
+            output = subprocess.check_output(
+                'tasklist /FI "IMAGENAME eq winws.exe" /NH',
+                shell=True,
+                text=True
+            )
+            return "winws.exe" in output.lower()
+        except Exception:
+            return False
+
     def on_toggle(self, checked):
         profile = self.cb.currentText()
         self.settings.setValue('last_profile', profile)
@@ -396,10 +410,16 @@ class MainWindow(QWidget):
             return
 
         if checked:
-            self.process = subprocess.Popen(["cmd.exe", "/c", script], creationflags=subprocess.CREATE_NEW_CONSOLE)
+            # Запустить .bat, который поднимет winws.exe
+            self.process = subprocess.Popen(
+                ["cmd.exe", "/c", script],
+                creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
+            )
             self.status_lbl.setText(self.t('On: {}', profile))
         else:
-            os.system(f'taskkill /FI "WINDOWTITLE eq zapret: {profile}" /T /F')
+            # Остановить все экземпляры winws.exe
+            os.system('taskkill /IM winws.exe /F')
+            self.process = None
             self.status_lbl.setText(self.t('Off'))
 
     def open_settings(self):
@@ -425,6 +445,43 @@ class MainWindow(QWidget):
             winreg.CloseKey(reg)
         except Exception as e:
             print("Autostart error:", e)
+
+    def closeEvent(self, event):
+        # Если найден winws.exe, значит обход запущен
+        if self.is_winws_running():
+            title = "Выход из программы" if self.lang == 'ru' else "Exit"
+            text = (
+                "Обход сейчас активен. Вы хотите завершить его и выйти?"
+                if self.lang == 'ru'
+                else "Bypass is currently running. Do you want to stop it and exit?"
+            )
+
+            # Создаём QMessageBox вручную, чтобы задать свои подписи кнопок
+            msg = QMessageBox(self)
+            msg.setWindowTitle(title)
+            msg.setText(text)
+            msg.setIcon(QMessageBox.Icon.Warning)
+
+            # Добавляем две кнопки с нужными надписями
+            if self.lang == 'ru':
+                btn_yes = msg.addButton("Да", QMessageBox.ButtonRole.YesRole)
+                btn_no = msg.addButton("Нет", QMessageBox.ButtonRole.NoRole)
+            else:
+                btn_yes = msg.addButton("Yes", QMessageBox.ButtonRole.YesRole)
+                btn_no = msg.addButton("No", QMessageBox.ButtonRole.NoRole)
+
+            msg.exec()  # отображаем диалог
+
+            # Проверяем, какую кнопку нажали
+            if msg.clickedButton() == btn_yes:
+                # Если пользователь согласился — убиваем все winws.exe и закрываем
+                os.system('taskkill /IM winws.exe /F')
+                event.accept()
+            else:
+                # Иначе — отменяем закрытие
+                event.ignore()
+        else:
+            event.accept()
 
 
 def main():
