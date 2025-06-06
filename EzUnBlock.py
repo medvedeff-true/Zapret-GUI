@@ -1,16 +1,15 @@
-﻿#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
+﻿
 import sys
 import os
 import subprocess
 from PyQt6.QtCore import Qt, QSettings, QSize, QTimer
-from PyQt6.QtGui import QIcon, QPixmap
+from PyQt6.QtGui import QIcon, QPixmap, QAction
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QComboBox, QDialog, QCheckBox, QMessageBox, QSizePolicy
+    QPushButton, QLabel, QComboBox, QDialog, QCheckBox, QMessageBox, QSizePolicy,
+    QSystemTrayIcon, QMenu, QTextBrowser
 )
-from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextBrowser
+
 
 APP_DIR = os.path.join(os.path.expanduser('~'), 'Zapret Gui')
 os.makedirs(APP_DIR, exist_ok=True)
@@ -36,6 +35,12 @@ translations = {
         Но работа служб <i>зависит от провайдера</i>. Если сайты не открываются — удалите службу кнопкой «Удалить сервисы».<br><br>
         <span style="color:#cc0000;"><b>4. ПРИМЕЧАНИЕ:</b> Для обхода блокировки Discord <u>используйте только</u> профиль или службу Discord. Остальные профили не помогут.</span>
         """,
+        'Enable bypass': 'Включить обход',
+        'Disable bypass': 'Выключить обход',
+        'Select profile': 'Выбрать конфиг',
+        'Exit': 'Выход',
+        'Open': 'Открыть',
+        'Minimize to tray': 'Свернуть в трей',
     },
     'en': {
         'Settings': 'Settings',
@@ -55,8 +60,13 @@ translations = {
         <b>3.</b> In the <b>“Settings”</b> tab you can install either the General or Discord service. This launches a Windows service in the background instead of the console. 
         But service functionality <i>depends on your provider</i>. If it doesn’t help — uninstall the service using the appropriate button.<br><br>
         <span style="color:#cc0000;"><b>4. NOTE:</b> To unblock Discord, <u>only use</u> the Discord profile or service. Other profiles won't work.</span>
-        """
-
+        """,
+        'Enable bypass': 'Enable bypass',
+        'Disable bypass': 'Disable bypass',
+        'Select profile': 'Select profile',
+        'Exit': 'Exit',
+        'Open': 'Open',
+        'Minimize to tray': 'Minimize to tray',
     }
 }
 
@@ -183,8 +193,6 @@ class SettingsDialog(QDialog):
         )
 
     def change_lang(self, lang_code):
-        if lang_code == self.lang:
-            return
         self.lang = lang_code
         self.settings.setValue('lang', lang_code)
         self.retranslate_ui()
@@ -231,7 +239,6 @@ class SettingsDialog(QDialog):
         self.save_settings()
         super().closeEvent(event)
 
-
 class MainWindow(QWidget):
     def __init__(self, settings):
         super().__init__()
@@ -242,18 +249,219 @@ class MainWindow(QWidget):
         self.last_profile = settings.value('last_profile', 'General')
 
         self.core_dir = os.path.join(os.path.dirname(__file__), 'core')
+        self.patch_bat_files()
+        self.unblock_executables()
         self.presets = {}
         self.process = None
 
         self.init_ui()
         self.retranslate_ui()
         self.set_autostart(self.autostart)
+        self.init_tray_icon()
         if self.minimized:
-            self.showMinimized()
+            self.hide()
         else:
             self.show()
 
-    from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextBrowser
+    def init_tray_icon(self):
+        tray_icon_path = os.path.join(os.path.dirname(__file__), 'flags', 'z.ico')
+        self.tray = QSystemTrayIcon(QIcon(tray_icon_path), self)
+
+        self.tray_menu = QMenu()
+        self.action_open = QAction(self.t('Open'), self)
+        self.action_open.triggered.connect(self.showNormal)
+        self.tray_menu.addAction(self.action_open)
+        self.tray_menu.addSeparator()
+        self.action_start = QAction(self.t('Enable bypass'), self)
+        self.action_start.triggered.connect(lambda: self.toggle_tray(True))
+        self.tray_menu.addAction(self.action_start)
+        self.action_stop = QAction(self.t('Disable bypass'), self)
+        self.action_stop.triggered.connect(lambda: self.toggle_tray(False))
+        self.tray_menu.addAction(self.action_stop)
+        self.tray_menu.addSeparator()
+        self.preset_menu = QMenu(self.t('Select profile'), self)
+        self.tray_menu.addMenu(self.preset_menu)
+        self.tray_menu.addSeparator()
+        self.exit_action = QAction(self.t('Exit'), self)
+        self.exit_action.triggered.connect(self.tray_exit)
+        self.tray_menu.addAction(self.exit_action)
+        self.tray.setContextMenu(self.tray_menu)
+        self.tray.activated.connect(self.on_tray_activated)
+        self.tray.show()
+        self.update_tray_presets()
+        self.update_tray_status()
+
+    def retranslate_tray(self):
+        self.action_open.setText(self.t('Open'))
+        self.action_start.setText(self.t('Enable bypass'))
+        self.action_stop.setText(self.t('Disable bypass'))
+        self.preset_menu.setTitle(self.t('Select profile'))
+        self.exit_action.setText(self.t('Exit'))
+        self.tray_btn.setToolTip(self.t('Minimize to tray'))
+
+    def update_tray_status(self):
+        running = self.toggle_btn.isChecked()
+        self.action_start.setEnabled(not running)
+        self.action_stop.setEnabled(running)
+        self.tray.setToolTip(self.get_tray_tooltip())
+        self.update_tray_presets()
+
+    def get_tray_tooltip(self):
+        if hasattr(self, 'toggle_btn') and self.toggle_btn.isChecked():
+            return self.t('On: {}', self.cb.currentText())
+        return self.t('Off')
+
+    def on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self.showNormal()
+            self.activateWindow()
+
+    def update_tray_presets(self):
+        self.preset_menu.clear()
+        current = self.cb.currentText()
+        for name in self.presets:
+            action = QAction(name, self)
+            action.setCheckable(True)
+            action.setChecked(name == current)
+            action.triggered.connect(lambda _, n=name: self.select_preset_from_tray(n))
+            self.preset_menu.addAction(action)
+
+    def select_preset_from_tray(self, name):
+        self.cb.blockSignals(True)
+        self.cb.setCurrentText(name)
+        self.cb.blockSignals(False)
+        self.on_profile_changed(name)
+
+    def toggle_tray(self, state: bool):
+        if self.toggle_btn.isChecked() != state:
+            self.toggle_btn.setChecked(state)
+            self.on_toggle(state)
+        self.update_tray_status()
+
+    def tray_exit(self):
+        if self.is_winws_running():
+            title = self.t('Exit')
+            text = (
+                "Обход сейчас активен. Вы хотите завершить его и выйти?"
+                if self.lang == 'ru'
+                else "Bypass is currently running. Do you want to stop it and exit?"
+            )
+            msg = QMessageBox(self)
+            msg.setWindowTitle(title)
+            msg.setText(text)
+            msg.setIcon(QMessageBox.Icon.Warning)
+
+            if self.lang == 'ru':
+                btn_yes = msg.addButton("Да", QMessageBox.ButtonRole.YesRole)
+                btn_no = msg.addButton("Нет", QMessageBox.ButtonRole.NoRole)
+            else:
+                btn_yes = msg.addButton("Yes", QMessageBox.ButtonRole.YesRole)
+                btn_no = msg.addButton("No", QMessageBox.ButtonRole.NoRole)
+
+            msg.exec()
+            if msg.clickedButton() == btn_yes:
+                os.system('taskkill /IM winws.exe /F')
+                QApplication.instance().quit()
+            return
+        QApplication.instance().quit()
+
+    def reload_presets(self):
+        self.presets = {'General': 'general.bat', 'Discord': 'discord.bat'}
+        for fn in sorted(os.listdir(self.core_dir)):
+            if fn.lower().endswith('.bat') and fn not in (
+                'general.bat', 'discord.bat', 'service.bat', 'cloudflare_switch.bat'
+            ):
+                self.presets[os.path.splitext(fn)[0]] = fn
+
+        self.cb.blockSignals(True)
+        self.cb.clear()
+        self.cb.addItems(self.presets.keys())
+        self.cb.setCurrentText(self.settings.value('last_profile', 'General'))
+        self.cb.blockSignals(False)
+
+        self.cb.currentTextChanged.connect(self.on_profile_changed)
+        self.update_tray_presets()
+        self.update_tray_status()
+
+    def on_profile_changed(self, text):
+        self.settings.setValue('last_profile', text)
+        self.update_tray_status()
+
+
+    def unblock_executables(self):
+        bin_dir = os.path.join(self.core_dir, 'bin')
+        if not os.path.exists(bin_dir):
+            return
+
+        for file in os.listdir(bin_dir):
+            if file.lower().endswith('.exe'):
+                exe_path = os.path.join(bin_dir, file)
+                try:
+                    subprocess.run([
+                        "powershell", "-Command",
+                        f"if (Test-Path '{exe_path}') {{ Unblock-File -Path '{exe_path}' }}"
+                    ], check=True)
+                    print(f"Unblocked: {exe_path}")
+                except Exception as e:
+                    print(f"Failed to unblock {exe_path}: {e}")
+
+    def patch_bat_files(self):
+        import re
+
+        skip_files = {'service.bat', 'install_service.bat', 'uninstall.bat', 'update_service.bat'}
+
+        for fn in os.listdir(self.core_dir):
+            if not fn.lower().endswith('.bat') or fn in skip_files:
+                continue
+
+            path = os.path.join(self.core_dir, fn)
+
+            with open(path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+
+            already_patched = any(
+                'Start-Process' in line and 'winws.exe' in line for line in lines
+            )
+            if already_patched:
+                continue
+
+            new_lines = []
+            in_winws = False
+            collected_args = []
+
+            for line in lines:
+                stripped = line.strip()
+                if 'winws.exe' in stripped:
+                    in_winws = True
+                    match = re.search(r'winws\.exe["\']?\s*(.*)', stripped)
+                    if match:
+                        arg = match.group(1).rstrip("^").strip()
+                        if arg:
+                            collected_args.append(arg)
+                    continue
+                elif in_winws:
+                    if stripped.startswith("--") or stripped.startswith("-"):
+                        collected_args.append(stripped.rstrip("^").strip())
+                        continue
+                    else:
+                        in_winws = False
+                new_lines.append(line)
+
+            if not collected_args:
+                continue
+
+            arg_string = " ".join(collected_args).replace('"', '`"')
+            ps_line = (
+                'powershell -WindowStyle Hidden -Command '
+                f'"Start-Process \\"%BIN%winws.exe\\" -ArgumentList \\"{arg_string}\\" -WindowStyle Hidden"\n'
+            )
+            new_lines.append(ps_line)
+
+
+            with open(path, 'w', encoding='utf-8') as f:
+                f.writelines(new_lines)
+
+            print(f'[+] Patched: {fn}')
 
     def open_instruction(self):
         dialog = QDialog(self)
@@ -280,6 +488,9 @@ class MainWindow(QWidget):
         self.lang = lang_code
         self.settings.setValue('lang', lang_code)
         self.retranslate_ui()
+        self.retranslate_tray()
+        self.update_tray_presets()
+        self.update_tray_status()
 
     def init_ui(self):
         self.setFixedSize(300, 320)
@@ -324,10 +535,24 @@ class MainWindow(QWidget):
         hl.addStretch()
         layout.addLayout(hl)
 
+        self.tray_btn = QPushButton()
+        self.tray_btn.setIcon(QIcon(os.path.join(os.path.dirname(__file__), 'flags', 'tray.ico')))
+        self.tray_btn.setIconSize(QSize(24, 24))
+        self.tray_btn.setToolTip(self.t('Minimize to tray'))
+        self.tray_btn.setFixedSize(28, 28)
+        self.tray_btn.setStyleSheet("border: none;")
+
+        self.tray_btn.clicked.connect(self.hide)
+
+        tray_layout = QHBoxLayout()
+        tray_layout.addStretch()
+        tray_layout.addWidget(self.tray_btn)
+        layout.addLayout(tray_layout)
+
         self.cb = QComboBox()
         self.reload_presets()
         self.cb.setCurrentText(self.last_profile)
-        self.cb.currentTextChanged.connect(lambda t: self.settings.setValue('last_profile', t))
+        self.cb.currentTextChanged.connect(self.on_profile_changed)
         layout.addWidget(self.cb)
 
         self.settings_btn = QPushButton()
@@ -387,9 +612,6 @@ class MainWindow(QWidget):
         self.blink_on = not self.blink_on
 
     def is_winws_running(self):
-        """
-        Проверяет через tasklist, запущен ли процесс winws.exe
-        """
         try:
             output = subprocess.check_output(
                 'tasklist /FI "IMAGENAME eq winws.exe" /NH',
@@ -410,17 +632,18 @@ class MainWindow(QWidget):
             return
 
         if checked:
-            # Запустить .bat, который поднимет winws.exe
             self.process = subprocess.Popen(
                 ["cmd.exe", "/c", script],
                 creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
             )
             self.status_lbl.setText(self.t('On: {}', profile))
         else:
-            # Остановить все экземпляры winws.exe
             os.system('taskkill /IM winws.exe /F')
             self.process = None
             self.status_lbl.setText(self.t('Off'))
+
+        self.retranslate_ui()
+        self.update_tray_status()
 
     def open_settings(self):
         dlg = SettingsDialog(self, self.settings)
@@ -447,7 +670,6 @@ class MainWindow(QWidget):
             print("Autostart error:", e)
 
     def closeEvent(self, event):
-        # Если найден winws.exe, значит обход запущен
         if self.is_winws_running():
             title = "Выход из программы" if self.lang == 'ru' else "Exit"
             text = (
@@ -456,13 +678,11 @@ class MainWindow(QWidget):
                 else "Bypass is currently running. Do you want to stop it and exit?"
             )
 
-            # Создаём QMessageBox вручную, чтобы задать свои подписи кнопок
             msg = QMessageBox(self)
             msg.setWindowTitle(title)
             msg.setText(text)
             msg.setIcon(QMessageBox.Icon.Warning)
 
-            # Добавляем две кнопки с нужными надписями
             if self.lang == 'ru':
                 btn_yes = msg.addButton("Да", QMessageBox.ButtonRole.YesRole)
                 btn_no = msg.addButton("Нет", QMessageBox.ButtonRole.NoRole)
@@ -470,19 +690,15 @@ class MainWindow(QWidget):
                 btn_yes = msg.addButton("Yes", QMessageBox.ButtonRole.YesRole)
                 btn_no = msg.addButton("No", QMessageBox.ButtonRole.NoRole)
 
-            msg.exec()  # отображаем диалог
+            msg.exec()
 
-            # Проверяем, какую кнопку нажали
             if msg.clickedButton() == btn_yes:
-                # Если пользователь согласился — убиваем все winws.exe и закрываем
                 os.system('taskkill /IM winws.exe /F')
                 event.accept()
             else:
-                # Иначе — отменяем закрытие
                 event.ignore()
         else:
             event.accept()
-
 
 def main():
     app = QApplication(sys.argv)
