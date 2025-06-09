@@ -9,6 +9,9 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QComboBox, QDialog, QCheckBox, QMessageBox, QSizePolicy,
     QSystemTrayIcon, QMenu, QTextBrowser
 )
+import atexit
+import shutil
+import ctypes
 
 
 APP_DIR = os.path.join(os.path.expanduser('~'), 'Zapret Gui')
@@ -20,20 +23,21 @@ translations = {
         'Settings': 'Настройки',
         'Autostart program': 'Автозапуск программы',
         'Start minimized': 'Запускать свернутым',
+        'Autostart profile': 'Профиль для автозагрузки',
         'Service mode': 'Сервисный режим',
         'Install Service': 'Установить сервис',
-        'Remove Services': 'Удалить сервисы',
-        'Check Updates': 'Проверить обновления',
+        'Remove Services': 'Сбросить соединения winws',
+        'Check Updates': 'Проверить обновления Zapret',
         'About:': 'Подробнее:',
         'Off': 'Выключен',
         'On: {}': 'Включён: {}',
         'Instruction': 'Инструкция',
         'Instruction Text': """
-        <b>1.</b> Выберите из выпадающего списка профиль настроек, затем нажмите на <span style="color:green;"><b>большую зелёную кнопку</b></span>, после чего обход блокировок будет запущен. <i>(По умолчанию используется профиль General).</i><br><br>
-        <b>2.</b> Если выбранный профиль не сработал — выключите обход, нажав на <span style="color:red;"><b>красную кнопку</b></span>, выберите другой профиль и снова включите. Повторяйте, пока не найдёте рабочий.<br><br>
-        <b>3.</b> В разделе <b>«Настройки»</b> можно установить службу General или Discord. Это означает, что вместо обычного окна запустится служба Windows, работающая в фоне. 
-        Но работа служб <i>зависит от провайдера</i>. Если сайты не открываются — удалите службу кнопкой «Удалить сервисы».<br><br>
-        <span style="color:#cc0000;"><b>4. ПРИМЕЧАНИЕ:</b> Для обхода блокировки Discord <u>используйте только</u> профиль или службу Discord. Остальные профили не помогут.</span>
+        <b>1.</b> Выберите из выпадающего списка <b>профиль настроек</b>, затем нажмите на <span style="color:green;"><b>большую зелёную кнопку</b></span>, чтобы запустить обход блокировок. <i>(По умолчанию используется профиль <b>General</b>).</i><br><br>
+        <b>2.</b> Если выбранный профиль не сработал — <span style="color:red;"><b>нажмите на красную кнопку</b></span> для отключения, выберите другой профиль и повторите запуск. Продолжайте, пока не найдёте рабочий вариант.<br><br>
+        <b>3.</b> При проблемах с запуском или остановкой обхода откройте раздел <b>«Настройки»</b> и нажмите кнопку <b>"Сбросить соединения winws"</b>. Дождитесь закрытия консоли. Если вместо <b>Success</b> появится ошибка — полностью перезапустите приложение и повторите. Это сбросит конфигурации подключения и позволит всё запустить заново.<br><br>
+        <b>4.</b> В разделе <b>«Настройки»</b> также можно включить <b>автоматический запуск обхода</b> при запуске программы. <u>Важно:</u> это работает только при включённой автозагрузке приложения. Отметьте <b>«Запускать вместе с системой»</b>, выберите нужный профиль — и при запуске Windows обход будет активен автоматически, в трее.<br><br>
+        <span style="color:#cc0000;"><b>5. ПРИМЕЧАНИЕ:</b> Для обхода блокировки <b>Discord</b> рекомендуется использовать профиль <b>Discord</b>. Однако в некоторых случаях профиль <b>General</b> также обеспечивает корректную работу как <b>YouTube</b>, так и <b>Discord</b>.</span>
         """,
         'Enable bypass': 'Включить обход',
         'Disable bypass': 'Выключить обход',
@@ -46,20 +50,21 @@ translations = {
         'Settings': 'Settings',
         'Autostart program': 'Autostart program',
         'Start minimized': 'Start minimized',
+        'Autostart profile': 'Autostart profile',
         'Service mode': 'Service mode',
         'Install Service': 'Install Service',
-        'Remove Service': 'Remove Services',
-        'Check Updates': 'Check Updates',
+        'Remove Services': 'Reset winws connections',
+        'Check Updates': 'Check Updates Zapret',
         'About:': 'About:',
         'Off': 'Off',
         'On: {}': 'On: {}',
         'Instruction': 'Instruction',
         'Instruction Text': """
-        <b>1.</b> Select a profile from the dropdown list, then click the <span style="color:green;"><b>large green button</b></span> to start bypassing blocks. <i>(Default profile is General).</i><br><br>
-        <b>2.</b> If the selected profile doesn't work, turn it off with the <span style="color:red;"><b>red button</b></span>, select another one and try again. Repeat until one works.<br><br>
-        <b>3.</b> In the <b>“Settings”</b> tab you can install either the General or Discord service. This launches a Windows service in the background instead of the console. 
-        But service functionality <i>depends on your provider</i>. If it doesn’t help — uninstall the service using the appropriate button.<br><br>
-        <span style="color:#cc0000;"><b>4. NOTE:</b> To unblock Discord, <u>only use</u> the Discord profile or service. Other profiles won't work.</span>
+        <b>1.</b> Select a <b>profile</b> from the dropdown list, then click the <span style="color:green;"><b>big green button</b></span> to start the bypass. <i>(By default, the <b>General</b> profile is used.)</i><br><br>  
+        <b>2.</b> If the selected profile doesn’t work — <span style="color:red;"><b>click the red button</b></span> to stop, choose another profile and try again. Repeat this process until you find one that works for you.<br><br>
+        <b>3.</b> If you experience issues with enabling or disabling the bypass, go to the <b>“Settings”</b> section and click <b>“Reset winws connections”</b>. Wait until the console closes. If an error appears instead of <b>Success</b>, fully restart the application and try again. This process resets all bypass connection settings and should restore proper functionality.<br><br>
+        <b>4.</b> In the <b>“Settings”</b> section, you can also enable <b>auto-start</b> for the bypass. <u>Note:</u> this only works if the app itself is enabled to auto-launch. Just check <b>“Run with system startup”</b>, choose your desired profile, and the bypass will automatically run in the system tray when Windows starts.<br><br>
+        <span style="color:#cc0000;"><b>5. NOTE:</b> For bypassing <b>Discord</b>, it is recommended to use the <b>Discord</b> profile. However, in some cases, the <b>General</b> profile works fine for both <b>YouTube</b> and <b>Discord</b>.</span>
         """,
         'Enable bypass': 'Enable bypass',
         'Disable bypass': 'Disable bypass',
@@ -80,7 +85,6 @@ class SettingsDialog(QDialog):
         self.load_settings()
         self.retranslate_ui()
 
-
     def t(self, key, *args):
         return translations[self.lang].get(key, key).format(*args)
 
@@ -91,7 +95,7 @@ class SettingsDialog(QDialog):
         layout.setSpacing(8)
         layout.setContentsMargins(12, 12, 12, 12)
 
-        hl = QHBoxLayout();
+        hl = QHBoxLayout()
         hl.addStretch()
         flag_dir = os.path.join(os.path.dirname(__file__), 'flags')
         for code in ('ru', 'en'):
@@ -99,7 +103,7 @@ class SettingsDialog(QDialog):
                 24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
             )
             btn = QPushButton()
-            btn.setIcon(QIcon(pix));
+            btn.setIcon(QIcon(pix))
             btn.setIconSize(QSize(24, 24))
             btn.setFixedSize(31, 31)
             btn.clicked.connect(lambda _, c=code: self.change_lang(c))
@@ -115,26 +119,32 @@ class SettingsDialog(QDialog):
         cb_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addLayout(cb_layout)
 
+        self.autostart_cb.toggled.connect(self.update_profile_autostart_ui)
+
+        self.autostart_profile_label = QLabel("Профиль для автозагрузки")
+        self.autostart_profile_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.autostart_profile_label)
+
+        profile_row = QHBoxLayout()
+        profile_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.profile_cb = QComboBox()
+        self.profile_cb.addItem(" ")  # default
+        self.profile_cb.currentIndexChanged.connect(self.on_autostart_profile_selected)
+        self.profile_enable_cb = QCheckBox()
+        self.profile_enable_cb.setEnabled(False)
+        profile_row.addWidget(self.profile_cb)
+        profile_row.addWidget(self.profile_enable_cb)
+        self.profile_enable_cb.setStyleSheet("padding-right: 4px;")
+        layout.addLayout(profile_row)
+
         self.svc_btn = QPushButton()
         self.svc_btn.setFixedHeight(30)
         self.svc_btn.clicked.connect(self.on_service_mode)
         layout.addWidget(self.svc_btn)
 
-        btn_layout = QHBoxLayout()
-
-        self.install_general_btn = QPushButton("Установить сервис\nGeneral")
-        self.install_general_btn.setFixedHeight(50)
-        self.install_general_btn.setStyleSheet("""
-            QPushButton {
-                border: 1px solid green;
-                border-radius: 4px;
-            }
-        """)
-        self.install_general_btn.clicked.connect(self.install_service)
-        btn_layout.addWidget(self.install_general_btn)
-
+        # 🔴 Оставляем только кнопку "Удалить сервисы"
         self.remove_btn = QPushButton("Удалить сервисы")
-        self.remove_btn.setFixedHeight(50)
+        self.remove_btn.setFixedHeight(30)  # тот же размер, что у других одиночных кнопок
         self.remove_btn.setStyleSheet("""
             QPushButton {
                 border: 1px solid red;
@@ -142,20 +152,7 @@ class SettingsDialog(QDialog):
             }
         """)
         self.remove_btn.clicked.connect(self.remove_service)
-        btn_layout.addWidget(self.remove_btn)
-
-        self.install_discord_btn = QPushButton("Установить сервис\nDiscord")
-        self.install_discord_btn.setFixedHeight(50)
-        self.install_discord_btn.setStyleSheet("""
-            QPushButton {
-                border: 1px solid green;
-                border-radius: 4px;
-            }
-        """)
-        self.install_discord_btn.clicked.connect(self.install_discord_service)
-        btn_layout.addWidget(self.install_discord_btn)
-
-        layout.addLayout(btn_layout)
+        layout.addWidget(self.remove_btn)
 
         self.update_btn = QPushButton()
         self.update_btn.setFixedHeight(30)
@@ -169,23 +166,40 @@ class SettingsDialog(QDialog):
         self.about_label.setOpenExternalLinks(True)
         layout.addWidget(self.about_label)
 
+    def update_profile_autostart_ui(self):
+        enabled = self.autostart_cb.isChecked()
+        self.autostart_profile_label.setEnabled(enabled)
+        self.profile_cb.setEnabled(enabled)
+        self.profile_enable_cb.setEnabled(enabled and self.profile_cb.currentText() != " ")
+
     def load_settings(self):
         self.autostart_cb.setChecked(self.settings.value('autostart', False, type=bool))
         self.minimized_cb.setChecked(self.settings.value('minimized', False, type=bool))
+        self.profile_cb.setCurrentText(self.settings.value('autostart_profile', ' '))
+        self.profile_enable_cb.setChecked(self.settings.value('autostart_profile_enabled', False, type=bool))
+        self.update_profile_autostart_ui()
+
+    def on_autostart_profile_selected(self):
+        selected = self.profile_cb.currentText()
+        enabled = selected != " "
+        self.profile_enable_cb.setChecked(enabled)
+        self.profile_enable_cb.setEnabled(False)
+
 
     def save_settings(self):
         self.settings.setValue('autostart', self.autostart_cb.isChecked())
         self.settings.setValue('minimized', self.minimized_cb.isChecked())
+        self.settings.setValue('autostart_profile', self.profile_cb.currentText())
+        self.settings.setValue('autostart_profile_enabled', self.profile_enable_cb.isChecked())
 
     def retranslate_ui(self):
         self.setWindowTitle(self.t('Settings'))
         self.autostart_cb.setText(self.t('Autostart program'))
         self.minimized_cb.setText(self.t('Start minimized'))
         self.svc_btn.setText(self.t('Service mode'))
-        self.install_general_btn.setText(self.t('Install Service') + "\nGeneral")
-        self.install_discord_btn.setText(self.t('Install Service') + "\nDiscord")
         self.remove_btn.setText(self.t('Remove Services'))
         self.update_btn.setText(self.t('Check Updates'))
+        self.autostart_profile_label.setText(self.t('Autostart profile'))
         self.about_label.setText(
             f'{self.t("About:")} '
             '<a href="https://zapret.org/" style="color:#3399ff;">Zapret</a> & '
@@ -203,7 +217,7 @@ class SettingsDialog(QDialog):
     def on_service_mode(self):
         script = os.path.join(os.path.dirname(__file__), 'core', 'service.bat')
         if os.path.exists(script):
-            subprocess.Popen([script], shell=True)
+            subprocess.Popen([script], shell=True, close_fds=True)
         else:
             QMessageBox.warning(self, self.t('Settings'), 'service.bat не найден')
 
@@ -212,28 +226,28 @@ class SettingsDialog(QDialog):
         if not os.path.exists(script):
             QMessageBox.warning(self, self.t('Settings'), 'install_service.bat не найден')
             return
-        subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE, close_fds=True)
 
     def install_discord_service(self):
         script = os.path.join(os.path.dirname(__file__), 'core', 'fast', 'install_discord_service.bat')
         if not os.path.exists(script):
             QMessageBox.warning(self, self.t('Settings'), 'install_discord_service.bat не найден')
             return
-        subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE, close_fds=True)
 
     def remove_service(self):
         script = os.path.join(os.path.dirname(__file__), 'core', 'fast', 'uninstall.bat')
         if not os.path.exists(script):
             QMessageBox.warning(self, self.t('Settings'), 'remove_service.bat не найден')
             return
-        subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE, close_fds=True)
 
     def check_updates(self):
         script = os.path.join(os.path.dirname(__file__), 'core', 'fast', 'update_service.bat')
         if not os.path.exists(script):
             QMessageBox.warning(self, self.t('Settings'), 'update_service.bat не найден')
             return
-        subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE, close_fds=True)
 
     def closeEvent(self, event):
         self.save_settings()
@@ -262,6 +276,14 @@ class MainWindow(QWidget):
             self.hide()
         else:
             self.show()
+
+        autostart_profile = settings.value('autostart_profile', ' ')
+        autostart_enabled = settings.value('autostart_profile_enabled', False, type=bool)
+
+        if self.autostart and autostart_enabled and autostart_profile in self.presets:
+            self.cb.setCurrentText(autostart_profile)
+            self.toggle_btn.setChecked(True)
+            QTimer.singleShot(1000, lambda: self.on_toggle(True))  # задержка на запуск
 
     def init_tray_icon(self):
         tray_icon_path = os.path.join(os.path.dirname(__file__), 'flags', 'z.ico')
@@ -466,7 +488,12 @@ class MainWindow(QWidget):
     def open_instruction(self):
         dialog = QDialog(self)
         dialog.setWindowTitle(self.t('Instruction'))
-        dialog.setFixedSize(400, 410)
+
+        if self.lang == 'ru':
+            dialog.setFixedSize(410, 590)
+        else:
+            dialog.setFixedSize(410, 490)
+
         dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowType.WindowMaximizeButtonHint)
         dialog.setModal(False)
 
@@ -634,7 +661,7 @@ class MainWindow(QWidget):
         if checked:
             self.process = subprocess.Popen(
                 ["cmd.exe", "/c", script],
-                creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
+                creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP, close_fds=True
             )
             self.status_lbl.setText(self.t('On: {}', profile))
         else:
@@ -647,6 +674,10 @@ class MainWindow(QWidget):
 
     def open_settings(self):
         dlg = SettingsDialog(self, self.settings)
+        dlg.profile_cb.clear()
+        dlg.profile_cb.addItem(" ")
+        dlg.profile_cb.addItems([p for p in self.presets if p != " "])
+        dlg.profile_cb.setCurrentText(self.settings.value('autostart_profile', ' '))
         dlg.exec()
         self.autostart = self.settings.value('autostart', False, type=bool)
         self.set_autostart(self.autostart)
@@ -700,7 +731,24 @@ class MainWindow(QWidget):
         else:
             event.accept()
 
+def cleanup_temp_meipass():
+    temp_dir = getattr(sys, '_MEIPASS', None)
+    if temp_dir and os.path.exists(temp_dir):
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception as e:
+            print("Temp cleanup failed:", e)
+
+def suppress_meipass_warning():
+    try:
+        if hasattr(sys, '_MEIPASS'):
+            ctypes.windll.kernel32.SetErrorMode(0x0002)  # SEM_NOGPFAULTERRORBOX
+    except Exception:
+        pass
+
 def main():
+    atexit.register(cleanup_temp_meipass)
+    suppress_meipass_warning()
     app = QApplication(sys.argv)
     settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
     win = MainWindow(settings)
