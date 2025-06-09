@@ -31,6 +31,7 @@ cmd = [
     f"--name={exe_name}",
     "--add-data=flags;flags",
     "--add-data=core;core",
+    "--version-file=version.txt",
     script_name
 ]
 
