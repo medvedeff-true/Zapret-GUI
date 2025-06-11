@@ -9,12 +9,32 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QComboBox, QDialog, QCheckBox, QMessageBox, QSizePolicy,
     QSystemTrayIcon, QMenu, QTextBrowser
 )
-import atexit
+import tempfile
 import shutil
 import ctypes
 
+def extract_files_from_meipass():
+    if hasattr(sys, '_MEIPASS'):
+        base_src = sys._MEIPASS
+    else:
+        base_src = os.path.dirname(__file__)
 
-APP_DIR = os.path.join(os.path.expanduser('~'), 'Zapret Gui')
+    for folder in ('core', 'flags'):
+        src_path = os.path.join(base_src, folder)
+        dst_path = os.path.join(APP_DIR, folder)
+
+        for root, dirs, files in os.walk(src_path):
+            rel = os.path.relpath(root, src_path)
+            target = os.path.join(dst_path, rel)
+            os.makedirs(target, exist_ok=True)
+
+            for f in files:
+                s = os.path.join(root, f)
+                d = os.path.join(target, f)
+                if not os.path.exists(d):
+                    shutil.copy2(s, d)
+
+APP_DIR = os.path.join(os.path.expanduser('~'), 'ZapretGUI')
 os.makedirs(APP_DIR, exist_ok=True)
 SETTINGS_FILE = os.path.join(APP_DIR, 'settings.ini')
 
@@ -97,7 +117,7 @@ class SettingsDialog(QDialog):
 
         hl = QHBoxLayout()
         hl.addStretch()
-        flag_dir = os.path.join(os.path.dirname(__file__), 'flags')
+        flag_dir = os.path.join(APP_DIR, 'flags')
         for code in ('ru', 'en'):
             pix = QPixmap(os.path.join(flag_dir, f'{code}.png')).scaled(
                 24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
@@ -142,9 +162,8 @@ class SettingsDialog(QDialog):
         self.svc_btn.clicked.connect(self.on_service_mode)
         layout.addWidget(self.svc_btn)
 
-        # 🔴 Оставляем только кнопку "Удалить сервисы"
         self.remove_btn = QPushButton("Удалить сервисы")
-        self.remove_btn.setFixedHeight(30)  # тот же размер, что у других одиночных кнопок
+        self.remove_btn.setFixedHeight(30)
         self.remove_btn.setStyleSheet("""
             QPushButton {
                 border: 1px solid red;
@@ -262,7 +281,7 @@ class MainWindow(QWidget):
         self.minimized = settings.value('minimized', False, type=bool)
         self.last_profile = settings.value('last_profile', 'General')
 
-        self.core_dir = os.path.join(os.path.dirname(__file__), 'core')
+        self.core_dir = os.path.join(APP_DIR, 'core')
         self.patch_bat_files()
         self.unblock_executables()
         self.presets = {}
@@ -283,11 +302,11 @@ class MainWindow(QWidget):
         if self.autostart and autostart_enabled and autostart_profile in self.presets:
             self.cb.setCurrentText(autostart_profile)
             self.toggle_btn.setChecked(True)
-            QTimer.singleShot(1000, lambda: self.on_toggle(True))  # задержка на запуск
+            QTimer.singleShot(1000, lambda: self.on_toggle(True))
 
     def init_tray_icon(self):
-        tray_icon_path = os.path.join(os.path.dirname(__file__), 'flags', 'z.ico')
-        self.tray = QSystemTrayIcon(QIcon(tray_icon_path), self)
+        icon_path = os.path.join(APP_DIR, 'flags', 'z.ico')
+        self.tray = QSystemTrayIcon(QIcon(icon_path), self)
 
         self.tray_menu = QMenu()
         self.action_open = QAction(self.t('Open'), self)
@@ -431,6 +450,9 @@ class MainWindow(QWidget):
         import re
 
         skip_files = {'service.bat', 'install_service.bat', 'uninstall.bat', 'update_service.bat'}
+        bin_dir = os.path.join(APP_DIR, 'core', 'bin') + '\\'
+        lists_dir = os.path.join(APP_DIR, 'core', 'lists') + '\\'
+        winws_exe = os.path.join(bin_dir, 'winws.exe')
 
         for fn in os.listdir(self.core_dir):
             if not fn.lower().endswith('.bat') or fn in skip_files:
@@ -438,47 +460,54 @@ class MainWindow(QWidget):
 
             path = os.path.join(self.core_dir, fn)
 
+            # Если файл уже пропатчен — пропускаем
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                if 'PATCHED_BY_GUI' in content:
+                    print(f'[=] Уже пропатчен: {fn}')
+                    continue
+
+            # Делаем резервную копию
+            backup_path = path + '.backup'
+            if not os.path.exists(backup_path):
+                shutil.copy2(path, backup_path)
+                print(f'[B] Создан бэкап: {backup_path}')
+
+            # Патчим файл
             with open(path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
 
-            already_patched = any(
-                'Start-Process' in line and 'winws.exe' in line for line in lines
-            )
-            if already_patched:
-                continue
-
             new_lines = []
-            in_winws = False
             collected_args = []
+            in_args = False
 
             for line in lines:
+                if re.match(r'^\s*set\s+"?BIN', line, re.IGNORECASE):
+                    new_lines.append(f'set "BIN={bin_dir}"\n')
+                    continue
+                if re.match(r'^\s*set\s+"?LISTS', line, re.IGNORECASE):
+                    new_lines.append(f'set "LISTS={lists_dir}"\n')
+                    continue
+
                 stripped = line.strip()
                 if 'winws.exe' in stripped:
-                    in_winws = True
-                    match = re.search(r'winws\.exe["\']?\s*(.*)', stripped)
-                    if match:
-                        arg = match.group(1).rstrip("^").strip()
-                        if arg:
-                            collected_args.append(arg)
+                    in_args = True
+                    m = re.search(r'winws\.exe["\']?\s*(.*)', stripped)
+                    if m and m.group(1).strip():
+                        collected_args.append(m.group(1).rstrip("^").strip())
                     continue
-                elif in_winws:
-                    if stripped.startswith("--") or stripped.startswith("-"):
-                        collected_args.append(stripped.rstrip("^").strip())
-                        continue
-                    else:
-                        in_winws = False
+                elif in_args and (stripped.startswith('-') or stripped.startswith('--')):
+                    collected_args.append(stripped.rstrip("^").strip())
+                    continue
+                else:
+                    in_args = False
+
                 new_lines.append(line)
 
-            if not collected_args:
-                continue
-
-            arg_string = " ".join(collected_args).replace('"', '`"')
-            ps_line = (
-                'powershell -WindowStyle Hidden -Command '
-                f'"Start-Process \\"%BIN%winws.exe\\" -ArgumentList \\"{arg_string}\\" -WindowStyle Hidden"\n'
-            )
-            new_lines.append(ps_line)
-
+            if collected_args:
+                args_joined = " ".join(collected_args)
+                bat_line = f'@echo PATCHED_BY_GUI\n"{winws_exe}" {args_joined}\n'
+                new_lines.append(bat_line)
 
             with open(path, 'w', encoding='utf-8') as f:
                 f.writelines(new_lines)
@@ -660,8 +689,10 @@ class MainWindow(QWidget):
 
         if checked:
             self.process = subprocess.Popen(
-                ["cmd.exe", "/c", script],
-                creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP, close_fds=True
+                script,
+                shell=True,
+                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+                close_fds=True
             )
             self.status_lbl.setText(self.t('On: {}', profile))
         else:
@@ -731,31 +762,16 @@ class MainWindow(QWidget):
         else:
             event.accept()
 
-def cleanup_temp_meipass():
-    temp_dir = getattr(sys, '_MEIPASS', None)
-    if temp_dir and os.path.exists(temp_dir):
-        try:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        except Exception as e:
-            print("Temp cleanup failed:", e)
-
-def suppress_meipass_warning():
-    try:
-        if hasattr(sys, '_MEIPASS'):
-            ctypes.windll.kernel32.SetErrorMode(0x0002)  # SEM_NOGPFAULTERRORBOX
-    except Exception:
-        pass
-
 def main():
-    atexit.register(cleanup_temp_meipass)
-    suppress_meipass_warning()
     app = QApplication(sys.argv)
+    extract_files_from_meipass()
     settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
     win = MainWindow(settings)
-    icon_path = os.path.join(os.path.dirname(__file__), 'flags', 'z.ico')
+    icon_path = os.path.join(APP_DIR, 'flags', 'z.ico')
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    sys.exit(exit_code)
 
 if __name__ == '__main__':
     main()
