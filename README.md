@@ -28,7 +28,7 @@
 
 Установка не требуется. Просто:
 
-1. Скачайте последний архив `Zapret_GUI.zip` из раздела [Releases](https://github.com/medvedeff-true/Zapret-Gui/releases/tag/v1.0)
+1. Скачайте последний архив `Zapret_GUI.zip` из раздела [Releases]([https://github.com/medvedeff-true/Zapret-Gui/releases/tag/v1.0](https://github.com/medvedeff-true/Zapret-Gui/releases/tag/v1.3.1))
 2. Распакуйте и запустите файл `Zapret_GUI.exe` (при необходимости — от имени администратора)
 
 > ⚠️ Если Windows выдаёт предупреждение, нажмите **Подробнее → Всё равно запустить**
