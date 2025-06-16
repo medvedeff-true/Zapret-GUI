@@ -9,9 +9,11 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QComboBox, QDialog, QCheckBox, QMessageBox, QSizePolicy,
     QSystemTrayIcon, QMenu, QTextBrowser
 )
-import tempfile
+import hashlib
 import shutil
-import ctypes
+import requests
+import zipfile
+import io
 
 def extract_files_from_meipass():
     if hasattr(sys, '_MEIPASS'):
@@ -37,6 +39,60 @@ def extract_files_from_meipass():
 APP_DIR = os.path.join(os.path.expanduser('~'), 'ZapretGUI')
 os.makedirs(APP_DIR, exist_ok=True)
 SETTINGS_FILE = os.path.join(APP_DIR, 'settings.ini')
+
+def update_domain_files():
+    try:
+        print("[INFO] Проверка обновления файлов zapret...")
+        url = "https://github.com/bol-van/zapret-win-bundle/archive/refs/heads/master.zip"
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        zip_content = response.content
+
+        zip_hash = hashlib.sha256(zip_content).hexdigest()
+
+        version_file = os.path.join(APP_DIR, 'core', 'files_version.txt')
+        if os.path.exists(version_file):
+            with open(version_file, 'r') as f:
+                existing_hash = f.read().strip()
+            if existing_hash == zip_hash:
+                print("[INFO] Файлы актуальны, обновление не требуется.")
+                return
+
+        z = zipfile.ZipFile(io.BytesIO(zip_content))
+
+        files_prefix = "zapret-win-bundle-master/zapret-winws/files/"
+        target_dir = os.path.join(APP_DIR, 'core', 'files')
+        os.makedirs(target_dir, exist_ok=True)
+
+        updated_files = 0
+        for file in z.namelist():
+            if file.startswith(files_prefix) and not file.endswith('/'):
+                relative_path = os.path.relpath(file, files_prefix)
+                target_path = os.path.join(target_dir, relative_path)
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                with z.open(file) as src, open(target_path, "wb") as dst:
+                    dst.write(src.read())
+                updated_files += 1
+
+        with open(version_file, 'w') as f:
+            f.write(zip_hash)
+
+        print(f"[INFO] Обновлено файлов: {updated_files}")
+
+    except Exception as e:
+        print(f"[ERROR] Не удалось обновить списки: {e}")
+        from PyQt6.QtWidgets import QMessageBox
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setWindowTitle("Ошибка обновления")
+        msg.setText("Обновление списков доменов не удалось выполнить из-за отсутствия подключения или ошибок системы.\nСледующее обновление будет выполнено при следующем запуске программы.")
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+
+        icon_path = os.path.join(APP_DIR, 'flags', 'z.ico')
+        if os.path.exists(icon_path):
+            msg.setWindowIcon(QIcon(icon_path))
+
+        msg.exec()
 
 translations = {
     'ru': {
@@ -221,7 +277,7 @@ class SettingsDialog(QDialog):
         self.autostart_profile_label.setText(self.t('Autostart profile'))
         self.about_label.setText(
             f'{self.t("About:")} '
-            '<a href="https://zapret.org/" style="color:#3399ff;">Zapret</a> & '
+            '<a href="https://github.com/bol-van" style="color:#3399ff;">Zapret</a> & '
             '<a href="https://github.com/medvedeff-true?tab=repositories" style="color:#3399ff;">Medvedeff</a>'
         )
 
@@ -447,11 +503,9 @@ class MainWindow(QWidget):
                     print(f"Failed to unblock {exe_path}: {e}")
 
     def patch_bat_files(self):
-        import re
-
         skip_files = {'service.bat', 'install_service.bat', 'uninstall.bat', 'update_service.bat'}
         bin_dir = os.path.join(APP_DIR, 'core', 'bin') + '\\'
-        lists_dir = os.path.join(APP_DIR, 'core', 'lists') + '\\'
+        files_dir = os.path.join(APP_DIR, 'core', 'files') + '\\'
         winws_exe = os.path.join(bin_dir, 'winws.exe')
 
         for fn in os.listdir(self.core_dir):
@@ -473,46 +527,43 @@ class MainWindow(QWidget):
                 shutil.copy2(path, backup_path)
                 print(f'[B] Создан бэкап: {backup_path}')
 
-            # Патчим файл
-            with open(path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-
+            # Собираем новый контент батника:
             new_lines = []
-            collected_args = []
-            in_args = False
+            new_lines.append('@echo off\n')
+            new_lines.append('chcp 65001 > nul\n')
+            new_lines.append(':: 65001 - UTF-8\n')
+            new_lines.append('\n')
+            new_lines.append('cd /d "%~dp0"\n')
+            new_lines.append('call service.bat status_zapret\n')
+            new_lines.append('call service.bat check_updates\n')
+            new_lines.append('echo:\n')
+            new_lines.append('\n')
+            new_lines.append(f'set "BIN={bin_dir}"\n')
+            new_lines.append(f'set "FILES={files_dir}"\n')
+            new_lines.append('\n')
+            new_lines.append('@echo PATCHED_BY_GUI\n')
 
-            for line in lines:
-                if re.match(r'^\s*set\s+"?BIN', line, re.IGNORECASE):
-                    new_lines.append(f'set "BIN={bin_dir}"\n')
-                    continue
-                if re.match(r'^\s*set\s+"?LISTS', line, re.IGNORECASE):
-                    new_lines.append(f'set "LISTS={lists_dir}"\n')
-                    continue
+            args = (
+                f'"{winws_exe}" '
+                '--wf-tcp=80,443 --wf-udp=443,50000-50099 '
+                '--filter-tcp=80 --dpi-desync=fake,fakedsplit --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig --new '
+                '--filter-tcp=443 --hostlist="%FILES%list-youtube.txt" --dpi-desync=fake,multidisorder '
+                '--dpi-desync-split-pos=1,midsld --dpi-desync-repeats=11 --dpi-desync-fooling=md5sig '
+                '--dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com --new '
+                '--filter-tcp=443 --dpi-desync=fake,multidisorder --dpi-desync-split-pos=midsld '
+                '--dpi-desync-repeats=6 --dpi-desync-fooling=badseq,md5sig --new '
+                '--filter-udp=443 --hostlist="%FILES%list-youtube.txt" --dpi-desync=fake '
+                '--dpi-desync-repeats=11 --dpi-desync-fake-quic="%FILES%quic_initial_www_google_com.bin" --new '
+                '--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=11 --new '
+                '--filter-udp=50000-50099 --filter-l7=discord,stun --dpi-desync=fake\n'
+            )
 
-                stripped = line.strip()
-                if 'winws.exe' in stripped:
-                    in_args = True
-                    m = re.search(r'winws\.exe["\']?\s*(.*)', stripped)
-                    if m and m.group(1).strip():
-                        collected_args.append(m.group(1).rstrip("^").strip())
-                    continue
-                elif in_args and (stripped.startswith('-') or stripped.startswith('--')):
-                    collected_args.append(stripped.rstrip("^").strip())
-                    continue
-                else:
-                    in_args = False
-
-                new_lines.append(line)
-
-            if collected_args:
-                args_joined = " ".join(collected_args)
-                bat_line = f'@echo PATCHED_BY_GUI\n"{winws_exe}" {args_joined}\n'
-                new_lines.append(bat_line)
+            new_lines.append(args)
 
             with open(path, 'w', encoding='utf-8') as f:
                 f.writelines(new_lines)
 
-            print(f'[+] Patched: {fn}')
+            print(f'[+] Полностью переписан: {fn}')
 
     def open_instruction(self):
         dialog = QDialog(self)
@@ -765,6 +816,7 @@ class MainWindow(QWidget):
 def main():
     app = QApplication(sys.argv)
     extract_files_from_meipass()
+    update_domain_files()
     settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
     win = MainWindow(settings)
     icon_path = os.path.join(APP_DIR, 'flags', 'z.ico')
