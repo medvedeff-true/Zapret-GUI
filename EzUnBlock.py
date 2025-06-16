@@ -14,6 +14,7 @@ import shutil
 import requests
 import zipfile
 import io
+import re
 
 def extract_files_from_meipass():
     if hasattr(sys, '_MEIPASS'):
@@ -503,6 +504,9 @@ class MainWindow(QWidget):
                     print(f"Failed to unblock {exe_path}: {e}")
 
     def patch_bat_files(self):
+
+        migration_done = self.settings.value('bat_migration_done', False, type=bool)
+
         skip_files = {'service.bat', 'install_service.bat', 'uninstall.bat', 'update_service.bat'}
         bin_dir = os.path.join(APP_DIR, 'core', 'bin') + '\\'
         files_dir = os.path.join(APP_DIR, 'core', 'files') + '\\'
@@ -514,56 +518,41 @@ class MainWindow(QWidget):
 
             path = os.path.join(self.core_dir, fn)
 
-            # Если файл уже пропатчен — пропускаем
             with open(path, 'r', encoding='utf-8') as f:
                 content = f.read()
-                if 'PATCHED_BY_GUI' in content:
-                    print(f'[=] Уже пропатчен: {fn}')
-                    continue
 
-            # Делаем резервную копию
+            if 'PATCHED_BY_GUI' in content and migration_done:
+                print(f'[=] Уже пропатчен: {fn}')
+                continue
+
             backup_path = path + '.backup'
             if not os.path.exists(backup_path):
                 shutil.copy2(path, backup_path)
                 print(f'[B] Создан бэкап: {backup_path}')
 
-            # Собираем новый контент батника:
-            new_lines = []
-            new_lines.append('@echo off\n')
-            new_lines.append('chcp 65001 > nul\n')
-            new_lines.append(':: 65001 - UTF-8\n')
-            new_lines.append('\n')
-            new_lines.append('cd /d "%~dp0"\n')
-            new_lines.append('call service.bat status_zapret\n')
-            new_lines.append('call service.bat check_updates\n')
-            new_lines.append('echo:\n')
-            new_lines.append('\n')
-            new_lines.append(f'set "BIN={bin_dir}"\n')
-            new_lines.append(f'set "FILES={files_dir}"\n')
-            new_lines.append('\n')
-            new_lines.append('@echo PATCHED_BY_GUI\n')
-
-            args = (
-                f'"{winws_exe}" '
-                '--wf-tcp=80,443 --wf-udp=443,50000-50099 '
-                '--filter-tcp=80 --dpi-desync=fake,fakedsplit --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig --new '
-                '--filter-tcp=443 --hostlist="%FILES%list-youtube.txt" --dpi-desync=fake,multidisorder '
-                '--dpi-desync-split-pos=1,midsld --dpi-desync-repeats=11 --dpi-desync-fooling=md5sig '
-                '--dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com --new '
-                '--filter-tcp=443 --dpi-desync=fake,multidisorder --dpi-desync-split-pos=midsld '
-                '--dpi-desync-repeats=6 --dpi-desync-fooling=badseq,md5sig --new '
-                '--filter-udp=443 --hostlist="%FILES%list-youtube.txt" --dpi-desync=fake '
-                '--dpi-desync-repeats=11 --dpi-desync-fake-quic="%FILES%quic_initial_www_google_com.bin" --new '
-                '--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=11 --new '
-                '--filter-udp=50000-50099 --filter-l7=discord,stun --dpi-desync=fake\n'
-            )
-
-            new_lines.append(args)
-
             with open(path, 'w', encoding='utf-8') as f:
-                f.writelines(new_lines)
+                f.write('@echo off\n')
+                f.write('chcp 65001 > nul\n')
+                f.write(':: PATCHED_BY_GUI\n\n')
+                f.write(f'set "BIN={bin_dir}"\n')
+                f.write(f'set "FILES={files_dir}"\n\n')
+                f.write(f'start "zapret: http,https,quic" /min "{winws_exe}" ^\n')
+                f.write('--wf-tcp=80,443 --wf-udp=443,50000-50099 ^\n')
+                f.write(
+                    '--filter-tcp=80 --dpi-desync=fake,fakedsplit --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig --new ^\n')
+                f.write(
+                    '--filter-tcp=443 --hostlist="%FILES%list-youtube.txt" --dpi-desync=fake,multidisorder --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=11 --dpi-desync-fooling=md5sig --dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com --new ^\n')
+                f.write(
+                    '--filter-tcp=443 --dpi-desync=fake,multidisorder --dpi-desync-split-pos=midsld --dpi-desync-repeats=6 --dpi-desync-fooling=badseq,md5sig --new ^\n')
+                f.write(
+                    '--filter-udp=443 --hostlist="%FILES%list-youtube.txt" --dpi-desync=fake --dpi-desync-repeats=11 --dpi-desync-fake-quic="%FILES%quic_initial_www_google_com.bin" --new ^\n')
+                f.write('--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=11 --new ^\n')
+                f.write('--filter-udp=50000-50099 --filter-l7=discord,stun --dpi-desync=fake\n')
 
             print(f'[+] Полностью переписан: {fn}')
+
+        self.settings.setValue('bat_migration_done', True)
+        self.settings.sync()
 
     def open_instruction(self):
         dialog = QDialog(self)
