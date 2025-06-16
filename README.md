@@ -3,7 +3,7 @@
 ## Русский
 # Zapret GUI
 
-**Zapret GUI** — это простая графическая оболочка для обхода интернет-блокировок с помощью Утилиты Zapret ([Оригинальное приложение](https://github.com/Flowseal/zapret-discord-youtube)).  
+**Zapret GUI** — это простая графическая оболочка для обхода интернет-блокировок с помощью Утилиты Zapret ([Оригинальное приложение](https://github.com/bol-van/zapret)).  
 Создано на Python + PyQt6.
 
 ![{C833C781-C50A-4FD7-BE0A-9A056F0ADA20}](https://github.com/user-attachments/assets/3cb3b642-eedb-4fe5-94b5-ff5f3d9338bd)
