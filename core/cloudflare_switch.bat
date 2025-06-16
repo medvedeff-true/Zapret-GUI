@@ -2,49 +2,13 @@
 chcp 65001 > nul
 :: 65001 - UTF-8
 
-:: Admin rights check
-if "%1"=="admin" (
-    echo Started with admin rights
-) else (
-    echo Requesting admin rights...
-    powershell -Command "Start-Process 'cmd.exe' -ArgumentList '/c \"\"%~f0\" admin\"' -Verb RunAs"
-    exit /b
-)
+cd /d "%~dp0"
+call service.bat status_zapret
+call service.bat check_updates
+echo:
 
-set "LISTS=%~dp0lists\"
-set "FILE=%LISTS%ipset-cloudflare.txt"
+set "BIN=C:\Users\sh\ZapretGUI\core\bin\"
+set "FILES=C:\Users\sh\ZapretGUI\core\files\"
 
-if not exist "%FILE%" (
-    echo Error! ipset-cloudflare.txt not found, path: %FILE%
-    goto :eof
-)
-
-findstr /C:"0.0.0.0" "%FILE%" >nul
-if %ERRORLEVEL%==0 (
-    echo Enabling cloudflare bypass...
-    >"%FILE%" (
-        echo 173.245.48.0/20
-        echo 103.21.244.0/22
-        echo 103.22.200.0/22
-        echo 103.31.4.0/22
-        echo 141.101.64.0/18
-        echo 108.162.192.0/18
-        echo 190.93.240.0/20
-        echo 188.114.96.0/20
-        echo 197.234.240.0/22
-        echo 198.41.128.0/17
-        echo 162.158.0.0/15
-        echo 104.16.0.0/13
-        echo 104.24.0.0/14
-        echo 172.64.0.0/13
-        echo 131.0.72.0/22
-    )
-) else (
-    echo Disabling cloudflare bypass...
-    >"%FILE%" (
-        echo 0.0.0.0/32
-    )
-)
-
-echo Done.
-pause
+@echo PATCHED_BY_GUI
+"C:\Users\sh\ZapretGUI\core\bin\winws.exe" --wf-tcp=80,443 --wf-udp=443,50000-50099 --filter-tcp=80 --dpi-desync=fake,fakedsplit --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig --new --filter-tcp=443 --hostlist="%FILES%list-youtube.txt" --dpi-desync=fake,multidisorder --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=11 --dpi-desync-fooling=md5sig --dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com --new --filter-tcp=443 --dpi-desync=fake,multidisorder --dpi-desync-split-pos=midsld --dpi-desync-repeats=6 --dpi-desync-fooling=badseq,md5sig --new --filter-udp=443 --hostlist="%FILES%list-youtube.txt" --dpi-desync=fake --dpi-desync-repeats=11 --dpi-desync-fake-quic="%FILES%quic_initial_www_google_com.bin" --new --filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=11 --new --filter-udp=50000-50099 --filter-l7=discord,stun --dpi-desync=fake
