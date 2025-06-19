@@ -1,4 +1,5 @@
 ﻿import os
+import sys
 import shutil
 import subprocess
 
@@ -9,11 +10,17 @@ icon_path = "flags/z.ico"
 build_dir = "dist"
 spec_file = f"{os.path.splitext(script_name)[0]}.spec"
 
-# Проверка наличия нужных файлов
+# Пути к pyinstaller внутри venv
+venv_path = os.path.join(".venv", "Scripts", "pyinstaller.exe")
+if not os.path.isfile(venv_path):
+    raise FileNotFoundError("❌ pyinstaller не найден в .venv. Убедись, что ты активировал окружение и установил pyinstaller.")
+
+# Проверка ресурсов
 assert os.path.exists(script_name), f"{script_name} не найден"
 assert os.path.exists(icon_path), f"{icon_path} не найден"
 assert os.path.exists("flags"), "Папка flags не найдена"
 assert os.path.exists("core"), "Папка core не найдена"
+assert os.path.exists("version.txt"), "version.txt не найден"
 
 # Очистка предыдущей сборки
 for folder in ("build", "dist"):
@@ -24,7 +31,7 @@ if os.path.exists(spec_file):
 
 # Команда сборки
 cmd = [
-    "pyinstaller",
+    venv_path,
     "--onefile",
     "--noconsole",
     f"--icon={icon_path}",
@@ -32,20 +39,21 @@ cmd = [
     "--add-data=flags;flags",
     "--add-data=core;core",
     "--version-file=version.txt",
+    "--hidden-import=psutil",
     script_name
 ]
 
 print("▶ Сборка exe файла...")
 subprocess.run(cmd, check=True)
+print("✅ Сборка завершена!")
 
-print("\n✅ Сборка завершена!")
-
+# Проверка итогового exe
 src_exe = os.path.join(build_dir, exe_name)
 if not os.path.exists(src_exe):
-    fallback = os.path.join(build_dir, "Zapret GUI")
+    fallback = os.path.join(build_dir, "Zapret GUI.exe")
     if os.path.exists(fallback):
         os.rename(fallback, src_exe)
     else:
-        raise FileNotFoundError("Файл .exe не найден после сборки")
+        raise FileNotFoundError("❌ Файл .exe не найден после сборки")
 
 print(f"\n📦 Готовый файл: {src_exe}")
