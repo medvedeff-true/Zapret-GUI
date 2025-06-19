@@ -28,7 +28,7 @@
 
 Установка не требуется. Просто:
 
-1. Скачайте последний архив `Zapret_GUI.zip` из раздела [Releases](https://github.com/medvedeff-true/Zapret-Gui/releases/tag/v1.4.0)
+1. Скачайте последний архив `Zapret_GUI.zip` из раздела [Releases](https://github.com/medvedeff-true/Zapret-GUI/releases/tag/v1.5.0)
 2. Распакуйте и запустите файл `Zapret_GUI.exe` (при необходимости — от имени администратора)
 
 > ⚠️ Если Windows выдаёт предупреждение, нажмите **Подробнее → Всё равно запустить**
@@ -96,7 +96,7 @@ Built on Python + PyQt6. One-click launch, multi-language support, no installati
 
 No installation required. Just:
 
-1. Download the latest `Zapret_GUI.zip` file from [Releases](https://github.com/medvedeff-true/Zapret-Gui/releases/tag/v1.4.0)
+1. Download the latest `Zapret_GUI.zip` file from [Releases](https://github.com/medvedeff-true/Zapret-GUI/releases/tag/v1.5.0)
 2. Run it (optionally as administrator)
 
 > ⚠️ If Windows warns you, click **More info → Run anyway**
