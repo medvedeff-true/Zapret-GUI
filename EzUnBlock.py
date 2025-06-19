@@ -1,5 +1,4 @@
-﻿
-import sys
+﻿import sys
 import os
 import subprocess
 from PyQt6.QtCore import Qt, QSettings, QSize, QTimer
@@ -9,12 +8,10 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QComboBox, QDialog, QCheckBox, QMessageBox, QSizePolicy,
     QSystemTrayIcon, QMenu, QTextBrowser
 )
-import hashlib
 import shutil
 import requests
 import zipfile
 import io
-import re
 
 def extract_files_from_meipass():
     if hasattr(sys, '_MEIPASS'):
@@ -22,7 +19,7 @@ def extract_files_from_meipass():
     else:
         base_src = os.path.dirname(__file__)
 
-    for folder in ('core', 'flags'):
+    for folder in ('core', 'flags', 'core/files'):
         src_path = os.path.join(base_src, folder)
         dst_path = os.path.join(APP_DIR, folder)
 
@@ -43,57 +40,117 @@ SETTINGS_FILE = os.path.join(APP_DIR, 'settings.ini')
 
 def update_domain_files():
     try:
-        print("[INFO] Проверка обновления файлов zapret...")
-        url = "https://github.com/bol-van/zapret-win-bundle/archive/refs/heads/master.zip"
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        zip_content = response.content
+        import psutil
+        busy_files = []
+        updated_count = 0
 
-        zip_hash = hashlib.sha256(zip_content).hexdigest()
+        def is_file_locked(path):
+            """Проверка, используется ли файл другим процессом"""
+            try:
+                os.rename(path, path)
+                return False
+            except PermissionError:
+                return True
 
-        version_file = os.path.join(APP_DIR, 'core', 'files_version.txt')
-        if os.path.exists(version_file):
-            with open(version_file, 'r') as f:
-                existing_hash = f.read().strip()
-            if existing_hash == zip_hash:
-                print("[INFO] Файлы актуальны, обновление не требуется.")
-                return
+        def download_and_extract(zip_url, prefix, target_dir, exclude=None):
+            nonlocal updated_count
+            exclude = exclude or set()
 
-        z = zipfile.ZipFile(io.BytesIO(zip_content))
+            response = requests.get(zip_url, timeout=20)
+            response.raise_for_status()
+            z = zipfile.ZipFile(io.BytesIO(response.content))
 
-        files_prefix = "zapret-win-bundle-master/zapret-winws/files/"
-        target_dir = os.path.join(APP_DIR, 'core', 'files')
-        os.makedirs(target_dir, exist_ok=True)
+            for file in z.namelist():
+                if file.endswith('/') or not file.startswith(prefix):
+                    continue
 
-        updated_files = 0
-        for file in z.namelist():
-            if file.startswith(files_prefix) and not file.endswith('/'):
-                relative_path = os.path.relpath(file, files_prefix)
-                target_path = os.path.join(target_dir, relative_path)
-                os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                with z.open(file) as src, open(target_path, "wb") as dst:
+                rel_path = os.path.relpath(file, prefix)
+                if rel_path == "." or any(rel_path.startswith(ex + "/") for ex in exclude):
+                    continue
+
+                dst_path = os.path.join(target_dir, rel_path)
+                os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+
+                basename = os.path.basename(dst_path).lower()
+                if basename in {"windivert64.sys", "windivert32.sys"}:
+                    continue  # Явно пропускаем эти файлы
+
+                if os.path.exists(dst_path) and is_file_locked(dst_path):
+                    busy_files.append(rel_path)
+                    continue
+
+                with z.open(file) as src, open(dst_path, "wb") as dst:
                     dst.write(src.read())
-                updated_files += 1
+                    updated_count += 1
 
-        with open(version_file, 'w') as f:
-            f.write(zip_hash)
+        # 1. core/* из Zapret-GUI, кроме lists и files
+        gui_url = "https://github.com/medvedeff-true/Zapret-GUI/archive/refs/heads/main.zip"
+        download_and_extract(gui_url, "Zapret-GUI-main/core/", os.path.join(APP_DIR, "core"), exclude={"files", "lists"})
 
-        print(f"[INFO] Обновлено файлов: {updated_files}")
+        # 2. files/ из zapret-win-bundle
+        bundle_url = "https://github.com/bol-van/zapret-win-bundle/archive/refs/heads/master.zip"
+        download_and_extract(bundle_url, "zapret-win-bundle-master/zapret-winws/files/", os.path.join(APP_DIR, "core", "files"))
 
+        # 3. lists/ из zapret-discord-youtube
+        lists_url = "https://github.com/Flowseal/zapret-discord-youtube/archive/refs/heads/main.zip"
+        download_and_extract(lists_url, "zapret-discord-youtube-main/lists/", os.path.join(APP_DIR, "core", "lists"))
+
+        if busy_files:
+            QMessageBox.warning(
+                None,
+                "Частичное обновление",
+                f"Обновлено файлов: {updated_count}\n\n"
+                f"Пропущено, так как они были заняты или защищены:\n" + "\n".join(busy_files)
+            )
+        else:
+            QMessageBox.information(None, "Обновление завершено", f"Файлы успешно обновлены.\nОбновлено файлов: {updated_count}")
+
+    except requests.exceptions.ConnectionError:
+        QMessageBox.warning(None, "Ошибка обновления", "Отсутствует подключение к интернету.")
     except Exception as e:
-        print(f"[ERROR] Не удалось обновить списки: {e}")
-        from PyQt6.QtWidgets import QMessageBox
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setWindowTitle("Ошибка обновления")
-        msg.setText("Обновление списков доменов не удалось выполнить из-за отсутствия подключения или ошибок системы.\nСледующее обновление будет выполнено при следующем запуске программы.")
-        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        QMessageBox.critical(None, "Ошибка обновления", f"Произошла ошибка:\n{e}")
 
-        icon_path = os.path.join(APP_DIR, 'flags', 'z.ico')
-        if os.path.exists(icon_path):
-            msg.setWindowIcon(QIcon(icon_path))
 
-        msg.exec()
+
+def create_delete_bat():
+    delete_bat_path = os.path.join(APP_DIR, "Delete.bat")
+    if os.path.exists(delete_bat_path):
+        return
+
+    content = r'''@echo off
+setlocal EnableDelayedExpansion
+chcp 65001 > nul
+
+net session >nul 2>&1 || (
+  powershell -Command "Start-Process '%~f0' -Verb RunAs"
+  exit /b
+)
+
+tasklist /FI "IMAGENAME eq winws.exe" | find /I "winws.exe" > nul
+if !errorlevel!==0 exit /b
+
+sc stop zapret >nul 2>&1
+sc delete zapret >nul 2>&1
+sc stop zapret_discord >nul 2>&1
+sc delete zapret_discord >nul 2>&1
+net stop "WinDivert" >nul 2>&1 & sc delete "WinDivert" >nul 2>&1
+net stop "WinDivert14" >nul 2>&1 & sc delete "WinDivert14" >nul 2>&1
+
+ping 127.0.0.1 -n 3 >nul
+set SCRIPT_PATH="%~f0"
+set FOLDER_PATH=%~dp0
+cd /d "%TEMP%"
+echo @echo off > zapret_clean.bat
+echo rmdir /s /q "%FOLDER_PATH%" >> zapret_clean.bat
+echo del /f /q "%SCRIPT_PATH%" >> zapret_clean.bat
+echo del /f /q zapret_clean.bat >> zapret_clean.bat
+echo exit >> zapret_clean.bat
+start /b cmd /c zapret_clean.bat
+exit /b
+'''
+    with open(delete_bat_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
 
 translations = {
     'ru': {
@@ -104,7 +161,7 @@ translations = {
         'Service mode': 'Сервисный режим',
         'Install Service': 'Установить сервис',
         'Remove Services': 'Сбросить соединения winws',
-        'Check Updates': 'Проверить обновления Zapret',
+        'Check Updates': 'Проверить обновления',
         'About:': 'Подробнее:',
         'Off': 'Выключен',
         'On: {}': 'Включён: {}',
@@ -114,7 +171,7 @@ translations = {
         <b>2.</b> Если выбранный профиль не сработал — <span style="color:red;"><b>нажмите на красную кнопку</b></span> для отключения, выберите другой профиль и повторите запуск. Продолжайте, пока не найдёте рабочий вариант.<br><br>
         <b>3.</b> При проблемах с запуском или остановкой обхода откройте раздел <b>«Настройки»</b> и нажмите кнопку <b>"Сбросить соединения winws"</b>. Дождитесь закрытия консоли. Если вместо <b>Success</b> появится ошибка — полностью перезапустите приложение и повторите. Это сбросит конфигурации подключения и позволит всё запустить заново.<br><br>
         <b>4.</b> В разделе <b>«Настройки»</b> также можно включить <b>автоматический запуск обхода</b> при запуске программы. <u>Важно:</u> это работает только при включённой автозагрузке приложения. Отметьте <b>«Запускать вместе с системой»</b>, выберите нужный профиль — и при запуске Windows обход будет активен автоматически, в трее.<br><br>
-        <span style="color:#cc0000;"><b>5. ПРИМЕЧАНИЕ:</b> Для обхода блокировки <b>Discord</b> рекомендуется использовать профиль <b>Discord</b>. Однако в некоторых случаях профиль <b>General</b> также обеспечивает корректную работу как <b>YouTube</b>, так и <b>Discord</b>.</span>
+        <span style="color:#cc0000;"><b>5. ПРИМЕЧАНИЕ:</b> <b>Discord</b> теперь работает на профиле <b>General</b>. Больше не нужно менять профили, так намного <b>удобнее</b>.</span>
         """,
         'Enable bypass': 'Включить обход',
         'Disable bypass': 'Выключить обход',
@@ -131,7 +188,7 @@ translations = {
         'Service mode': 'Service mode',
         'Install Service': 'Install Service',
         'Remove Services': 'Reset winws connections',
-        'Check Updates': 'Check Updates Zapret',
+        'Check Updates': 'Check Updates',
         'About:': 'About:',
         'Off': 'Off',
         'On: {}': 'On: {}',
@@ -141,7 +198,7 @@ translations = {
         <b>2.</b> If the selected profile doesn’t work — <span style="color:red;"><b>click the red button</b></span> to stop, choose another profile and try again. Repeat this process until you find one that works for you.<br><br>
         <b>3.</b> If you experience issues with enabling or disabling the bypass, go to the <b>“Settings”</b> section and click <b>“Reset winws connections”</b>. Wait until the console closes. If an error appears instead of <b>Success</b>, fully restart the application and try again. This process resets all bypass connection settings and should restore proper functionality.<br><br>
         <b>4.</b> In the <b>“Settings”</b> section, you can also enable <b>auto-start</b> for the bypass. <u>Note:</u> this only works if the app itself is enabled to auto-launch. Just check <b>“Run with system startup”</b>, choose your desired profile, and the bypass will automatically run in the system tray when Windows starts.<br><br>
-        <span style="color:#cc0000;"><b>5. NOTE:</b> For bypassing <b>Discord</b>, it is recommended to use the <b>Discord</b> profile. However, in some cases, the <b>General</b> profile works fine for both <b>YouTube</b> and <b>Discord</b>.</span>
+        <span style="color:#cc0000;"><b>5. NOTE:</b> <b>Discord</b> now works on a profile <b>General</b>. You don't have to change profiles anymore, it's so much more <b>convenient</b>.</span>
         """,
         'Enable bypass': 'Enable bypass',
         'Disable bypass': 'Disable bypass',
@@ -319,11 +376,7 @@ class SettingsDialog(QDialog):
         subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE, close_fds=True)
 
     def check_updates(self):
-        script = os.path.join(os.path.dirname(__file__), 'core', 'fast', 'update_service.bat')
-        if not os.path.exists(script):
-            QMessageBox.warning(self, self.t('Settings'), 'update_service.bat не найден')
-            return
-        subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE, close_fds=True)
+        update_domain_files()
 
     def closeEvent(self, event):
         self.save_settings()
@@ -464,7 +517,7 @@ class MainWindow(QWidget):
         QApplication.instance().quit()
 
     def reload_presets(self):
-        self.presets = {'General': 'general.bat', 'Discord': 'discord.bat'}
+        self.presets = {'General': 'general.bat'}
         for fn in sorted(os.listdir(self.core_dir)):
             if fn.lower().endswith('.bat') and fn not in (
                 'general.bat', 'discord.bat', 'service.bat', 'cloudflare_switch.bat'
@@ -504,63 +557,91 @@ class MainWindow(QWidget):
                     print(f"Failed to unblock {exe_path}: {e}")
 
     def patch_bat_files(self):
+        import os
+        import shutil
         import re
 
         skip_files = {'service.bat', 'install_service.bat', 'uninstall.bat', 'update_service.bat'}
-        bin_dir = os.path.join(APP_DIR, 'core', 'bin') + '\\'
-        files_dir = os.path.join(APP_DIR, 'core', 'files') + '\\'
-        winws_exe = os.path.join(bin_dir, 'winws.exe')
-
-        settings_key = 'bat_migration_done'
+        settings_key = 'bat_migration_1.5.3_clean'
         if self.settings.value(settings_key, False, type=bool):
-            full_force_patch = False
-        else:
-            full_force_patch = True
+            return
+
+        updated_presets = {}
 
         for fn in os.listdir(self.core_dir):
             if not fn.lower().endswith('.bat') or fn in skip_files:
                 continue
 
             path = os.path.join(self.core_dir, fn)
+            original_name = os.path.splitext(fn)[0]  # до возможного переименования
 
-            if not full_force_patch:
-                with open(path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    if 'PATCHED_BY_GUI' in content:
-                        print(f'[=] Уже пропатчен: {fn}')
-                        continue
+            if any(c in fn for c in (' ', '(', ')')):
+                name, ext = os.path.splitext(fn)
+                safe_name = re.sub(r'[^\w.-]', '_', name)  # заменяем всё, кроме букв/цифр/./-
+                safe_name = re.sub(r'_+', '_', safe_name)  # несколько _ подряд → один
+                safe_name = safe_name.strip('_')  # убираем _ в начале и в конце
+                safe_fn = f'{safe_name}{ext}'
+                safe_path = os.path.join(self.core_dir, safe_fn)
 
-            backup_path = path + '.backup'
-            if not os.path.exists(backup_path):
-                shutil.copy2(path, backup_path)
-                print(f'[B] Создан бэкап: {backup_path}')
+                # Бэкап
+                backup_path = path + '.backup'
+                if not os.path.exists(backup_path):
+                    shutil.copy2(path, backup_path)
+                    print(f'[B] Бэкап создан: {backup_path}')
 
-            new_lines = []
-            new_lines.append(f'set "BIN={bin_dir}"\n')
-            new_lines.append(f'set "FILES={files_dir}"\n')
-            new_lines.append(f'@echo PATCHED_BY_GUI\n')
+                if os.path.exists(safe_path):
+                    with open(path, 'rb') as f1, open(safe_path, 'rb') as f2:
+                        if f1.read() == f2.read():
+                            print(f'[i] Удаляем дубликат "{fn}" — идентичен "{safe_fn}"')
+                            os.remove(path)
+                        else:
+                            print(f'[!] Конфликт: "{safe_fn}" уже есть, но отличается — удаляем оригинал "{fn}"')
+                            os.remove(path)
+                    continue
 
-            arguments = (
-                f'"{winws_exe}" --wf-tcp=80,443 --wf-udp=443,50000-50099 '
-                '--filter-tcp=80 --dpi-desync=fake,fakedsplit --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig --new '
-                '--filter-tcp=443 --hostlist="%FILES%list-youtube.txt" --dpi-desync=fake,multidisorder --dpi-desync-split-pos=1,midsld '
-                '--dpi-desync-repeats=11 --dpi-desync-fooling=md5sig --dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com --new '
-                '--filter-tcp=443 --dpi-desync=fake,multidisorder --dpi-desync-split-pos=midsld --dpi-desync-repeats=6 --dpi-desync-fooling=badseq,md5sig --new '
-                '--filter-udp=443 --hostlist="%FILES%list-youtube.txt" --dpi-desync=fake --dpi-desync-repeats=11 --dpi-desync-fake-quic="%FILES%quic_initial_www_google_com.bin" --new '
-                '--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=11 --new '
-                '--filter-udp=50000-50099 --filter-l7=discord,stun --dpi-desync=fake\n'
-            )
+                os.rename(path, safe_path)
+                print(f'[!] Переименован: "{fn}" → "{safe_fn}"')
+                fn = safe_fn
+                path = safe_path
 
-            new_lines.append(arguments)
+            # Патч
+            new_lines = [
+                '@echo off\n',
+                'setlocal EnableDelayedExpansion\n\n',
+                'rem — поднимаем скрипт с правами администратора\n',
+                'net session >nul 2>&1 || (\n',
+                '  powershell -Command "Start-Process \\"%~f0\\" -Verb RunAs"\n',
+                '  exit /b\n',
+                ')\n\n',
+                'set "BIN=%~dp0bin"\n',
+                'set "LISTS=%~dp0lists"\n\n',
+                '@echo PATCHED_BY_GUI v1.5.3\n\n',
+                'pushd %BIN%\n',
+                'winws.exe ^\n',
+                '--wf-tcp=80,443 --wf-udp=443,50000-50100 ^\n',
+                '--filter-udp=443 --hostlist="%LISTS%\\list-general.txt" --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic="%BIN%\\quic_initial_www_google_com.bin" --new ^\n',
+                '--filter-udp=50000-50100 --filter-l7=discord,stun --dpi-desync=fake --dpi-desync-repeats=6 --new ^\n',
+                '--filter-tcp=80 --hostlist="%LISTS%\\list-general.txt" --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig --new ^\n',
+                '--filter-tcp=443 --hostlist="%LISTS%\\list-general.txt" --dpi-desync=fake,multidisorder --dpi-desync-split-pos=midsld --dpi-desync-repeats=8 --dpi-desync-fooling=md5sig,badseq --new ^\n',
+                '--filter-udp=443 --ipset="%LISTS%\\ipset-all.txt" --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic="%BIN%\\quic_initial_www_google_com.bin" --new ^\n',
+                '--filter-tcp=80 --ipset="%LISTS%\\ipset-all.txt" --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig --new ^\n',
+                '--filter-tcp=443 --ipset="%LISTS%\\ipset-all.txt" --dpi-desync=fake,multidisorder --dpi-desync-split-pos=midsld --dpi-desync-repeats=6 --dpi-desync-fooling=md5sig,badseq --new ^\n',
+                '--filter-udp=50000-50100 --ipset="%LISTS%\\ipset-all.txt" --dpi-desync=fake --dpi-desync-autottl=2 --dpi-desync-repeats=10 --dpi-desync-any-protocol=1 --dpi-desync-fake-unknown-udp="%BIN%\\quic_initial_www_google_com.bin" --dpi-desync-cutoff=n2\n',
+                'popd\n'
+            ]
 
             with open(path, 'w', encoding='utf-8') as f:
                 f.writelines(new_lines)
 
-            print(f'[+] Полностью переписан: {fn}')
+            updated_presets[original_name] = fn
 
-        if full_force_patch:
-            self.settings.setValue(settings_key, True)
-            self.settings.sync()
+        if hasattr(self, 'presets'):
+            self.presets.clear()
+            self.presets.update(updated_presets)
+
+        self.settings.setValue(settings_key, True)
+        self.settings.sync()
+        print(f'[✓] {settings_key} установлен в True')
 
     def open_instruction(self):
         dialog = QDialog(self)
@@ -685,7 +766,7 @@ class MainWindow(QWidget):
         self.blink_timer.start(800)
 
     def reload_presets(self):
-        self.presets = {'General': 'general.bat', 'Discord': 'discord.bat'}
+        self.presets = {'General': 'general.bat'}
         for fn in sorted(os.listdir(self.core_dir)):
             if fn.lower().endswith('.bat') and fn not in ('general.bat', 'discord.bat', 'service.bat'):
                 self.presets[os.path.splitext(fn)[0]] = fn
@@ -737,8 +818,8 @@ class MainWindow(QWidget):
 
         if checked:
             self.process = subprocess.Popen(
-                script,
-                shell=True,
+                ['cmd.exe', '/c', script],
+                cwd=self.core_dir,
                 creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
                 close_fds=True
             )
@@ -813,7 +894,7 @@ class MainWindow(QWidget):
 def main():
     app = QApplication(sys.argv)
     extract_files_from_meipass()
-    update_domain_files()
+    create_delete_bat()
     settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
     win = MainWindow(settings)
     icon_path = os.path.join(APP_DIR, 'flags', 'z.ico')
