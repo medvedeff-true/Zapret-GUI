@@ -15,7 +15,7 @@
 ## 🛠 Последние обновления
 <br>
 
-➕ **Добавлена функция автоматического подбора профилей, чтобы её активировать нажмите на значок** <img width="50" height="47" alt="image" src="https://github.com/user-attachments/assets/ab1baaaa-4da1-4cc6-892f-a9d39a1c1a02" />
+➕ **Добавлен автоматический подбор профиля, чтобы это активировать нажмите на значок** <img width="50" height="47" alt="image" src="https://github.com/user-attachments/assets/ab1baaaa-4da1-4cc6-892f-a9d39a1c1a02" />
 <br>
 <img width="414" height="185" alt="image" src="https://github.com/user-attachments/assets/0c37388c-3a35-4831-bf32-33d958c22986" />
 <img width="488" height="695" alt="image" src="https://github.com/user-attachments/assets/a7ad4597-c587-4cf8-8fe4-1a4b1f519ed6" />
