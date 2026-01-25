@@ -10,10 +10,11 @@ icon_path = "flags/z.ico"
 build_dir = "dist"
 spec_file = f"{os.path.splitext(script_name)[0]}.spec"
 
-# Пути к pyinstaller внутри venv
-venv_path = os.path.join(".venv", "Scripts", "pyinstaller.exe")
-if not os.path.isfile(venv_path):
-    raise FileNotFoundError("❌ pyinstaller не найден в .venv. Убедись, что ты активировал окружение и установил pyinstaller.")
+# Запускаем pyinstaller через текущий интерпретатор (venv), это надёжнее, чем искать exe
+try:
+    import PyInstaller  # noqa
+except Exception:
+    raise FileNotFoundError("❌ PyInstaller не установлен в этом окружении. Установи: pip install pyinstaller")
 
 # Проверка ресурсов
 assert os.path.exists(script_name), f"{script_name} не найден"
@@ -31,7 +32,7 @@ if os.path.exists(spec_file):
 
 # Команда сборки
 cmd = [
-    venv_path,
+    sys.executable, "-m", "PyInstaller",
     "--onefile",
     "--noconsole",
     f"--icon={icon_path}",

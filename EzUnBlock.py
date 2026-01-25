@@ -1,116 +1,341 @@
 ﻿import sys
 import os
 import subprocess
-from PyQt6.QtCore import Qt, QSettings, QSize, QTimer
-from PyQt6.QtGui import QIcon, QPixmap, QAction
+from PyQt6.QtCore import Qt, QSettings, QSize, QTimer, QThread, pyqtSignal, QElapsedTimer
+from PyQt6.QtGui import QIcon, QPixmap, QAction, QPalette
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QDialog, QCheckBox, QMessageBox, QSizePolicy,
-    QSystemTrayIcon, QMenu, QTextBrowser
+    QSystemTrayIcon, QMenu, QTextBrowser, QProgressDialog, QProgressBar
 )
 import shutil
 import requests
 import zipfile
 import io
+import re
+import socket
+import time
+import ctypes
 
 def extract_files_from_meipass():
-    if hasattr(sys, '_MEIPASS'):
-        base_src = sys._MEIPASS
-    else:
-        base_src = os.path.dirname(__file__)
+    if not hasattr(sys, "_MEIPASS"):
+        _safe_copy_tree(
+            os.path.join(os.path.dirname(__file__), "flags"),
+            os.path.join(APP_DIR, "flags"),
+            overwrite=False
+        )
+        return
 
-    for folder in ('core', 'flags', 'core/files'):
-        src_path = os.path.join(base_src, folder)
-        dst_path = os.path.join(APP_DIR, folder)
+    base_src = sys._MEIPASS
+    for folder in ("flags", "core"):
+        _safe_copy_tree(
+            os.path.join(base_src, folder),
+            os.path.join(APP_DIR, folder),
+            overwrite=False
+        )
 
-        for root, dirs, files in os.walk(src_path):
-            rel = os.path.relpath(root, src_path)
-            target = os.path.join(dst_path, rel)
-            os.makedirs(target, exist_ok=True)
+def _safe_copy_file(src: str, dst: str, overwrite: bool = False) -> bool:
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
 
-            for f in files:
-                s = os.path.join(root, f)
-                d = os.path.join(target, f)
-                if not os.path.exists(d):
-                    shutil.copy2(s, d)
+    if (not overwrite) and os.path.exists(dst):
+        return False
 
+    try:
+        shutil.copy2(src, dst)
+        return True
+    except PermissionError:
+        return False
+    except OSError:
+        return False
+
+
+def _safe_copy_tree(src_root: str, dst_root: str, overwrite: bool = False) -> None:
+    if not os.path.isdir(src_root):
+        return
+
+    for root, _, files in os.walk(src_root):
+        rel = os.path.relpath(root, src_root)
+        target_dir = dst_root if rel == "." else os.path.join(dst_root, rel)
+        os.makedirs(target_dir, exist_ok=True)
+
+        for f in files:
+            s = os.path.join(root, f)
+            d = os.path.join(target_dir, f)
+            _safe_copy_file(s, d, overwrite=overwrite)
+
+
+APP_VERSION = "1.6.0"
 APP_DIR = os.path.join(os.path.expanduser('~'), 'ZapretGUI')
 os.makedirs(APP_DIR, exist_ok=True)
+FLOWSEAL_REPO = "Flowseal/zapret-discord-youtube"
+FLOWSEAL_DEFAULT_VER = "1.9.2"  # текущая базовая
+FLOWSEAL_VER_KEY = "flowseal_release"
+
 SETTINGS_FILE = os.path.join(APP_DIR, 'settings.ini')
+VERSION_FILE = os.path.join(APP_DIR, '.app_version')
+
+def _read_text(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
+    except Exception:
+        return ""
+
+def _theme_text_color_hex(w: QWidget) -> str:
+    c = w.palette().color(QPalette.ColorRole.Text)
+    return c.name()
+
+def _force_stop_blockers():
+    try:
+        subprocess.run(["taskkill", "/IM", "winws.exe", "/F"], capture_output=True, text=True)
+    except Exception:
+        pass
+
+    for svc in ("zapret", "zapret_discord", "WinDivert", "WinDivert14"):
+        try:
+            subprocess.run(["sc", "stop", svc], capture_output=True, text=True)
+        except Exception:
+            pass
+
+    try:
+        time.sleep(0.6)
+    except Exception:
+        pass
+
+def wipe_app_dir_if_new_version():
+    if not hasattr(sys, "_MEIPASS"):
+        return
+
+    prev = _read_text(VERSION_FILE)
+    if prev == APP_VERSION:
+        return
+
+    _force_stop_blockers()
+
+    try:
+        if os.path.isdir(APP_DIR):
+            for name in os.listdir(APP_DIR):
+                p = os.path.join(APP_DIR, name)
+
+                # Если залочен драйвер — он чаще всего в core\bin\WinDivert*.sys
+                # Не даём этому убить запуск: пытаемся удалить, если нельзя — пропускаем.
+                try:
+                    if os.path.isdir(p):
+                        shutil.rmtree(p, ignore_errors=False)
+                    else:
+                        os.remove(p)
+                except PermissionError:
+                    # второй шанс после повторного "глушения"
+                    _force_stop_blockers()
+                    try:
+                        if os.path.isdir(p):
+                            shutil.rmtree(p, ignore_errors=False)
+                        else:
+                            os.remove(p)
+                    except PermissionError:
+                        # критично важно: НЕ КРЭШИМ.
+                        # Просто оставляем залоченное и идём дальше.
+                        pass
+                except FileNotFoundError:
+                    pass
+
+        os.makedirs(APP_DIR, exist_ok=True)
+        with open(VERSION_FILE, "w", encoding="utf-8") as f:
+            f.write(APP_VERSION)
+
+    except Exception as e:
+        # вообще любая ошибка очистки не должна убивать запуск
+        try:
+            QMessageBox.warning(
+                None,
+                "Предупреждение",
+                "Не удалось полностью очистить папку ZapretGUI, но приложение продолжит запуск.\n"
+                "Если будут проблемы — закройте обход/winws.exe и запустите приложение от администратора.\n\n"
+                f"Детали: {e}"
+            )
+        except Exception:
+            pass
 
 def update_domain_files():
     try:
         import psutil
-        busy_files = []
-        updated_count = 0
 
-        def is_file_locked(path):
-            """Проверка, используется ли файл другим процессом"""
+        def is_winws_running() -> bool:
             try:
-                os.rename(path, path)
+                out = subprocess.check_output(
+                    'tasklist /FI "IMAGENAME eq winws.exe" /NH',
+                    shell=True,
+                    text=True
+                )
+                return "winws.exe" in out.lower()
+            except Exception:
                 return False
-            except PermissionError:
-                return True
 
-        def download_and_extract(zip_url, prefix, target_dir, exclude=None):
-            nonlocal updated_count
-            exclude = exclude or set()
-
-            response = requests.get(zip_url, timeout=20)
-            response.raise_for_status()
-            z = zipfile.ZipFile(io.BytesIO(response.content))
-
-            for file in z.namelist():
-                if file.endswith('/') or not file.startswith(prefix):
-                    continue
-
-                rel_path = os.path.relpath(file, prefix)
-                if rel_path == "." or any(rel_path.startswith(ex + "/") for ex in exclude):
-                    continue
-
-                dst_path = os.path.join(target_dir, rel_path)
-                os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-
-                basename = os.path.basename(dst_path).lower()
-                if basename in {"windivert64.sys", "windivert32.sys"}:
-                    continue  # Явно пропускаем эти файлы
-
-                if os.path.exists(dst_path) and is_file_locked(dst_path):
-                    busy_files.append(rel_path)
-                    continue
-
-                with z.open(file) as src, open(dst_path, "wb") as dst:
-                    dst.write(src.read())
-                    updated_count += 1
-
-        # 1. core/* из Zapret-GUI, кроме lists и files
-        gui_url = "https://github.com/medvedeff-true/Zapret-GUI/archive/refs/heads/main.zip"
-        download_and_extract(gui_url, "Zapret-GUI-main/core/", os.path.join(APP_DIR, "core"), exclude={"files", "lists"})
-
-        # 2. files/ из zapret-win-bundle
-        bundle_url = "https://github.com/bol-van/zapret-win-bundle/archive/refs/heads/master.zip"
-        download_and_extract(bundle_url, "zapret-win-bundle-master/zapret-winws/files/", os.path.join(APP_DIR, "core", "files"))
-
-        # 3. lists/ из zapret-discord-youtube
-        lists_url = "https://github.com/Flowseal/zapret-discord-youtube/archive/refs/heads/main.zip"
-        download_and_extract(lists_url, "zapret-discord-youtube-main/lists/", os.path.join(APP_DIR, "core", "lists"))
-
-        if busy_files:
+        if is_winws_running():
             QMessageBox.warning(
                 None,
-                "Частичное обновление",
-                f"Обновлено файлов: {updated_count}\n\n"
-                f"Пропущено, так как они были заняты или защищены:\n" + "\n".join(busy_files)
+                "Обновление",
+                "Сейчас запущен обход (winws.exe).\n\n"
+                "Перед обновлением нажмите красную кнопку (выключить обход), "
+                "закройте/остановите winws.exe и повторите."
             )
+            return
+
+        settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
+
+        has_ver = settings.contains(FLOWSEAL_VER_KEY)
+        current_ver = str(settings.value(FLOWSEAL_VER_KEY)) if has_ver else ""
+
+        #Получаем latest release через GitHub API
+        api_url = f"https://api.github.com/repos/{FLOWSEAL_REPO}/releases/latest"
+        headers = {"User-Agent": "ZapretGUI-Updater", "Accept": "application/vnd.github+json"}
+        r = requests.get(api_url, headers=headers, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+
+        tag = (data.get("tag_name") or "").strip()
+        latest_ver = tag[1:] if tag.startswith("v") else tag
+        if not latest_ver:
+            QMessageBox.warning(None, "Обновление", "Не удалось определить версию последнего релиза.")
+            return
+
+        #Сравнение версий
+        def semver_tuple(v: str):
+            parts = v.strip().split(".")
+            nums = []
+            for p in parts:
+                # оставляем цифры, чтобы '1.9.3-beta' не сломал сравнение
+                q = "".join(ch for ch in p if ch.isdigit())
+                nums.append(int(q) if q else 0)
+            while len(nums) < 3:
+                nums.append(0)
+            return tuple(nums[:3])
+
+        if has_ver:
+            try:
+                is_newer = semver_tuple(latest_ver) > semver_tuple(current_ver)
+            except Exception:
+                is_newer = latest_ver != current_ver
+
+            if not is_newer:
+                QMessageBox.information(None, "Обновление", f"У вас уже актуальная версия: {current_ver}")
+                return
         else:
-            QMessageBox.information(None, "Обновление завершено", f"Файлы успешно обновлены.\nОбновлено файлов: {updated_count}")
+            current_ver = "неизвестно"
+
+        #Уточняем у пользователя
+        msg = QMessageBox()
+        msg.setWindowTitle("Обновление")
+        msg.setIcon(QMessageBox.Icon.Question)
+        msg.setText(
+            f"Доступен новый релиз: {latest_ver}\n"
+            f"Текущая версия: {current_ver}\n\n"
+            "Будет полностью очищена папка core и распакованы новые файлы.\n"
+            "Продолжить?"
+        )
+        btn_yes = msg.addButton("Да", QMessageBox.ButtonRole.YesRole)
+        btn_no = msg.addButton("Нет", QMessageBox.ButtonRole.NoRole)
+        msg.exec()
+        if msg.clickedButton() != btn_yes:
+            return
+
+        #Находим что скачивать
+        download_url = None
+        assets = data.get("assets") or []
+        for a in assets:
+            name = (a.get("name") or "").lower()
+            if name.endswith(".zip"):
+                download_url = a.get("browser_download_url")
+                break
+        if not download_url:
+            download_url = data.get("zipball_url")
+
+        if not download_url:
+            QMessageBox.warning(None, "Обновление", "Не найден файл для скачивания в релизе.")
+            return
+
+        #Скачиваем архив
+        zr = requests.get(download_url, headers=headers, timeout=60)
+        zr.raise_for_status()
+        z = zipfile.ZipFile(io.BytesIO(zr.content))
+
+        #Полностью очищаем APP_DIR/core
+        core_target = os.path.join(APP_DIR, "core")
+        os.makedirs(core_target, exist_ok=True)
+
+        for name in os.listdir(core_target):
+            p = os.path.join(core_target, name)
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=False)
+            else:
+                os.remove(p)
+
+        #Определяем корневой префикс
+        names = [n for n in z.namelist() if n and not n.startswith("__MACOSX/")]
+
+        top_levels = set()
+        for n in names:
+            seg = n.split("/", 1)[0]
+            if seg:
+                top_levels.add(seg)
+
+        root_prefix = ""
+        if len(top_levels) == 1:
+            root_prefix = next(iter(top_levels)) + "/"
+
+        #Распаковка в core
+        replaced = 0
+        for member in names:
+            if member.endswith("/"):
+                continue
+            if root_prefix and not member.startswith(root_prefix):
+                continue
+
+            rel = member[len(root_prefix):] if root_prefix else member
+            if not rel:
+                continue
+
+            dst_path = os.path.join(core_target, rel)
+            os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+
+            base = os.path.basename(dst_path).lower()
+            if base in {"windivert64.sys", "windivert32.sys"}:
+                continue
+
+            with z.open(member) as src, open(dst_path, "wb") as dst:
+                dst.write(src.read())
+                replaced += 1
+
+        #Запоминаем версию
+        settings.setValue(FLOWSEAL_VER_KEY, latest_ver)
+        settings.sync()
+
+        QMessageBox.information(
+            None,
+            "Обновление завершено",
+            f"Обновлено до: {latest_ver}\n"
+            f"Файлов распаковано: {replaced}\n\n"
+            f"Путь: {core_target}"
+        )
 
     except requests.exceptions.ConnectionError:
         QMessageBox.warning(None, "Ошибка обновления", "Отсутствует подключение к интернету.")
+    except requests.HTTPError as e:
+        QMessageBox.critical(None, "Ошибка обновления", f"HTTP ошибка:\n{e}")
+    except PermissionError as e:
+        QMessageBox.critical(
+            None,
+            "Ошибка обновления",
+            "Не удалось очистить/записать файлы в папку core.\n"
+            "Проверьте, что обход выключен и файлы не заняты.\n\n"
+            f"Детали: {e}"
+        )
+    except zipfile.BadZipFile:
+        QMessageBox.critical(None, "Ошибка обновления", "Скачанный архив повреждён или не является zip.")
     except Exception as e:
         QMessageBox.critical(None, "Ошибка обновления", f"Произошла ошибка:\n{e}")
-
-
 
 def create_delete_bat():
     delete_bat_path = os.path.join(APP_DIR, "Delete.bat")
@@ -237,11 +462,30 @@ class SettingsDialog(QDialog):
                 24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
             )
             btn = QPushButton()
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
             btn.setIcon(QIcon(pix))
             btn.setIconSize(QSize(24, 24))
-            btn.setFixedSize(31, 31)
+
+            btn.setFixedSize(32, 32)
+
+            btn.setStyleSheet("""
+            QPushButton {
+                padding: 0px;
+                margin: 0px;
+                border: 1px solid rgba(0,0,0,40);
+                border-radius: 6px;
+                background: transparent;
+            }
+            QPushButton:hover {
+                background: rgba(0,0,0,15);
+            }
+            """)
+
             btn.clicked.connect(lambda _, c=code: self.change_lang(c))
             hl.addWidget(btn)
+
         hl.addStretch()
         layout.addLayout(hl)
 
@@ -336,7 +580,8 @@ class SettingsDialog(QDialog):
         self.about_label.setText(
             f'{self.t("About:")} '
             '<a href="https://github.com/bol-van" style="color:#3399ff;">Zapret</a> & '
-            '<a href="https://github.com/medvedeff-true?tab=repositories" style="color:#3399ff;">Medvedeff</a>'
+            '<a href="https://github.com/medvedeff-true" style="color:#3399ff;">Medvedeff</a> & '
+            '<a href="https://github.com/Flowseal" style="color:#3399ff;">Flowseal</a>'
         )
 
     def change_lang(self, lang_code):
@@ -382,6 +627,172 @@ class SettingsDialog(QDialog):
         self.save_settings()
         super().closeEvent(event)
 
+class AutoTestWorker(QThread):
+    progress = pyqtSignal(int, int, str)   # done, total, profile_name
+    finished_ok = pyqtSignal(dict)
+    finished_err = pyqtSignal(str)
+
+    def __init__(self, core_dir: str, presets: dict, parent=None):
+        super().__init__(parent)
+        self.core_dir = core_dir
+        self.presets = dict(presets)
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        try:
+            good, bad = [], []
+            names = list(self.presets.keys())
+            total = len(names)
+
+            for i, prof in enumerate(names, start=1):
+                if self._stop:
+                    return
+
+                ok = self._test_profile_fast(prof, timeout_per_profile=10.0)
+                if self._stop:
+                    return
+
+                if ok:
+                    good.append(prof)
+                else:
+                    bad.append(prof)
+
+                self.progress.emit(i, total, prof)
+
+            self._kill_winws()
+            self.finished_ok.emit({"good": good, "bad": bad, "raw": "", "error": ""})
+
+        except Exception as e:
+            self._kill_winws()
+            self.finished_err.emit(str(e))
+
+    def _test_profile_fast(self, profile_name: str, timeout_per_profile: float = 10.0) -> bool:
+        self._kill_winws()
+
+        bat = os.path.join(self.core_dir, self.presets[profile_name])
+        if not os.path.exists(bat):
+            return False
+
+        try:
+            subprocess.Popen(
+                ["cmd.exe", "/c", bat],
+                cwd=self.core_dir,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                close_fds=True
+            )
+        except Exception:
+            return False
+
+        # ждём запуск winws
+        start_deadline = time.time() + 6.0
+        while time.time() < start_deadline:
+            if self._stop:
+                return False
+            if self._is_winws_running():
+                break
+            time.sleep(0.1)
+        else:
+            return False
+
+        time.sleep(0.35)
+
+        # 🔥 ВАЖНО: только реальные проверки
+        ok_discord = self._quick_https("https://discord.com/api/v9/experiments", timeout=3.0)
+        ok_youtube = self._quick_https("https://www.youtube.com/generate_204", timeout=3.0)
+
+        ok = ok_discord or ok_youtube
+
+        self._kill_winws()
+        return ok
+
+    def _is_winws_running(self) -> bool:
+        try:
+            out = subprocess.check_output(
+                'tasklist /FI "IMAGENAME eq winws.exe" /NH',
+                shell=True,
+                text=True
+            )
+            return "winws.exe" in out.lower()
+        except Exception:
+            return False
+
+    def _quick_https(self, url: str, timeout: float = 3.0) -> bool:
+        headers = {"User-Agent": "ZapretGUI-Test"}
+        for _ in range(2):
+            try:
+                s = requests.Session()
+                s.trust_env = True
+                r = s.get(url, timeout=timeout, headers=headers, stream=True, allow_redirects=False, verify=True)
+                return (200 <= r.status_code < 500)
+            except Exception:
+                pass
+        return False
+
+    def _kill_winws(self):
+        try:
+            subprocess.run(
+                ["taskkill", "/IM", "winws.exe", "/F"],
+                capture_output=True,
+                text=True
+            )
+        except Exception:
+            pass
+
+class AutoProgressDialog(QDialog):
+    canceled = pyqtSignal()
+
+    def __init__(self, title: str, left_text: str, cancel_text: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setFixedSize(330, 120)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(8)
+
+        row = QHBoxLayout()
+        self.lbl_left = QLabel(left_text)
+        self.lbl_right = QLabel("")  # тут будет "≈ 00:42"
+        self.lbl_right.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        row.addWidget(self.lbl_left, 1)
+        row.addWidget(self.lbl_right, 0)
+        v.addLayout(row)
+
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)  # временно, выставим позже
+        self.bar.setValue(0)
+        v.addWidget(self.bar)
+
+        self.lbl_profile = QLabel("")  # текущий профиль
+        self.lbl_profile.setStyleSheet("color: rgba(0,0,0,140);")
+        v.addWidget(self.lbl_profile)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self.btn_cancel = QPushButton(cancel_text)
+        self.btn_cancel.clicked.connect(self._on_cancel)
+        btn_row.addWidget(self.btn_cancel)
+        v.addLayout(btn_row)
+
+    def set_progress(self, cur: int, total: int):
+        self.bar.setRange(0, max(1, total))
+        self.bar.setValue(cur)
+
+    def set_current_profile(self, name: str):
+        self.lbl_profile.setText(name)
+
+    def _on_cancel(self):
+        self.canceled.emit()
+        self.close()
+
+    def set_eta_text(self, s: str):
+        self.lbl_right.setText(s)
+
 class MainWindow(QWidget):
     def __init__(self, settings):
         super().__init__()
@@ -392,10 +803,23 @@ class MainWindow(QWidget):
         self.last_profile = settings.value('last_profile', 'General')
 
         self.core_dir = os.path.join(APP_DIR, 'core')
-        self.patch_bat_files()
         self.unblock_executables()
         self.presets = {}
         self.process = None
+        self._auto_cancelled = False
+        self._auto_done = 0
+        self._auto_total = 0
+        self._eta_ms_per_profile = None
+        self._eta_last_done = 0
+        self._eta_last_elapsed_ms = 0
+
+        self.tray = None
+        self.tray_menu = None
+        self.action_open = None
+        self.action_start = None
+        self.action_stop = None
+        self.preset_menu = None
+        self.exit_action = None
 
         self.init_ui()
         self.retranslate_ui()
@@ -451,11 +875,20 @@ class MainWindow(QWidget):
         self.tray_btn.setToolTip(self.t('Minimize to tray'))
 
     def update_tray_status(self):
+        if self.tray is None or self.action_start is None or self.action_stop is None:
+            return
+
         running = self.toggle_btn.isChecked()
         self.action_start.setEnabled(not running)
         self.action_stop.setEnabled(running)
         self.tray.setToolTip(self.get_tray_tooltip())
         self.update_tray_presets()
+
+    def is_admin(self) -> bool:
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
 
     def get_tray_tooltip(self):
         if hasattr(self, 'toggle_btn') and self.toggle_btn.isChecked():
@@ -468,6 +901,12 @@ class MainWindow(QWidget):
             self.activateWindow()
 
     def update_tray_presets(self):
+        # preset_menu появляется только после init_tray_icon()
+        if self.preset_menu is None:
+            return
+        if not hasattr(self, "cb"):
+            return
+
         self.preset_menu.clear()
         current = self.cb.currentText()
         for name in self.presets:
@@ -482,6 +921,286 @@ class MainWindow(QWidget):
         self.cb.setCurrentText(name)
         self.cb.blockSignals(False)
         self.on_profile_changed(name)
+
+    def on_auto_pick_profile(self):
+        title = "Автоподбор профиля" if self.lang == "ru" else "Auto profile selection"
+        text = "Вы хотите выполнить автоматический подбор профиля?" if self.lang == "ru" else "Do you want to auto-select the best profile?"
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle(title)
+        msg.setIcon(QMessageBox.Icon.Question)
+        msg.setText(text)
+        btn_yes = msg.addButton("Да" if self.lang == "ru" else "Yes", QMessageBox.ButtonRole.YesRole)
+        btn_no = msg.addButton("Нет" if self.lang == "ru" else "No", QMessageBox.ButtonRole.NoRole)
+        msg.exec()
+
+        if msg.clickedButton() != btn_yes:
+            return
+
+        if self.is_winws_running():
+            QMessageBox.warning(
+                self,
+                title,
+                "Сначала выключите обход (красная кнопка), затем запустите автоподбор."
+                if self.lang == "ru" else
+                "Please stop the bypass first (red button), then run auto selection."
+            )
+            return
+
+        if not self.is_admin():
+            QMessageBox.warning(
+                self,
+                title,
+                "Автоподбор требует запуск приложения от администратора.\n"
+                "Закройте программу и запустите EXE через ПКМ → Запуск от имени администратора."
+                if self.lang == "ru" else
+                "Auto selection requires running the app as Administrator.\n"
+                "Close the app and run the EXE: Right click → Run as Administrator."
+            )
+            return
+
+        self._auto_cancelled = False
+
+        try:
+            if hasattr(self, "_eta_timer") and self._eta_timer:
+                self._eta_timer.stop()
+        except Exception:
+            pass
+
+        title = "Автоподбор профиля" if self.lang == "ru" else "Auto profile selection"
+
+        self._auto_progress = AutoProgressDialog(
+            title=title,
+            left_text="Тестируем профили..." if self.lang == "ru" else "Testing profiles...",
+            cancel_text="Отмена" if self.lang == "ru" else "Cancel",
+            parent=self
+        )
+        self._auto_progress.canceled.connect(self._on_auto_test_cancel)
+
+        self._eta_timer = QTimer(self)
+        self._eta_timer.setInterval(200)
+
+        self._elapsed = QElapsedTimer()
+        self._elapsed.start()
+
+        def fmt_ms(ms: int) -> str:
+            if ms < 0:
+                ms = 0
+            s = ms // 1000
+            m = s // 60
+            s = s % 60
+            return f"{m:02d}:{s:02d}"
+
+        def update_eta_tick():
+            dlg = getattr(self, "_auto_progress", None)
+            if dlg is None or (not dlg.isVisible()):
+                return
+
+            total = int(getattr(self, "_auto_total", 0))
+            done = int(getattr(self, "_auto_done", 0))
+
+            # если тест уже закончился — не трогаем
+            if total <= 0:
+                dlg.set_eta_text("≈ —")
+                return
+
+            if done >= total:
+                dlg.set_eta_text("≈ 00:00")
+                return
+
+            elapsed_ms = int(self._elapsed.elapsed()) if hasattr(self, "_elapsed") else 0
+
+            # пока не прошли хотя бы 1 профиль — ETA бессмысленен
+            if done <= 0:
+                dlg.set_eta_text("≈ —")
+                return
+
+            # "мгновенная" средняя скорость по факту (мс на профиль)
+            raw_ms_per = max(200, elapsed_ms // done)
+
+            # сглаживание, чтобы не прыгало
+            # чем ближе к концу — тем больше доверяем свежим данным
+            if self._eta_ms_per_profile is None:
+                self._eta_ms_per_profile = raw_ms_per
+            else:
+                # адаптивный alpha: по мере роста done меньше дергается
+                # done=1..5 -> alpha 0.35, done>20 -> 0.15
+                alpha = 0.35 if done < 6 else (0.20 if done < 20 else 0.15)
+                self._eta_ms_per_profile = int(self._eta_ms_per_profile * (1 - alpha) + raw_ms_per * alpha)
+
+            left_profiles = total - done
+            left_ms = left_profiles * int(self._eta_ms_per_profile)
+
+            # Ключевой момент: НЕ даём показывать 00:00 пока done < total
+            # пусть минимум будет 1 секунда, чтобы не "упасть раньше времени"
+            if left_ms < 1000:
+                left_ms = 1000
+
+            s = left_ms // 1000
+            m = s // 60
+            s = s % 60
+            dlg.set_eta_text(f"≈ {m:02d}:{s:02d}")
+
+        self._update_eta_tick = update_eta_tick
+
+        self._eta_timer.timeout.connect(update_eta_tick)
+        self._eta_timer.start()
+        update_eta_tick()
+
+        self._auto_done = 0
+        self._auto_total = len(self.presets)
+        self._eta_ms_per_profile = None
+        self._eta_last_done = 0
+        self._eta_last_elapsed_ms = 0
+        self._auto_worker = AutoTestWorker(self.core_dir, self.presets, parent=self)
+        self._auto_worker.finished_ok.connect(self._on_auto_test_done)
+        self._auto_worker.finished_err.connect(self._on_auto_test_err)
+        self._auto_worker.progress.connect(self._on_auto_test_progress)
+
+        self._auto_progress.show()
+        self._auto_worker.start()
+
+    def _on_auto_test_progress(self, done: int, total: int, prof: str):
+        self._auto_done = int(done)
+        self._auto_total = int(total)
+
+        dlg = getattr(self, "_auto_progress", None)
+        if dlg is None:
+            return
+
+        dlg.set_progress(done, total)
+        dlg.set_current_profile(prof)
+
+        # сразу обновим ETA (без сигналов/emit)
+        try:
+            cb = getattr(self, "_update_eta_tick", None)
+            if cb:
+                cb()
+        except Exception:
+            pass
+
+    def _on_auto_test_cancel(self):
+        self._auto_cancelled = True
+        w = getattr(self, "_auto_worker", None)
+        if w is not None:
+            try:
+                w.stop()
+            except Exception:
+                pass
+
+        try:
+            subprocess.run(["taskkill", "/IM", "winws.exe", "/F"], capture_output=True, text=True)
+        except Exception:
+            pass
+        if w is not None:
+            try:
+                w.finished_ok.disconnect(self._on_auto_test_done)
+            except Exception:
+                pass
+            try:
+                w.finished_err.disconnect(self._on_auto_test_err)
+            except Exception:
+                pass
+        try:
+            if hasattr(self, "_eta_timer") and self._eta_timer:
+                self._eta_timer.stop()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "_auto_progress") and self._auto_progress:
+                self._auto_progress.close()
+        except Exception:
+            pass
+
+    def _on_auto_test_err(self, err: str):
+        if getattr(self, "_auto_cancelled", False):
+            return
+        try:
+            if hasattr(self, "_eta_timer") and self._eta_timer:
+                self._eta_timer.stop()
+        except Exception:
+            pass
+
+        try:
+            self._auto_progress.close()
+        except Exception:
+            pass
+
+        QMessageBox.critical(
+            self,
+            "Автоподбор профиля" if self.lang == "ru" else "Auto selection",
+            f"Ошибка при выполнении тестов:\n{err}"
+        )
+
+    def _on_auto_test_done(self, result: dict):
+        if getattr(self, "_auto_cancelled", False):
+            return
+        try:
+            if hasattr(self, "_eta_timer") and self._eta_timer:
+                self._eta_timer.stop()
+        except Exception:
+            pass
+
+        elapsed_ms = int(self._elapsed.elapsed()) if hasattr(self, "_elapsed") else 0
+
+        # сохраняем среднее время НА ПРОФИЛЬ (для ETA)
+        total = max(1, len(self.presets))
+        ms_per_profile = max(300, elapsed_ms // total)
+
+        prev = int(self.settings.value("auto_test_avg_ms_per_profile", 0))
+        new_avg = ms_per_profile if prev <= 0 else int(prev * 0.7 + ms_per_profile * 0.3)
+
+        self.settings.setValue("auto_test_avg_ms_per_profile", new_avg)
+        self.settings.sync()
+
+        try:
+            self._auto_progress.set_progress(self._auto_total, self._auto_total)
+        except Exception:
+            pass
+
+        try:
+            self._auto_progress.close()
+        except Exception:
+            pass
+
+        good = result.get("good", [])
+        bad = result.get("bad", [])
+        raw = result.get("raw", "")
+        extra_err = result.get("error", "")
+
+        best = good[0] if good else None
+
+        if self.lang == "ru":
+            best_line = f"<b>Самый лучший для Вас профиль:</b> {best}" if best else "<b>Самый лучший для Вас профиль:</b> не найден"
+            good_line = "<b>Профили, которые также будут работать:</b><br>" + ("<br>".join(good) if good else "—")
+            bad_line = "<b>Профили, которые у Вас не сработают:</b><br>" + ("<br>".join(bad) if bad else "—")
+        else:
+            best_line = f"<b>Best profile for you:</b> {best}" if best else "<b>Best profile for you:</b> not found"
+            good_line = "<b>Profiles that should work:</b><br>" + ("<br>".join(good) if good else "—")
+            bad_line = "<b>Profiles that won't work:</b><br>" + ("<br>".join(bad) if bad else "—")
+
+        html = "<div style='font-family:Segoe UI; font-size:10.5pt'>"
+        if extra_err:
+            html += f"<div style='color:#cc0000;'><b>{extra_err}</b></div><br>"
+        html += f"{best_line}<br><br>{good_line}<br><br>{bad_line}"
+        if extra_err and raw:
+            # если формат не распознан — покажем лог (не огромный)
+            tail = raw[-4000:]
+            html += "<br><br><b>Лог тестов:</b><br><pre style='white-space:pre-wrap;'>" + tail + "</pre>"
+        html += "</div>"
+
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("Результаты автоподбора" if self.lang == "ru" else "Auto selection results")
+        dlg.setIcon(QMessageBox.Icon.Information)
+        dlg.setTextFormat(Qt.TextFormat.RichText)
+        dlg.setText(html)
+        dlg.exec()
+
+        # Автовыбор в комбобоксе (только выбрать, НЕ запускать)
+        if best and best in self.presets:
+            self.cb.setCurrentText(best)
+            self.on_profile_changed(best)
 
     def toggle_tray(self, state: bool):
         if self.toggle_btn.isChecked() != state:
@@ -530,9 +1249,16 @@ class MainWindow(QWidget):
         self.cb.setCurrentText(self.settings.value('last_profile', 'General'))
         self.cb.blockSignals(False)
 
+        try:
+            self.cb.currentTextChanged.disconnect(self.on_profile_changed)
+        except Exception:
+            pass
         self.cb.currentTextChanged.connect(self.on_profile_changed)
-        self.update_tray_presets()
-        self.update_tray_status()
+
+        if getattr(self, "preset_menu", None) is not None:
+            self.update_tray_presets()
+        if getattr(self, "action_start", None) is not None:
+            self.update_tray_status()
 
     def on_profile_changed(self, text):
         self.settings.setValue('last_profile', text)
@@ -555,93 +1281,6 @@ class MainWindow(QWidget):
                     print(f"Unblocked: {exe_path}")
                 except Exception as e:
                     print(f"Failed to unblock {exe_path}: {e}")
-
-    def patch_bat_files(self):
-        import os
-        import shutil
-        import re
-
-        skip_files = {'service.bat', 'install_service.bat', 'uninstall.bat', 'update_service.bat'}
-        settings_key = 'bat_migration_1.5.3_clean'
-        if self.settings.value(settings_key, False, type=bool):
-            return
-
-        updated_presets = {}
-
-        for fn in os.listdir(self.core_dir):
-            if not fn.lower().endswith('.bat') or fn in skip_files:
-                continue
-
-            path = os.path.join(self.core_dir, fn)
-            original_name = os.path.splitext(fn)[0]  # до возможного переименования
-
-            if any(c in fn for c in (' ', '(', ')')):
-                name, ext = os.path.splitext(fn)
-                safe_name = re.sub(r'[^\w.-]', '_', name)  # заменяем всё, кроме букв/цифр/./-
-                safe_name = re.sub(r'_+', '_', safe_name)  # несколько _ подряд → один
-                safe_name = safe_name.strip('_')  # убираем _ в начале и в конце
-                safe_fn = f'{safe_name}{ext}'
-                safe_path = os.path.join(self.core_dir, safe_fn)
-
-                # Бэкап
-                backup_path = path + '.backup'
-                if not os.path.exists(backup_path):
-                    shutil.copy2(path, backup_path)
-                    print(f'[B] Бэкап создан: {backup_path}')
-
-                if os.path.exists(safe_path):
-                    with open(path, 'rb') as f1, open(safe_path, 'rb') as f2:
-                        if f1.read() == f2.read():
-                            print(f'[i] Удаляем дубликат "{fn}" — идентичен "{safe_fn}"')
-                            os.remove(path)
-                        else:
-                            print(f'[!] Конфликт: "{safe_fn}" уже есть, но отличается — удаляем оригинал "{fn}"')
-                            os.remove(path)
-                    continue
-
-                os.rename(path, safe_path)
-                print(f'[!] Переименован: "{fn}" → "{safe_fn}"')
-                fn = safe_fn
-                path = safe_path
-
-            # Патч
-            new_lines = [
-                '@echo off\n',
-                'setlocal EnableDelayedExpansion\n\n',
-                'rem — поднимаем скрипт с правами администратора\n',
-                'net session >nul 2>&1 || (\n',
-                '  powershell -Command "Start-Process \\"%~f0\\" -Verb RunAs"\n',
-                '  exit /b\n',
-                ')\n\n',
-                'set "BIN=%~dp0bin"\n',
-                'set "LISTS=%~dp0lists"\n\n',
-                '@echo PATCHED_BY_GUI v1.5.3\n\n',
-                'pushd %BIN%\n',
-                'winws.exe ^\n',
-                '--wf-tcp=80,443 --wf-udp=443,50000-50100 ^\n',
-                '--filter-udp=443 --hostlist="%LISTS%\\list-general.txt" --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic="%BIN%\\quic_initial_www_google_com.bin" --new ^\n',
-                '--filter-udp=50000-50100 --filter-l7=discord,stun --dpi-desync=fake --dpi-desync-repeats=6 --new ^\n',
-                '--filter-tcp=80 --hostlist="%LISTS%\\list-general.txt" --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig --new ^\n',
-                '--filter-tcp=443 --hostlist="%LISTS%\\list-general.txt" --dpi-desync=fake,multidisorder --dpi-desync-split-pos=midsld --dpi-desync-repeats=8 --dpi-desync-fooling=md5sig,badseq --new ^\n',
-                '--filter-udp=443 --ipset="%LISTS%\\ipset-all.txt" --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic="%BIN%\\quic_initial_www_google_com.bin" --new ^\n',
-                '--filter-tcp=80 --ipset="%LISTS%\\ipset-all.txt" --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig --new ^\n',
-                '--filter-tcp=443 --ipset="%LISTS%\\ipset-all.txt" --dpi-desync=fake,multidisorder --dpi-desync-split-pos=midsld --dpi-desync-repeats=6 --dpi-desync-fooling=md5sig,badseq --new ^\n',
-                '--filter-udp=50000-50100 --ipset="%LISTS%\\ipset-all.txt" --dpi-desync=fake --dpi-desync-autottl=2 --dpi-desync-repeats=10 --dpi-desync-any-protocol=1 --dpi-desync-fake-unknown-udp="%BIN%\\quic_initial_www_google_com.bin" --dpi-desync-cutoff=n2\n',
-                'popd\n'
-            ]
-
-            with open(path, 'w', encoding='utf-8') as f:
-                f.writelines(new_lines)
-
-            updated_presets[original_name] = fn
-
-        if hasattr(self, 'presets'):
-            self.presets.clear()
-            self.presets.update(updated_presets)
-
-        self.settings.setValue(settings_key, True)
-        self.settings.sync()
-        print(f'[✓] {settings_key} установлен в True')
 
     def open_instruction(self):
         dialog = QDialog(self)
@@ -720,19 +1359,36 @@ class MainWindow(QWidget):
         hl.addStretch()
         layout.addLayout(hl)
 
+        self.auto_btn = QPushButton("A")
+        self.auto_btn.setFixedSize(28, 28)
+        self.auto_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.auto_btn.setToolTip("Автоматический подбор профиля")
+        self.auto_btn.setStyleSheet("""
+            QPushButton {
+                border: 2px solid green;
+                color: green;
+                border-radius: 14px;
+                background: transparent;
+                font-weight: 800;
+            }
+            QPushButton:hover { background: rgba(0,128,0,0.10); }
+            QPushButton:pressed { background: rgba(0,128,0,0.20); }
+        """)
+        self.auto_btn.clicked.connect(self.on_auto_pick_profile)
+
         self.tray_btn = QPushButton()
         self.tray_btn.setIcon(QIcon(os.path.join(os.path.dirname(__file__), 'flags', 'tray.ico')))
         self.tray_btn.setIconSize(QSize(24, 24))
         self.tray_btn.setToolTip(self.t('Minimize to tray'))
         self.tray_btn.setFixedSize(28, 28)
         self.tray_btn.setStyleSheet("border: none;")
-
         self.tray_btn.clicked.connect(self.hide)
 
-        tray_layout = QHBoxLayout()
-        tray_layout.addStretch()
-        tray_layout.addWidget(self.tray_btn)
-        layout.addLayout(tray_layout)
+        top_row = QHBoxLayout()
+        top_row.addWidget(self.auto_btn)
+        top_row.addStretch()
+        top_row.addWidget(self.tray_btn)
+        layout.addLayout(top_row)
 
         self.cb = QComboBox()
         self.reload_presets()
@@ -751,11 +1407,14 @@ class MainWindow(QWidget):
         layout.addWidget(self.instruction_btn)
 
         self.powered_lbl = QLabel(
-            '<span style="color:white;">Powered by </span>'
-            '<span style="color:green;">Medvedeff</span>'
-            '<span style="color:white;"> & </span>'
-            '<span style="color:red;">Zapret</span>'
+            'Powered by '
+            '<span style="color:#2ecc71;">Medvedeff</span>'
+            ' & '
+            '<span style="color:#e74c3c;">Zapret</span>'
+            ' & '
+            '<span style="color:#2ecc71;">Flowseal</span>'
         )
+
         self.powered_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.powered_lbl)
 
@@ -764,14 +1423,6 @@ class MainWindow(QWidget):
         self.blink_timer = QTimer(self)
         self.blink_timer.timeout.connect(self.update_blink)
         self.blink_timer.start(800)
-
-    def reload_presets(self):
-        self.presets = {'General': 'general.bat'}
-        for fn in sorted(os.listdir(self.core_dir)):
-            if fn.lower().endswith('.bat') and fn not in ('general.bat', 'discord.bat', 'service.bat'):
-                self.presets[os.path.splitext(fn)[0]] = fn
-        self.cb.clear()
-        self.cb.addItems(self.presets.keys())
 
     def retranslate_ui(self):
         self.setWindowTitle('Zapret GUI')
@@ -783,8 +1434,12 @@ class MainWindow(QWidget):
         self.instruction_btn.setText(self.t('Instruction'))
 
     def update_blink(self):
-        color = "#ffffff" if self.blink_on else "#222222"
+        base_border = _theme_text_color_hex(self)  # авто: белый/чёрный
+        dim_border = "#666666"  # нейтральный, виден почти везде
+
+        color = base_border if self.blink_on else dim_border
         bg_color = "red" if self.toggle_btn.isChecked() else "green"
+
         self.toggle_btn.setStyleSheet(f"""
             QPushButton {{
                 border: 2px solid {color};
@@ -893,6 +1548,7 @@ class MainWindow(QWidget):
 
 def main():
     app = QApplication(sys.argv)
+    wipe_app_dir_if_new_version()
     extract_files_from_meipass()
     create_delete_bat()
     settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
