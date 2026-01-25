@@ -12,6 +12,25 @@
 
 ---
 
+## 🛠 Последние обновления
+<br>
+
+➕ **Добавлена функция автоматического подбора профилей, чтобы её активировать нажмите на значок** <img width="50" height="47" alt="image" src="https://github.com/user-attachments/assets/ab1baaaa-4da1-4cc6-892f-a9d39a1c1a02" />
+<img width="414" height="185" alt="image" src="https://github.com/user-attachments/assets/0c37388c-3a35-4831-bf32-33d958c22986" />
+<img width="488" height="695" alt="image" src="https://github.com/user-attachments/assets/a7ad4597-c587-4cf8-8fe4-1a4b1f519ed6" />
+<br>
+> ⚠️ **Автоподбор не панацея!** Функция была написана на скорую руку, без глубокого тестирования, поэтому на некоторых провайдерах могут быть баги и неверный результат. Если у вас в итоге не выдаёт ни одного рабочего профиля, всё равно попробуйте сами вручную поискать рабочий.
+ 
+➕ **Изменена логика проверки обновления, теперь она проверяет только релизы из репозитория [Flowseal](https://github.com/Flowseal/zapret-discord-youtube). Теперь если у Flowseal вышла новая версия, вы просто можете нажать на кнопку "Проверить обновления" в настройках программы и она скачается с заменой профилей**
+
+➕**Текущая стратегия обновлена и работает "из коробки" на версии Flowseal 1.9.3**
+
+➕**Мелкие косметические изменения**
+
+> ⚠️ Если у вас возникают какие-то проблемы с запуском новой версии, удалите полностью папку **ZapretGUI** по пути **C:\Users\user**
+
+---
+
 ## 🧩 Возможности
 
 - ✅ Запуск и остановка в один клик
@@ -49,6 +68,14 @@
 
 ---
 
+## 🖥️Системные требования
+- OS: Windows 10 (x64) (На 7/8 теоретически возможно, но не тестировалась)
+- CPU: 2 ядра (любые современные Intel/AMD)
+- RAM: 2 GB
+- Место на диске: ~150 MB
+
+---
+
 ## 🌐 Оригинальные репозитории
 
 ### 1. [Zapret](https://github.com/bol-van/zapret)
@@ -77,6 +104,25 @@ Built on Python + PyQt6. One-click launch, multi-language support, no installati
 ![{9D1E8A0B-2FBD-4C1B-8B8A-3AB860394CF7}](https://github.com/user-attachments/assets/523172e5-4d50-4c0e-8c66-974bb4791508)
 
 ![image](https://github.com/user-attachments/assets/cf70061a-0908-448a-9a48-ea344c9849b9)
+
+---
+
+## 🛠 Recent updates
+<br>
+
+➕ **The automatic profile matching feature has been added. To activate it, click on the icon** <img width="50" height="47" alt="image" src="https://github.com/user-attachments/assets/ab1baaaa-4da1-4cc6-892f-a9d39a1c1a02" />
+<img width="414" height="185" alt="image" src="https://github.com/user-attachments/assets/0c37388c-3a35-4831-bf32-33d958c22986" />
+<img width="488" height="695" alt="image" src="https://github.com/user-attachments/assets/a7ad4597-c587-4cf8-8fe4-1a4b1f519ed6" />
+<br>
+> ⚠️ **Auto-assembly is not a panacea!** The function was written in a hurry, without deep testing, so there may be bugs and incorrect results on some providers. If you don't end up with a single work profile, try manually searching for a worker anyway.
+ 
+➕ **The update verification logic has been changed, now it checks only releases from the repository [Flowseal](https://github.com/Flowseal/zapret-discord-youtube). Now, if Flowseal has a new version, you can simply click on the "Check for updates" button in the program settings and it will download with the replacement of profiles.**
+
+➕**The current strategy has been updated and works out of the box on Flowseal version 1.9.3**
+
+➕**Minor cosmetic changes**
+
+> ⚠️ If you have any problems launching the new version, delete the folder completely **ZapretGUI** on the way **C:\Users\user**
 
 ---
 
@@ -115,6 +161,14 @@ No installation required. Just:
 
 > Everything is described in detail in the manual, inside the program itself, if something is not clear, open and read it carefully.
 
+---
+
+## 🖥️System Requirements
+- OS: Windows 10 (x64)
+- CPU: 2 cores (any modern Intel/AMD)
+- RAM: 2 GB
+- Disk space: ~150 MB
+  
 ---
 
 ## 🌐 Original repositories
