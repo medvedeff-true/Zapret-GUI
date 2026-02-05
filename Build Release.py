@@ -3,16 +3,14 @@ import sys
 import shutil
 import subprocess
 
-# Параметры
 script_name = "EzUnBlock.py"
-exe_name = "Zapret GUI.exe"
+base_name = "ZapretGUI"
 icon_path = "flags/z.ico"
 build_dir = "dist"
 spec_file = f"{os.path.splitext(script_name)[0]}.spec"
 
-# Запускаем pyinstaller через текущий интерпретатор (venv), это надёжнее, чем искать exe
 try:
-    import PyInstaller  # noqa
+    import PyInstaller
 except Exception:
     raise FileNotFoundError("❌ PyInstaller не установлен в этом окружении. Установи: pip install pyinstaller")
 
@@ -36,9 +34,9 @@ cmd = [
     "--onefile",
     "--noconsole",
     f"--icon={icon_path}",
-    f"--name={exe_name}",
-    "--add-data=flags;flags",
-    "--add-data=core;core",
+    f"--name={base_name}",
+    f"--add-data=flags{os.pathsep}flags",
+    f"--add-data=core{os.pathsep}core",
     "--version-file=version.txt",
     "--hidden-import=psutil",
     script_name
@@ -49,12 +47,10 @@ subprocess.run(cmd, check=True)
 print("✅ Сборка завершена!")
 
 # Проверка итогового exe
-src_exe = os.path.join(build_dir, exe_name)
-if not os.path.exists(src_exe):
-    fallback = os.path.join(build_dir, "Zapret GUI.exe")
-    if os.path.exists(fallback):
-        os.rename(fallback, src_exe)
-    else:
-        raise FileNotFoundError("❌ Файл .exe не найден после сборки")
+src_exe = os.path.join(build_dir, f"{base_name}.exe")
+final_exe = os.path.join(build_dir, "Zapret GUI.exe")
+if os.path.exists(final_exe):
+    os.remove(final_exe)
+os.rename(src_exe, final_exe)
+print(f"\n📦 Готовый файл: {final_exe}")
 
-print(f"\n📦 Готовый файл: {src_exe}")

@@ -17,22 +17,56 @@ import socket
 import time
 import ctypes
 
+def _run_hidden(args, cwd=None, timeout=None):
+    try:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0  # SW_HIDE
+
+        return subprocess.run(
+            args,
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            startupinfo=si,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return None
+
 def extract_files_from_meipass():
     if not hasattr(sys, "_MEIPASS"):
-        _safe_copy_tree(
-            os.path.join(os.path.dirname(__file__), "flags"),
-            os.path.join(APP_DIR, "flags"),
-            overwrite=False
-        )
-        return
+        base_src = os.path.dirname(__file__)
+    else:
+        base_src = sys._MEIPASS
 
-    base_src = sys._MEIPASS
     for folder in ("flags", "core"):
         _safe_copy_tree(
             os.path.join(base_src, folder),
             os.path.join(APP_DIR, folder),
             overwrite=False
         )
+
+def unblock_core_tree(core_dir: str) -> None:
+    if not os.path.isdir(core_dir):
+        return
+    try:
+        _run_hidden(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-Command",
+                (
+                    f"Get-ChildItem -LiteralPath '{core_dir}' -Recurse -File "
+                    "| Unblock-File -ErrorAction SilentlyContinue"
+                )
+            ]
+        )
+    except Exception:
+        pass
 
 def _safe_copy_file(src: str, dst: str, overwrite: bool = False) -> bool:
     os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -73,6 +107,93 @@ FLOWSEAL_VER_KEY = "flowseal_release"
 
 SETTINGS_FILE = os.path.join(APP_DIR, 'settings.ini')
 VERSION_FILE = os.path.join(APP_DIR, '.app_version')
+AUTOLOG_FILE = os.path.join(APP_DIR, "autotest_last.log")
+
+NOUPDATE_INP = os.path.join(APP_DIR, "_no_update_input.txt")
+
+def _ensure_no_update_input(lines: int = 12) -> str:
+    try:
+        if not os.path.exists(NOUPDATE_INP):
+            with open(NOUPDATE_INP, "w", encoding="ascii", newline="\n") as f:
+                for _ in range(lines):
+                    f.write("n\n")
+    except Exception:
+        pass
+    return NOUPDATE_INP
+
+def _patch_bat_inplace_remove_updates(bat_path: str) -> bool:
+    try:
+        if not os.path.exists(bat_path):
+            return False
+
+        with open(bat_path, "rb") as f:
+            raw = f.read()
+
+        enc = "utf-8"
+        bom = b""
+        if raw.startswith(b"\xff\xfe"):
+            enc = "utf-16le"; bom = b"\xff\xfe"
+        elif raw.startswith(b"\xfe\xff"):
+            enc = "utf-16be"; bom = b"\xfe\xff"
+        elif raw.startswith(b"\xef\xbb\xbf"):
+            enc = "utf-8"; bom = b"\xef\xbb\xbf"
+        else:
+            try:
+                raw.decode("utf-8")
+                enc = "utf-8"
+            except Exception:
+                enc = "cp1251"
+
+        text = raw[len(bom):].decode(enc, errors="replace")
+        lines = text.splitlines()
+
+        new_lines = []
+        changed = False
+
+        for ln in lines:
+            s = ln.strip().lower()
+            if "service.bat" in s and "check_updates" in s:
+                if s.startswith("call ") or s.startswith("service.bat") or '"service.bat"' in s or "%~dp0" in s:
+                    changed = True
+                    continue
+            new_lines.append(ln)
+
+        stripped = []
+        i = 0
+        while i < len(new_lines):
+            s = new_lines[i].strip().lower()
+            if s.startswith("net session") and "||" in s and "(" in s:
+                j = i + 1
+                found_runas = False
+                while j < len(new_lines) and j < i + 12:
+                    sj = new_lines[j].strip().lower()
+                    if "-verb runas" in sj or "start-process" in sj:
+                        found_runas = True
+                    if sj == ")":
+                        break
+                    j += 1
+                if found_runas and j < len(new_lines) and new_lines[j].strip() == ")":
+                    changed = True
+                    i = j + 1
+                    continue
+            stripped.append(new_lines[i])
+            i += 1
+
+        if not stripped:
+            return False
+
+        out_text = "\r\n".join(stripped) + "\r\n"
+        out_raw = bom + out_text.encode(enc, errors="replace")
+
+        if out_raw == raw:
+            return False
+
+        with open(bat_path, "wb") as f:
+            f.write(out_raw)
+
+        return changed
+    except Exception:
+        return False
 
 def _read_text(path: str) -> str:
     try:
@@ -89,13 +210,13 @@ def _theme_text_color_hex(w: QWidget) -> str:
 
 def _force_stop_blockers():
     try:
-        subprocess.run(["taskkill", "/IM", "winws.exe", "/F"], capture_output=True, text=True)
+        _run_hidden(["taskkill", "/IM", "winws.exe", "/F"])
     except Exception:
         pass
 
     for svc in ("zapret", "zapret_discord", "WinDivert", "WinDivert14"):
         try:
-            subprocess.run(["sc", "stop", svc], capture_output=True, text=True)
+            _run_hidden(["sc", "stop", svc])
         except Exception:
             pass
 
@@ -119,15 +240,12 @@ def wipe_app_dir_if_new_version():
             for name in os.listdir(APP_DIR):
                 p = os.path.join(APP_DIR, name)
 
-                # Если залочен драйвер — он чаще всего в core\bin\WinDivert*.sys
-                # Не даём этому убить запуск: пытаемся удалить, если нельзя — пропускаем.
                 try:
                     if os.path.isdir(p):
                         shutil.rmtree(p, ignore_errors=False)
                     else:
                         os.remove(p)
                 except PermissionError:
-                    # второй шанс после повторного "глушения"
                     _force_stop_blockers()
                     try:
                         if os.path.isdir(p):
@@ -135,8 +253,6 @@ def wipe_app_dir_if_new_version():
                         else:
                             os.remove(p)
                     except PermissionError:
-                        # критично важно: НЕ КРЭШИМ.
-                        # Просто оставляем залоченное и идём дальше.
                         pass
                 except FileNotFoundError:
                     pass
@@ -146,7 +262,6 @@ def wipe_app_dir_if_new_version():
             f.write(APP_VERSION)
 
     except Exception as e:
-        # вообще любая ошибка очистки не должна убивать запуск
         try:
             QMessageBox.warning(
                 None,
@@ -206,7 +321,6 @@ def update_domain_files():
             parts = v.strip().split(".")
             nums = []
             for p in parts:
-                # оставляем цифры, чтобы '1.9.3-beta' не сломал сравнение
                 q = "".join(ch for ch in p if ch.isdigit())
                 nums.append(int(q) if q else 0)
             while len(nums) < 3:
@@ -225,7 +339,6 @@ def update_domain_files():
         else:
             current_ver = "неизвестно"
 
-        #Уточняем у пользователя
         msg = QMessageBox()
         msg.setWindowTitle("Обновление")
         msg.setIcon(QMessageBox.Icon.Question)
@@ -241,7 +354,6 @@ def update_domain_files():
         if msg.clickedButton() != btn_yes:
             return
 
-        #Находим что скачивать
         download_url = None
         assets = data.get("assets") or []
         for a in assets:
@@ -261,7 +373,6 @@ def update_domain_files():
         zr.raise_for_status()
         z = zipfile.ZipFile(io.BytesIO(zr.content))
 
-        #Полностью очищаем APP_DIR/core
         core_target = os.path.join(APP_DIR, "core")
         os.makedirs(core_target, exist_ok=True)
 
@@ -329,13 +440,83 @@ def update_domain_files():
             None,
             "Ошибка обновления",
             "Не удалось очистить/записать файлы в папку core.\n"
-            "Проверьте, что обход выключен и файлы не заняты.\n\n"
+            "НАЖМИТЕ НА КНОПКУ Сбросить соединения winws.\n\n"
             f"Детали: {e}"
         )
     except zipfile.BadZipFile:
         QMessageBox.critical(None, "Ошибка обновления", "Скачанный архив повреждён или не является zip.")
     except Exception as e:
         QMessageBox.critical(None, "Ошибка обновления", f"Произошла ошибка:\n{e}")
+
+def _semver_tuple(v: str):
+    parts = v.strip().split(".")
+    nums = []
+    for p in parts:
+        q = "".join(ch for ch in p if ch.isdigit())
+        nums.append(int(q) if q else 0)
+    while len(nums) < 3:
+        nums.append(0)
+    return tuple(nums[:3])
+
+def _get_latest_flowseal_release_silent() -> str:
+    try:
+        api_url = f"https://api.github.com/repos/{FLOWSEAL_REPO}/releases/latest"
+        headers = {"User-Agent": "ZapretGUI-Updater", "Accept": "application/vnd.github+json"}
+        r = requests.get(api_url, headers=headers, timeout=12)
+        r.raise_for_status()
+        data = r.json()
+        tag = (data.get("tag_name") or "").strip()
+        latest_ver = tag[1:] if tag.startswith("v") else tag
+        return (latest_ver or "").strip()
+    except Exception:
+        return ""
+
+def _cleanup_noupdate_files(core_dir: str) -> None:
+    try:
+        if not os.path.isdir(core_dir):
+            return
+        for fn in os.listdir(core_dir):
+            if fn.lower().startswith("__noupdate__") and fn.lower().endswith(".bat"):
+                try:
+                    os.remove(os.path.join(core_dir, fn))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+def _patch_profiles_if_core_outdated(core_dir: str, settings: QSettings) -> None:
+    try:
+        if not os.path.isdir(core_dir):
+            return
+
+        latest = _get_latest_flowseal_release_silent()
+        if not latest:
+            return
+
+        has_ver = settings.contains(FLOWSEAL_VER_KEY)
+        current = str(settings.value(FLOWSEAL_VER_KEY)) if has_ver else FLOWSEAL_DEFAULT_VER
+
+        try:
+            outdated = _semver_tuple(latest) > _semver_tuple(current)
+        except Exception:
+            outdated = (latest != current)
+
+        if not outdated:
+            _cleanup_noupdate_files(core_dir)
+            return
+
+        _cleanup_noupdate_files(core_dir)
+
+        for fn in os.listdir(core_dir):
+            if not fn.lower().endswith(".bat"):
+                continue
+            low = fn.lower()
+            if low in ("service.bat", "cloudflare_switch.bat"):
+                continue
+            _patch_bat_inplace_remove_updates(os.path.join(core_dir, fn))
+
+    except Exception:
+        pass
 
 def create_delete_bat():
     delete_bat_path = os.path.join(APP_DIR, "Delete.bat")
@@ -434,7 +615,6 @@ translations = {
     }
 }
 
-
 class SettingsDialog(QDialog):
     def __init__(self, parent=None, settings=None):
         super().__init__(parent)
@@ -506,7 +686,7 @@ class SettingsDialog(QDialog):
         profile_row = QHBoxLayout()
         profile_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.profile_cb = QComboBox()
-        self.profile_cb.addItem(" ")  # default
+        self.profile_cb.addItem(" ")
         self.profile_cb.currentIndexChanged.connect(self.on_autostart_profile_selected)
         self.profile_enable_cb = QCheckBox()
         self.profile_enable_cb.setEnabled(False)
@@ -562,7 +742,6 @@ class SettingsDialog(QDialog):
         self.profile_enable_cb.setChecked(enabled)
         self.profile_enable_cb.setEnabled(False)
 
-
     def save_settings(self):
         self.settings.setValue('autostart', self.autostart_cb.isChecked())
         self.settings.setValue('minimized', self.minimized_cb.isChecked())
@@ -593,28 +772,33 @@ class SettingsDialog(QDialog):
             parent.change_lang(lang_code)
 
     def on_service_mode(self):
-        script = os.path.join(os.path.dirname(__file__), 'core', 'service.bat')
+        script = os.path.join(APP_DIR, 'core', 'service.bat')
         if os.path.exists(script):
-            subprocess.Popen([script], shell=True, close_fds=True)
+            subprocess.Popen(
+                ["cmd.exe", "/d", "/c", script],
+                cwd=os.path.join(APP_DIR, "core"),
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+                close_fds=True
+            )
         else:
             QMessageBox.warning(self, self.t('Settings'), 'service.bat не найден')
 
     def install_service(self):
-        script = os.path.join(os.path.dirname(__file__), 'core', 'fast', 'install_service.bat')
+        script = os.path.join(APP_DIR, 'core', 'fast', 'install_service.bat')
         if not os.path.exists(script):
             QMessageBox.warning(self, self.t('Settings'), 'install_service.bat не найден')
             return
         subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE, close_fds=True)
 
     def install_discord_service(self):
-        script = os.path.join(os.path.dirname(__file__), 'core', 'fast', 'install_discord_service.bat')
+        script = os.path.join(APP_DIR, 'core', 'fast', 'install_discord_service.bat')
         if not os.path.exists(script):
             QMessageBox.warning(self, self.t('Settings'), 'install_discord_service.bat не найден')
             return
         subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE, close_fds=True)
 
     def remove_service(self):
-        script = os.path.join(os.path.dirname(__file__), 'core', 'fast', 'uninstall.bat')
+        script = os.path.join(APP_DIR, 'core', 'fast', 'uninstall.bat')
         if not os.path.exists(script):
             QMessageBox.warning(self, self.t('Settings'), 'remove_service.bat не найден')
             return
@@ -677,16 +861,36 @@ class AutoTestWorker(QThread):
             return False
 
         try:
-            subprocess.Popen(
-                ["cmd.exe", "/c", bat],
-                cwd=self.core_dir,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                close_fds=True
-            )
+            with open(AUTOLOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"\n\n===== PROFILE: {profile_name} =====\n")
+                f.write(f"BAT: {bat}\n")
+                f.write(f"TIME: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
         except Exception:
+            pass
+
+        inp_path = _ensure_no_update_input()
+
+        env = os.environ.copy()
+        env["ZAPRETGUI_AUTOTEST"] = "1"
+        env["ZAPRETGUI_NOUPDATE"] = "1"
+
+        try:
+            with open(AUTOLOG_FILE, "a", encoding="utf-8") as log, open(inp_path, "r", encoding="ascii") as fin:
+                subprocess.Popen(
+                    ["cmd.exe", "/d", "/c", bat],
+                    cwd=self.core_dir,
+                    stdin=fin,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    close_fds=True
+                )
+        except Exception as e:
+            self._alog(f"ERROR: failed to start BAT: {repr(e)}")
             return False
 
-        # ждём запуск winws
+        # ждём появления winws.exe
         start_deadline = time.time() + 6.0
         while time.time() < start_deadline:
             if self._stop:
@@ -695,11 +899,12 @@ class AutoTestWorker(QThread):
                 break
             time.sleep(0.1)
         else:
+            self._alog("ERROR: winws.exe did not start within 6s")
+            self._diag_winws_start_failure(bat)
             return False
 
         time.sleep(0.35)
 
-        # 🔥 ВАЖНО: только реальные проверки
         ok_discord = self._quick_https("https://discord.com/api/v9/experiments", timeout=3.0)
         ok_youtube = self._quick_https("https://www.youtube.com/generate_204", timeout=3.0)
 
@@ -719,6 +924,75 @@ class AutoTestWorker(QThread):
         except Exception:
             return False
 
+    def _alog(self, line: str) -> None:
+        try:
+            with open(AUTOLOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line.rstrip("\n") + "\n")
+        except Exception:
+            pass
+
+    def _diag_winws_start_failure(self, bat: str) -> None:
+        self._alog("DIAG: winws.exe not detected after start, collecting diagnostics...")
+
+        try:
+            bin_dir = os.path.join(self.core_dir, "bin")
+            self._alog(f"DIAG: bin_dir={bin_dir} exists={os.path.isdir(bin_dir)}")
+            if os.path.isdir(bin_dir):
+                try:
+                    names = sorted(os.listdir(bin_dir))
+                    self._alog("DIAG: bin_dir files: " + ", ".join(names[:80]) + (" ..." if len(names) > 80 else ""))
+                except Exception as e:
+                    self._alog(f"DIAG: listdir(bin_dir) failed: {repr(e)}")
+        except Exception:
+            pass
+
+        try:
+            out = subprocess.check_output(
+                'tasklist /FI "IMAGENAME eq winws.exe" /NH',
+                shell=True,
+                text=True
+            )
+            self._alog("DIAG: tasklist winws.exe => " + out.strip().replace("\n", " | "))
+        except Exception as e:
+            self._alog(f"DIAG: tasklist failed: {repr(e)}")
+
+        try:
+            self._alog("DIAG: re-running BAT with capture to get error output...")
+
+            inp_path = _ensure_no_update_input()
+            env = os.environ.copy()
+            env["ZAPRETGUI_AUTOTEST"] = "1"
+            env["ZAPRETGUI_NOUPDATE"] = "1"
+
+            with open(inp_path, "r", encoding="ascii") as fin:
+                r = subprocess.run(
+                    ["cmd.exe", "/d", "/c", bat],
+                    cwd=self.core_dir,
+                    stdin=fin,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    timeout=12
+                )
+
+            self._alog(f"DIAG: BAT returncode={r.returncode}")
+            if r.stdout:
+                self._alog("DIAG: BAT stdout (tail):")
+                for line in r.stdout.splitlines()[-80:]:
+                    self._alog("  " + line)
+            if r.stderr:
+                self._alog("DIAG: BAT stderr (tail):")
+                for line in r.stderr.splitlines()[-80:]:
+                    self._alog("  " + line)
+
+        except subprocess.TimeoutExpired:
+            self._alog("DIAG: BAT capture run timed out (12s)")
+        except Exception as e:
+            self._alog(f"DIAG: BAT capture run failed: {repr(e)}")
+
+        self._alog("DIAG: end")
+
     def _quick_https(self, url: str, timeout: float = 3.0) -> bool:
         headers = {"User-Agent": "ZapretGUI-Test"}
         for _ in range(2):
@@ -727,8 +1001,8 @@ class AutoTestWorker(QThread):
                 s.trust_env = True
                 r = s.get(url, timeout=timeout, headers=headers, stream=True, allow_redirects=False, verify=True)
                 return (200 <= r.status_code < 500)
-            except Exception:
-                pass
+            except Exception as e:
+                self._alog(f"HTTPS ERROR for {url}: {repr(e)}")
         return False
 
     def _kill_winws(self):
@@ -756,7 +1030,7 @@ class AutoProgressDialog(QDialog):
 
         row = QHBoxLayout()
         self.lbl_left = QLabel(left_text)
-        self.lbl_right = QLabel("")  # тут будет "≈ 00:42"
+        self.lbl_right = QLabel("")
         self.lbl_right.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         row.addWidget(self.lbl_left, 1)
@@ -764,11 +1038,11 @@ class AutoProgressDialog(QDialog):
         v.addLayout(row)
 
         self.bar = QProgressBar()
-        self.bar.setRange(0, 100)  # временно, выставим позже
+        self.bar.setRange(0, 100)
         self.bar.setValue(0)
         v.addWidget(self.bar)
 
-        self.lbl_profile = QLabel("")  # текущий профиль
+        self.lbl_profile = QLabel("")
         self.lbl_profile.setStyleSheet("color: rgba(0,0,0,140);")
         v.addWidget(self.lbl_profile)
 
@@ -803,7 +1077,7 @@ class MainWindow(QWidget):
         self.last_profile = settings.value('last_profile', 'General')
 
         self.core_dir = os.path.join(APP_DIR, 'core')
-        self.unblock_executables()
+        #self.unblock_executables()
         self.presets = {}
         self.process = None
         self._auto_cancelled = False
@@ -901,7 +1175,6 @@ class MainWindow(QWidget):
             self.activateWindow()
 
     def update_tray_presets(self):
-        # preset_menu появляется только после init_tray_icon()
         if self.preset_menu is None:
             return
         if not hasattr(self, "cb"):
@@ -1010,29 +1283,21 @@ class MainWindow(QWidget):
 
             elapsed_ms = int(self._elapsed.elapsed()) if hasattr(self, "_elapsed") else 0
 
-            # пока не прошли хотя бы 1 профиль — ETA бессмысленен
             if done <= 0:
                 dlg.set_eta_text("≈ —")
                 return
 
-            # "мгновенная" средняя скорость по факту (мс на профиль)
             raw_ms_per = max(200, elapsed_ms // done)
 
-            # сглаживание, чтобы не прыгало
-            # чем ближе к концу — тем больше доверяем свежим данным
             if self._eta_ms_per_profile is None:
                 self._eta_ms_per_profile = raw_ms_per
             else:
-                # адаптивный alpha: по мере роста done меньше дергается
-                # done=1..5 -> alpha 0.35, done>20 -> 0.15
                 alpha = 0.35 if done < 6 else (0.20 if done < 20 else 0.15)
                 self._eta_ms_per_profile = int(self._eta_ms_per_profile * (1 - alpha) + raw_ms_per * alpha)
 
             left_profiles = total - done
             left_ms = left_profiles * int(self._eta_ms_per_profile)
 
-            # Ключевой момент: НЕ даём показывать 00:00 пока done < total
-            # пусть минимум будет 1 секунда, чтобы не "упасть раньше времени"
             if left_ms < 1000:
                 left_ms = 1000
 
@@ -1071,7 +1336,6 @@ class MainWindow(QWidget):
         dlg.set_progress(done, total)
         dlg.set_current_profile(prof)
 
-        # сразу обновим ETA (без сигналов/emit)
         try:
             cb = getattr(self, "_update_eta_tick", None)
             if cb:
@@ -1130,7 +1394,13 @@ class MainWindow(QWidget):
         QMessageBox.critical(
             self,
             "Автоподбор профиля" if self.lang == "ru" else "Auto selection",
-            f"Ошибка при выполнении тестов:\n{err}"
+            (
+                f"Ошибка при выполнении тестов:\n{err}\n\n"
+                f"Лог автотеста: {AUTOLOG_FILE}"
+                if self.lang == "ru"
+                else
+                f"Auto test error:\n{err}\n\nLog file: {AUTOLOG_FILE}"
+            )
         )
 
     def _on_auto_test_done(self, result: dict):
@@ -1144,7 +1414,6 @@ class MainWindow(QWidget):
 
         elapsed_ms = int(self._elapsed.elapsed()) if hasattr(self, "_elapsed") else 0
 
-        # сохраняем среднее время НА ПРОФИЛЬ (для ETA)
         total = max(1, len(self.presets))
         ms_per_profile = max(300, elapsed_ms // total)
 
@@ -1185,7 +1454,6 @@ class MainWindow(QWidget):
             html += f"<div style='color:#cc0000;'><b>{extra_err}</b></div><br>"
         html += f"{best_line}<br><br>{good_line}<br><br>{bad_line}"
         if extra_err and raw:
-            # если формат не распознан — покажем лог (не огромный)
             tail = raw[-4000:]
             html += "<br><br><b>Лог тестов:</b><br><pre style='white-space:pre-wrap;'>" + tail + "</pre>"
         html += "</div>"
@@ -1197,7 +1465,6 @@ class MainWindow(QWidget):
         dlg.setText(html)
         dlg.exec()
 
-        # Автовыбор в комбобоксе (только выбрать, НЕ запускать)
         if best and best in self.presets:
             self.cb.setCurrentText(best)
             self.on_profile_changed(best)
@@ -1230,7 +1497,7 @@ class MainWindow(QWidget):
 
             msg.exec()
             if msg.clickedButton() == btn_yes:
-                os.system('taskkill /IM winws.exe /F')
+                _run_hidden(["taskkill", "/IM", "winws.exe", "/F"])
                 QApplication.instance().quit()
             return
         QApplication.instance().quit()
@@ -1238,10 +1505,14 @@ class MainWindow(QWidget):
     def reload_presets(self):
         self.presets = {'General': 'general.bat'}
         for fn in sorted(os.listdir(self.core_dir)):
-            if fn.lower().endswith('.bat') and fn not in (
-                'general.bat', 'discord.bat', 'service.bat', 'cloudflare_switch.bat'
-            ):
-                self.presets[os.path.splitext(fn)[0]] = fn
+            low = fn.lower()
+            if not low.endswith(".bat"):
+                continue
+            if low.startswith("__noupdate__"):
+                continue
+            if low in ("general.bat", "discord.bat", "service.bat", "cloudflare_switch.bat"):
+                continue
+            self.presets[os.path.splitext(fn)[0]] = fn
 
         self.cb.blockSignals(True)
         self.cb.clear()
@@ -1434,7 +1705,7 @@ class MainWindow(QWidget):
         self.instruction_btn.setText(self.t('Instruction'))
 
     def update_blink(self):
-        base_border = _theme_text_color_hex(self)  # авто: белый/чёрный
+        base_border = _theme_text_color_hex(self)
         dim_border = "#666666"  # нейтральный, виден почти везде
 
         color = base_border if self.blink_on else dim_border
@@ -1472,15 +1743,39 @@ class MainWindow(QWidget):
             return
 
         if checked:
-            self.process = subprocess.Popen(
-                ['cmd.exe', '/c', script],
-                cwd=self.core_dir,
-                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
-                close_fds=True
-            )
-            self.status_lbl.setText(self.t('On: {}', profile))
+            inp_path = _ensure_no_update_input()
+
+            env = os.environ.copy()
+            env["ZAPRETGUI_NOUPDATE"] = "1"
+
+            fin = None
+            try:
+                fin = open(inp_path, "r", encoding="ascii")
+            except Exception:
+                fin = None
+
+            run_script = script
+
+            try:
+                self.process = subprocess.Popen(
+                    ["cmd.exe", "/d", "/c", run_script],
+                    cwd=self.core_dir,
+                    stdin=fin if fin else subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                    creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+                    close_fds=True
+                )
+                self.status_lbl.setText(self.t('On: {}', profile))
+            finally:
+                try:
+                    if fin:
+                        fin.close()
+                except Exception:
+                    pass
         else:
-            os.system('taskkill /IM winws.exe /F')
+            _run_hidden(["taskkill", "/IM", "winws.exe", "/F"])
             self.process = None
             self.status_lbl.setText(self.t('Off'))
 
@@ -1539,7 +1834,7 @@ class MainWindow(QWidget):
             msg.exec()
 
             if msg.clickedButton() == btn_yes:
-                os.system('taskkill /IM winws.exe /F')
+                _run_hidden(["taskkill", "/IM", "winws.exe", "/F"])
                 event.accept()
             else:
                 event.ignore()
@@ -1550,8 +1845,10 @@ def main():
     app = QApplication(sys.argv)
     wipe_app_dir_if_new_version()
     extract_files_from_meipass()
+    unblock_core_tree(os.path.join(APP_DIR, "core"))
     create_delete_bat()
     settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
+    _patch_profiles_if_core_outdated(os.path.join(APP_DIR, "core"), settings)
     win = MainWindow(settings)
     icon_path = os.path.join(APP_DIR, 'flags', 'z.ico')
     if os.path.exists(icon_path):
