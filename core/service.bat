@@ -1,5 +1,5 @@
 @echo off
-set "LOCAL_VERSION=1.9.4"
+set "LOCAL_VERSION=1.9.5"
 
 :: External commands
 if "%~1"=="status_zapret" (
@@ -887,7 +887,7 @@ goto menu
 
 :: RUN TESTS =============================
 :run_tests
-chcp 65001 >nul
+chcp 437 >nul
 cls
 
 :: Require PowerShell 3.0+
