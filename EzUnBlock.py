@@ -98,7 +98,7 @@ def _safe_copy_tree(src_root: str, dst_root: str, overwrite: bool = False) -> No
             _safe_copy_file(s, d, overwrite=overwrite)
 
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 APP_DIR = os.path.join(os.path.expanduser('~'), 'ZapretGUI')
 os.makedirs(APP_DIR, exist_ok=True)
 FLOWSEAL_REPO = "Flowseal/zapret-discord-youtube"
