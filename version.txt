@@ -17,12 +17,12 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'Medvedeff'),
           StringStruct('FileDescription', 'Zapret GUI'),
-          StringStruct('FileVersion', '1.6.0'),
+          StringStruct('FileVersion', '1.6.1'),
           StringStruct('InternalName', 'Zapret GUI'),
           StringStruct('LegalCopyright', '© 2026 Medvedeff'),
           StringStruct('OriginalFilename', 'Zapret GUI.exe'),
           StringStruct('ProductName', 'Zapret GUI'),
-          StringStruct('ProductVersion', '1.6.0')
+          StringStruct('ProductVersion', '1.6.1')
         ])
       ]),
     VarFileInfo([VarStruct('Translation', [1033, 1252])])
