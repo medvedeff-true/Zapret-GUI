@@ -1,5 +1,5 @@
 @echo off
-set "LOCAL_VERSION=1.9.3"
+set "LOCAL_VERSION=1.9.4"
 
 :: External commands
 if "%~1"=="status_zapret" (
@@ -37,7 +37,7 @@ if "%1"=="admin" (
     call :check_command powershell
 
     echo Requesting admin rights...
-    powershell -Command "Start-Process 'cmd.exe' -ArgumentList '/c \"\"%~f0\" admin\"' -Verb RunAs"
+    powershell -NoProfile -Command "Start-Process 'cmd.exe' -ArgumentList '/c \"\"%~f0\" admin\"' -Verb RunAs"
     exit
 )
 
@@ -193,7 +193,7 @@ goto menu
 :: INSTALL =============================
 :service_install
 cls
-chcp 65001 > nul
+chcp 437 > nul
 
 :: Main
 cd /d "%~dp0"
@@ -203,7 +203,7 @@ set "LISTS_PATH=%~dp0lists\"
 :: Searching for .bat files in current folder, except files that start with "service"
 echo Pick one of the options:
 set "count=0"
-for /f "delims=" %%F in ('powershell -Command "Get-ChildItem -Filter '*.bat' | Where-Object { $_.Name -notlike 'service*' } | Sort-Object { [Regex]::Replace($_.Name, '\d+', { $args[0].Value.PadLeft(8, '0') }) } | ForEach-Object { $_.Name }"') do (
+for /f "delims=" %%F in ('powershell -NoProfile -Command "Get-ChildItem -LiteralPath '.' -Filter '*.bat' | Where-Object { $_.Name -notlike 'service*' } | Sort-Object { [Regex]::Replace($_.Name, '(\d+)', { $args[0].Value.PadLeft(8, '0') }) } | ForEach-Object { $_.Name }"') do (
     set /a count+=1
     echo !count!. %%F
     set "file!count!=%%F"
@@ -335,10 +335,10 @@ cls
 :: Set current version and URLs
 set "GITHUB_VERSION_URL=https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/.service/version.txt"
 set "GITHUB_RELEASE_URL=https://github.com/Flowseal/zapret-discord-youtube/releases/tag/"
-set "GITHUB_DOWNLOAD_URL=https://github.com/Flowseal/zapret-discord-youtube/releases/latest/download/zapret-discord-youtube-"
+set "GITHUB_DOWNLOAD_URL=https://github.com/Flowseal/zapret-discord-youtube/releases/latest"
 
 :: Get the latest version from GitHub
-for /f "delims=" %%A in ('powershell -command "(Invoke-WebRequest -Uri \"%GITHUB_VERSION_URL%\" -Headers @{\"Cache-Control\"=\"no-cache\"} -UseBasicParsing -TimeoutSec 5).Content.Trim()" 2^>nul') do set "GITHUB_VERSION=%%A"
+for /f "delims=" %%A in ('powershell -NoProfile -Command "(Invoke-WebRequest -Uri \"%GITHUB_VERSION_URL%\" -Headers @{\"Cache-Control\"=\"no-cache\"} -UseBasicParsing -TimeoutSec 5).Content.Trim()" 2^>nul') do set "GITHUB_VERSION=%%A"
 
 :: Error handling
 if not defined GITHUB_VERSION (
@@ -360,15 +360,8 @@ if "%LOCAL_VERSION%"=="%GITHUB_VERSION%" (
 echo New version available: %GITHUB_VERSION%
 echo Release page: %GITHUB_RELEASE_URL%%GITHUB_VERSION%
 
-set "CHOICE="
-set /p "CHOICE=Do you want to automatically download the new version? (Y/N) (default: Y) "
-if "%CHOICE%"=="" set "CHOICE=Y"
-if /i "%CHOICE%"=="y" set "CHOICE=Y"
-
-if /i "%CHOICE%"=="Y" (
-    echo Opening the download page...
-    start "" "%GITHUB_DOWNLOAD_URL%%GITHUB_VERSION%.rar"
-)
+echo Opening the download page...
+start "" "%GITHUB_DOWNLOAD_URL%"
 
 
 if "%1"=="soft" exit 
@@ -513,7 +506,7 @@ echo:
 
 :: DNS
 set "dohfound=0"
-for /f "delims=" %%a in ('powershell -Command "Get-ChildItem -Recurse -Path 'HKLM:System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\' | Get-ItemProperty | Where-Object { $_.DohFlags -gt 0 } | Measure-Object | Select-Object -ExpandProperty Count"') do (
+for /f "delims=" %%a in ('powershell -NoProfile -Command "Get-ChildItem -Recurse -Path 'HKLM:System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\' | Get-ItemProperty | Where-Object { $_.DohFlags -gt 0 } | Measure-Object | Select-Object -ExpandProperty Count"') do (
     if %%a gtr 0 (
         set "dohfound=1"
     )
@@ -810,7 +803,7 @@ echo Updating ipset-all...
 if exist "%SystemRoot%\System32\curl.exe" (
     curl -L -o "%listFile%" "%url%"
 ) else (
-    powershell -Command ^
+    powershell -NoProfile -Command ^
         "$url = '%url%';" ^
         "$out = '%listFile%';" ^
         "$dir = Split-Path -Parent $out;" ^
@@ -840,7 +833,7 @@ echo Checking hosts file...
 if exist "%SystemRoot%\System32\curl.exe" (
     curl -L -s -o "%tempFile%" "%hostsUrl%"
 ) else (
-    powershell -Command ^
+    powershell -NoProfile -Command ^
         "$url = '%hostsUrl%';" ^
         "$out = '%tempFile%';" ^
         "$res = Invoke-WebRequest -Uri $url -TimeoutSec 10 -UseBasicParsing;" ^
@@ -917,15 +910,15 @@ goto menu
 :: Utility functions
 
 :PrintGreen
-powershell -Command "Write-Host \"%~1\" -ForegroundColor Green"
+powershell -NoProfile -Command "Write-Host \"%~1\" -ForegroundColor Green"
 exit /b
 
 :PrintRed
-powershell -Command "Write-Host \"%~1\" -ForegroundColor Red"
+powershell -NoProfile -Command "Write-Host \"%~1\" -ForegroundColor Red"
 exit /b
 
 :PrintYellow
-powershell -Command "Write-Host \"%~1\" -ForegroundColor Yellow"
+powershell -NoProfile -Command "Write-Host \"%~1\" -ForegroundColor Yellow"
 exit /b
 
 :check_command
