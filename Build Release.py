@@ -2,55 +2,72 @@
 import sys
 import shutil
 import subprocess
+from pathlib import Path
 
 script_name = "EzUnBlock.py"
 base_name = "ZapretGUI"
-icon_path = "flags/z.ico"
-build_dir = "dist"
-spec_file = f"{os.path.splitext(script_name)[0]}.spec"
+icon_path = Path("flags/z.ico")
+build_dir = Path("dist")
+spec_file = Path(f"{Path(script_name).stem}.spec")
 
 try:
-    import PyInstaller
+    import PyInstaller  # noqa: F401
 except Exception:
-    raise FileNotFoundError("❌ PyInstaller не установлен в этом окружении. Установи: pip install pyinstaller")
+    raise FileNotFoundError("❌ PyInstaller не установлен. Установи: pip install pyinstaller")
+
+root = Path(__file__).resolve().parent
+script_path = (root / script_name)
+icon_abs = (root / icon_path)
 
 # Проверка ресурсов
-assert os.path.exists(script_name), f"{script_name} не найден"
-assert os.path.exists(icon_path), f"{icon_path} не найден"
-assert os.path.exists("flags"), "Папка flags не найдена"
-assert os.path.exists("core"), "Папка core не найдена"
-assert os.path.exists("version.txt"), "version.txt не найден"
+assert script_path.exists(), f"{script_path} не найден"
+assert icon_abs.exists(), f"{icon_abs} не найден"
+assert (root / "flags").exists(), "Папка flags не найдена"
+assert (root / "core").exists(), "Папка core не найдена"
+assert (root / "version.txt").exists(), "version.txt не найден"
 
 # Очистка предыдущей сборки
-for folder in ("build", "dist"):
-    if os.path.exists(folder):
-        shutil.rmtree(folder)
-if os.path.exists(spec_file):
-    os.remove(spec_file)
+for folder in (root / "build", root / "dist"):
+    if folder.exists():
+        shutil.rmtree(folder, ignore_errors=True)
+if spec_file.exists():
+    spec_file.unlink()
 
-# Команда сборки
+sep = os.pathsep
+
 cmd = [
     sys.executable, "-m", "PyInstaller",
     "--onefile",
     "--noconsole",
-    f"--icon={icon_path}",
+    f"--icon={str(icon_abs)}",
     f"--name={base_name}",
-    f"--add-data=flags{os.pathsep}flags",
-    f"--add-data=core{os.pathsep}core",
-    "--version-file=version.txt",
+    f"--add-data={str(root/'flags')}{sep}flags",
+    f"--add-data={str(root/'core')}{sep}core",
+    "--version-file", str(root / "version.txt"),
+
     "--hidden-import=psutil",
-    script_name
+    "--hidden-import=requests",
+    "--hidden-import=urllib3",
+    "--hidden-import=idna",
+    "--hidden-import=charset_normalizer",
+    "--hidden-import=certifi",
+
+    str(script_path)
 ]
 
 print("▶ Сборка exe файла...")
-subprocess.run(cmd, check=True)
+subprocess.run(cmd, check=True, cwd=str(root))
 print("✅ Сборка завершена!")
 
-# Проверка итогового exe
-src_exe = os.path.join(build_dir, f"{base_name}.exe")
-final_exe = os.path.join(build_dir, "Zapret GUI.exe")
-if os.path.exists(final_exe):
-    os.remove(final_exe)
-os.rename(src_exe, final_exe)
-print(f"\n📦 Готовый файл: {final_exe}")
+src_exe = build_dir / f"{base_name}.exe"
+assert src_exe.exists(), f"❌ Не найден результат сборки: {src_exe}"
 
+final_exe = build_dir / f"{base_name}.exe"
+
+if final_exe.exists() and final_exe != src_exe:
+    final_exe.unlink()
+
+if final_exe != src_exe:
+    src_exe.rename(final_exe)
+
+print(f"\n📦 Готовый файл: {final_exe}")

@@ -1,7 +1,7 @@
 ﻿import sys
 import os
 import subprocess
-from PyQt6.QtCore import Qt, QSettings, QSize, QTimer, QThread, pyqtSignal, QElapsedTimer
+from PyQt6.QtCore import Qt, QSettings, QSize, QTimer, QThread, pyqtSignal, QElapsedTimer, QEvent
 from PyQt6.QtGui import QIcon, QPixmap, QAction, QPalette
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
@@ -48,6 +48,13 @@ def extract_files_from_meipass():
             os.path.join(APP_DIR, folder),
             overwrite=False
         )
+
+    try:
+        src_uninstall = os.path.join(base_src, "core", "fast", "uninstall.bat")
+        if os.path.exists(src_uninstall) and (not os.path.exists(REMOVE_BAT)):
+            _safe_copy_file(src_uninstall, REMOVE_BAT, overwrite=False)
+    except Exception:
+        pass
 
 def unblock_core_tree(core_dir: str) -> None:
     if not os.path.isdir(core_dir):
@@ -98,16 +105,18 @@ def _safe_copy_tree(src_root: str, dst_root: str, overwrite: bool = False) -> No
             _safe_copy_file(s, d, overwrite=overwrite)
 
 
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.7.0"
 APP_DIR = os.path.join(os.path.expanduser('~'), 'ZapretGUI')
 os.makedirs(APP_DIR, exist_ok=True)
 FLOWSEAL_REPO = "Flowseal/zapret-discord-youtube"
-FLOWSEAL_DEFAULT_VER = "1.9.2"  # текущая базовая
+FLOWSEAL_DEFAULT_VER = "1.9.6"
 FLOWSEAL_VER_KEY = "flowseal_release"
 
 SETTINGS_FILE = os.path.join(APP_DIR, 'settings.ini')
 VERSION_FILE = os.path.join(APP_DIR, '.app_version')
 AUTOLOG_FILE = os.path.join(APP_DIR, "autotest_last.log")
+
+REMOVE_BAT = os.path.join(APP_DIR, "uninstall.bat")
 
 NOUPDATE_INP = os.path.join(APP_DIR, "_no_update_input.txt")
 
@@ -195,14 +204,94 @@ def _patch_bat_inplace_remove_updates(bat_path: str) -> bool:
     except Exception:
         return False
 
+def _patch_bat_inplace_hide_windows(bat_path: str) -> bool:
+    try:
+        if not os.path.exists(bat_path):
+            return False
+
+        with open(bat_path, "rb") as f:
+            raw = f.read()
+
+        enc = "utf-8"
+        bom = b""
+        if raw.startswith(b"\xff\xfe"):
+            enc = "utf-16le"; bom = b"\xff\xfe"
+        elif raw.startswith(b"\xfe\xff"):
+            enc = "utf-16be"; bom = b"\xfe\xff"
+        elif raw.startswith(b"\xef\xbb\xbf"):
+            enc = "utf-8"; bom = b"\xef\xbb\xbf"
+        else:
+            try:
+                raw.decode("utf-8")
+                enc = "utf-8"
+            except Exception:
+                enc = "cp1251"
+
+        text = raw[len(bom):].decode(enc, errors="replace")
+        lines = text.splitlines()
+
+        changed = False
+        out_lines = []
+
+        for ln in lines:
+            if re.match(r"(?i)^\s*start\b", ln):
+                low = ln.lower()
+                if re.search(r"(?i)(\s)/b(\s|$)", ln) is None:
+                    new_ln = re.sub(r"(?i)(\s)/min(\s|$)", r"\1/b\2", ln, count=1)
+                    if new_ln != ln:
+                        ln = new_ln
+                        changed = True
+
+            out_lines.append(ln)
+
+        if not changed:
+            return False
+
+        out_text = "\r\n".join(out_lines) + "\r\n"
+        out_raw = bom + out_text.encode(enc, errors="replace")
+
+        if out_raw == raw:
+            return False
+
+        with open(bat_path, "wb") as f:
+            f.write(out_raw)
+
+        return True
+    except Exception:
+        return False
+
+def _patch_profiles_hide_windows(core_dir: str) -> None:
+    try:
+        if not os.path.isdir(core_dir):
+            return
+        for fn in os.listdir(core_dir):
+            low = fn.lower()
+            if not low.endswith(".bat"):
+                continue
+            if low.startswith("__noupdate__"):
+                continue
+            if low in ("service.bat", "cloudflare_switch.bat"):
+                continue
+            _patch_bat_inplace_hide_windows(os.path.join(core_dir, fn))
+    except Exception:
+        pass
+
+
 def _read_text(path: str) -> str:
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read().strip()
+        with open(path, "rb") as f:
+            data = f.read()
     except FileNotFoundError:
         return ""
     except Exception:
         return ""
+
+    for enc in ("utf-8", "cp1251", "utf-16"):
+        try:
+            return data.decode(enc).strip()
+        except Exception:
+            pass
+    return data.decode("utf-8", errors="replace").strip()
 
 def _theme_text_color_hex(w: QWidget) -> str:
     c = w.palette().color(QPalette.ColorRole.Text)
@@ -229,7 +318,7 @@ def wipe_app_dir_if_new_version():
     if not hasattr(sys, "_MEIPASS"):
         return
 
-    prev = _read_text(VERSION_FILE)
+    prev = _read_text(VERSION_FILE) if os.path.exists(VERSION_FILE) else ""
     if prev == APP_VERSION:
         return
 
@@ -300,12 +389,15 @@ def update_domain_files():
 
         settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
 
-        has_ver = settings.contains(FLOWSEAL_VER_KEY)
-        current_ver = str(settings.value(FLOWSEAL_VER_KEY)) if has_ver else ""
+        current_ver = str(settings.value(FLOWSEAL_VER_KEY, "")).strip()
+        if not current_ver:
+            current_ver = FLOWSEAL_DEFAULT_VER
+            settings.setValue(FLOWSEAL_VER_KEY, current_ver)
+            settings.sync()
 
-        #Получаем latest release через GitHub API
         api_url = f"https://api.github.com/repos/{FLOWSEAL_REPO}/releases/latest"
         headers = {"User-Agent": "ZapretGUI-Updater", "Accept": "application/vnd.github+json"}
+
         r = requests.get(api_url, headers=headers, timeout=20)
         r.raise_for_status()
         data = r.json()
@@ -316,7 +408,7 @@ def update_domain_files():
             QMessageBox.warning(None, "Обновление", "Не удалось определить версию последнего релиза.")
             return
 
-        #Сравнение версий
+        # Сравнение версий
         def semver_tuple(v: str):
             parts = v.strip().split(".")
             nums = []
@@ -327,17 +419,14 @@ def update_domain_files():
                 nums.append(0)
             return tuple(nums[:3])
 
-        if has_ver:
-            try:
-                is_newer = semver_tuple(latest_ver) > semver_tuple(current_ver)
-            except Exception:
-                is_newer = latest_ver != current_ver
+        try:
+            is_newer = semver_tuple(latest_ver) > semver_tuple(current_ver)
+        except Exception:
+            is_newer = (latest_ver != current_ver)
 
-            if not is_newer:
-                QMessageBox.information(None, "Обновление", f"У вас уже актуальная версия: {current_ver}")
-                return
-        else:
-            current_ver = "неизвестно"
+        if not is_newer:
+            QMessageBox.information(None, "Обновление", f"У вас уже актуальная версия: {current_ver}")
+            return
 
         msg = QMessageBox()
         msg.setWindowTitle("Обновление")
@@ -573,11 +662,11 @@ translations = {
         'On: {}': 'Включён: {}',
         'Instruction': 'Инструкция',
         'Instruction Text': """
-        <b>1.</b> Выберите из выпадающего списка <b>профиль настроек</b>, затем нажмите на <span style="color:green;"><b>большую зелёную кнопку</b></span>, чтобы запустить обход блокировок. <i>(По умолчанию используется профиль <b>General</b>).</i><br><br>
-        <b>2.</b> Если выбранный профиль не сработал — <span style="color:red;"><b>нажмите на красную кнопку</b></span> для отключения, выберите другой профиль и повторите запуск. Продолжайте, пока не найдёте рабочий вариант.<br><br>
-        <b>3.</b> При проблемах с запуском или остановкой обхода откройте раздел <b>«Настройки»</b> и нажмите кнопку <b>"Сбросить соединения winws"</b>. Дождитесь закрытия консоли. Если вместо <b>Success</b> появится ошибка — полностью перезапустите приложение и повторите. Это сбросит конфигурации подключения и позволит всё запустить заново.<br><br>
-        <b>4.</b> В разделе <b>«Настройки»</b> также можно включить <b>автоматический запуск обхода</b> при запуске программы. <u>Важно:</u> это работает только при включённой автозагрузке приложения. Отметьте <b>«Запускать вместе с системой»</b>, выберите нужный профиль — и при запуске Windows обход будет активен автоматически, в трее.<br><br>
-        <span style="color:#cc0000;"><b>5. ПРИМЕЧАНИЕ:</b> <b>Discord</b> теперь работает на профиле <b>General</b>. Больше не нужно менять профили, так намного <b>удобнее</b>.</span>
+        <b>1.</b> Выберите из выпадающего списка <b>профиль настроек</b>, затем нажмите на <span style="color:red;"><b>большую красную кнопку</b></span>, чтобы запустить обход блокировок. <i>(По умолчанию используется профиль <b>General</b>).</i><br><br>
+        <b>2.</b> Если выбранный профиль не сработал — <span style="color:green;"><b>нажмите на зелёную кнопку</b></span> для отключения и выберите другой профиль.<br><br>
+        <b>3.</b> В настройках можно включить <b>Автозапуск</b> вместе с Windows и выбрать профиль для автозапуска.<br><br>
+        <b>4.</b> Чтобы проверить, работает ли обход — попробуйте открыть сайты, которые у вас не открывались, или сделайте проверку на сайте: <a href="https://www.youtube.com">@YouTube</a> или <a href="https://discord.com/">@Discord</a><br><br>
+        <b>5.</b> Для автоматического подбора профиля можно воспользоваться кнопкой - <span style="color:green;"><b>зелёный кружок с буквой "А" внутри.</b></span> Процесс подбора обычно занимает несколько минут.
         """,
         'Enable bypass': 'Включить обход',
         'Disable bypass': 'Выключить обход',
@@ -600,11 +689,11 @@ translations = {
         'On: {}': 'On: {}',
         'Instruction': 'Instruction',
         'Instruction Text': """
-        <b>1.</b> Select a <b>profile</b> from the dropdown list, then click the <span style="color:green;"><b>big green button</b></span> to start the bypass. <i>(By default, the <b>General</b> profile is used.)</i><br><br>  
-        <b>2.</b> If the selected profile doesn’t work — <span style="color:red;"><b>click the red button</b></span> to stop, choose another profile and try again. Repeat this process until you find one that works for you.<br><br>
-        <b>3.</b> If you experience issues with enabling or disabling the bypass, go to the <b>“Settings”</b> section and click <b>“Reset winws connections”</b>. Wait until the console closes. If an error appears instead of <b>Success</b>, fully restart the application and try again. This process resets all bypass connection settings and should restore proper functionality.<br><br>
-        <b>4.</b> In the <b>“Settings”</b> section, you can also enable <b>auto-start</b> for the bypass. <u>Note:</u> this only works if the app itself is enabled to auto-launch. Just check <b>“Run with system startup”</b>, choose your desired profile, and the bypass will automatically run in the system tray when Windows starts.<br><br>
-        <span style="color:#cc0000;"><b>5. NOTE:</b> <b>Discord</b> now works on a profile <b>General</b>. You don't have to change profiles anymore, it's so much more <b>convenient</b>.</span>
+        <b>1.</b> Select a <b>profile</b> from the dropdown list, then click the <span style="color:red;"><b>big red button</b></span> to start the bypass. <i>(By default, profile <b>General</b> is used).</i><br><br>
+        <b>2.</b> If the selected profile doesn’t work — <span style="color:green;"><b>click the green button</b></span> to stop and choose another profile.<br><br>
+        <b>3.</b> In settings you can enable <b>Autostart</b> with Windows and choose a profile for autostart.<br><br>
+        <b>4.</b> To check if bypass works — try opening websites that were blocked for you, or test on: <a href="https://www.youtube.com">@YouTube</a> or <a href="https://discord.com/">@Discord</a><br><br>
+        <b>5.</b> To automatically select a profile, you can use the button - <span style="color:green;"><b>green circle with the letter “A” inside.</b></span> The selection process usually takes a few minutes.
         """,
         'Enable bypass': 'Enable bypass',
         'Disable bypass': 'Disable bypass',
@@ -723,6 +812,11 @@ class SettingsDialog(QDialog):
         self.about_label.setOpenExternalLinks(True)
         layout.addWidget(self.about_label)
 
+        self.version_label = QLabel()
+        self.version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.version_label.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(self.version_label)
+
     def update_profile_autostart_ui(self):
         enabled = self.autostart_cb.isChecked()
         self.autostart_profile_label.setEnabled(enabled)
@@ -763,6 +857,11 @@ class SettingsDialog(QDialog):
             '<a href="https://github.com/Flowseal" style="color:#3399ff;">Flowseal</a>'
         )
 
+        core_ver = str(self.settings.value(FLOWSEAL_VER_KEY, FLOWSEAL_DEFAULT_VER)).strip()
+        if not core_ver:
+            core_ver = FLOWSEAL_DEFAULT_VER
+        self.version_label.setText(f"GUI: {APP_VERSION} + Core: {core_ver}")
+
     def change_lang(self, lang_code):
         self.lang = lang_code
         self.settings.setValue('lang', lang_code)
@@ -798,11 +897,20 @@ class SettingsDialog(QDialog):
         subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE, close_fds=True)
 
     def remove_service(self):
-        script = os.path.join(APP_DIR, 'core', 'fast', 'uninstall.bat')
+        script = REMOVE_BAT  # APP_DIR/uninstall.bat
         if not os.path.exists(script):
-            QMessageBox.warning(self, self.t('Settings'), 'remove_service.bat не найден')
+            QMessageBox.warning(self, self.t('Settings'), 'uninstall.bat не найден')
             return
-        subprocess.Popen(['cmd.exe', '/c', script], creationflags=subprocess.CREATE_NEW_CONSOLE, close_fds=True)
+
+        try:
+            subprocess.Popen(
+                ["cmd.exe", "/d", "/c", script],
+                cwd=APP_DIR,
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                close_fds=True
+            )
+        except Exception as e:
+            QMessageBox.warning(self, self.t('Settings'), f"Не удалось запустить uninstall.bat:\n{e}")
 
     def check_updates(self):
         update_domain_files()
@@ -854,7 +962,17 @@ class AutoTestWorker(QThread):
             self.finished_err.emit(str(e))
 
     def _test_profile_fast(self, profile_name: str, timeout_per_profile: float = 10.0) -> bool:
+        # Всегда чистим хвосты
         self._kill_winws()
+        for svc in ("zapret", "zapret_discord", "WinDivert", "WinDivert14"):
+            try:
+                subprocess.run(["sc", "stop", svc], capture_output=True, text=True)
+            except Exception:
+                pass
+        try:
+            time.sleep(0.4)
+        except Exception:
+            pass
 
         bat = os.path.join(self.core_dir, self.presets[profile_name])
         if not os.path.exists(bat):
@@ -874,10 +992,12 @@ class AutoTestWorker(QThread):
         env["ZAPRETGUI_AUTOTEST"] = "1"
         env["ZAPRETGUI_NOUPDATE"] = "1"
 
+        proc = None
         try:
+            # ВАЖНО: /k, и сохраняем proc, чтобы потом гарантированно прибить дерево
             with open(AUTOLOG_FILE, "a", encoding="utf-8") as log, open(inp_path, "r", encoding="ascii") as fin:
-                subprocess.Popen(
-                    ["cmd.exe", "/d", "/c", bat],
+                proc = subprocess.Popen(
+                    ["cmd.exe", "/d", "/k", bat],
                     cwd=self.core_dir,
                     stdin=fin,
                     stdout=log,
@@ -886,32 +1006,38 @@ class AutoTestWorker(QThread):
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     close_fds=True
                 )
-        except Exception as e:
-            self._alog(f"ERROR: failed to start BAT: {repr(e)}")
-            return False
 
-        # ждём появления winws.exe
-        start_deadline = time.time() + 6.0
-        while time.time() < start_deadline:
-            if self._stop:
+            # ждём появления winws.exe (увеличил окно: новые профили/сервисы иногда дольше стартуют)
+            start_deadline = time.time() + 12.0
+            while time.time() < start_deadline:
+                if self._stop:
+                    return False
+                if self._is_winws_running():
+                    break
+                time.sleep(0.1)
+            else:
+                self._alog("ERROR: winws.exe did not start within 12s")
+                self._diag_winws_start_failure(bat)
                 return False
-            if self._is_winws_running():
-                break
-            time.sleep(0.1)
-        else:
-            self._alog("ERROR: winws.exe did not start within 6s")
-            self._diag_winws_start_failure(bat)
-            return False
 
-        time.sleep(0.35)
+            time.sleep(0.6)
 
-        ok_discord = self._quick_https("https://discord.com/api/v9/experiments", timeout=3.0)
-        ok_youtube = self._quick_https("https://www.youtube.com/generate_204", timeout=3.0)
+            ok_discord = self._quick_https("https://discord.com/api/v9/experiments", timeout=3.5)
+            ok_youtube = self._quick_https("https://www.youtube.com/generate_204", timeout=3.5)
 
-        ok = ok_discord or ok_youtube
+            return (ok_discord or ok_youtube)
 
-        self._kill_winws()
-        return ok
+        finally:
+            self._kill_winws()
+            if proc and proc.poll() is None:
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                        capture_output=True,
+                        text=True
+                    )
+                except Exception:
+                    pass
 
     def _is_winws_running(self) -> bool:
         try:
@@ -1070,6 +1196,8 @@ class AutoProgressDialog(QDialog):
 class MainWindow(QWidget):
     def __init__(self, settings):
         super().__init__()
+        self._exiting = False
+        self._in_init = True
         self.settings = settings
         self.lang = settings.value('lang', 'ru')
         self.autostart = settings.value('autostart', False, type=bool)
@@ -1112,31 +1240,55 @@ class MainWindow(QWidget):
             self.toggle_btn.setChecked(True)
             QTimer.singleShot(1000, lambda: self.on_toggle(True))
 
+        self._in_init = False
+
+    def _tray_icon_path(self, running: bool) -> str:
+        on_p = os.path.join(APP_DIR, "flags", "tray-on.ico")
+        off_p = os.path.join(APP_DIR, "flags", "tray-off.ico")
+        fallback = os.path.join(APP_DIR, "flags", "z.ico")
+
+        if running and os.path.exists(on_p):
+            return on_p
+        if (not running) and os.path.exists(off_p):
+            return off_p
+        return fallback
+
+    def show_from_tray(self):
+        self.show()
+        self.setWindowState((self.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive)
+        self.raise_()
+        self.activateWindow()
+
     def init_tray_icon(self):
-        icon_path = os.path.join(APP_DIR, 'flags', 'z.ico')
-        self.tray = QSystemTrayIcon(QIcon(icon_path), self)
+        self.tray = QSystemTrayIcon(QIcon(self._tray_icon_path(self.toggle_btn.isChecked())), self)
 
         self.tray_menu = QMenu()
         self.action_open = QAction(self.t('Open'), self)
-        self.action_open.triggered.connect(self.showNormal)
+        self.action_open.triggered.connect(self.show_from_tray)
         self.tray_menu.addAction(self.action_open)
         self.tray_menu.addSeparator()
+
         self.action_start = QAction(self.t('Enable bypass'), self)
         self.action_start.triggered.connect(lambda: self.toggle_tray(True))
         self.tray_menu.addAction(self.action_start)
+
         self.action_stop = QAction(self.t('Disable bypass'), self)
         self.action_stop.triggered.connect(lambda: self.toggle_tray(False))
         self.tray_menu.addAction(self.action_stop)
+
         self.tray_menu.addSeparator()
         self.preset_menu = QMenu(self.t('Select profile'), self)
         self.tray_menu.addMenu(self.preset_menu)
+
         self.tray_menu.addSeparator()
         self.exit_action = QAction(self.t('Exit'), self)
         self.exit_action.triggered.connect(self.tray_exit)
         self.tray_menu.addAction(self.exit_action)
+
         self.tray.setContextMenu(self.tray_menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+
         self.update_tray_presets()
         self.update_tray_status()
 
@@ -1153,9 +1305,16 @@ class MainWindow(QWidget):
             return
 
         running = self.toggle_btn.isChecked()
+
         self.action_start.setEnabled(not running)
         self.action_stop.setEnabled(running)
+
+        try:
+            self.tray.setIcon(QIcon(self._tray_icon_path(running)))
+        except Exception:
+            pass
         self.tray.setToolTip(self.get_tray_tooltip())
+
         self.update_tray_presets()
 
     def is_admin(self) -> bool:
@@ -1171,8 +1330,15 @@ class MainWindow(QWidget):
 
     def on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self.showNormal()
-            self.activateWindow()
+            self.show_from_tray()
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.WindowStateChange:
+            if self.windowState() & Qt.WindowState.WindowMinimized:
+                QTimer.singleShot(0, self.hide)
+                event.accept()
+                return
+        super().changeEvent(event)
 
     def update_tray_presets(self):
         if self.preset_menu is None:
@@ -1272,7 +1438,7 @@ class MainWindow(QWidget):
             total = int(getattr(self, "_auto_total", 0))
             done = int(getattr(self, "_auto_done", 0))
 
-            # если тест уже закончился — не трогаем
+            # если тест уже закончился - не трогаем
             if total <= 0:
                 dlg.set_eta_text("≈ —")
                 return
@@ -1475,14 +1641,33 @@ class MainWindow(QWidget):
             self.on_toggle(state)
         self.update_tray_status()
 
+    def _shutdown_and_quit(self):
+        if getattr(self, "_exiting", False):
+            return
+        self._exiting = True
+
+        try:
+            _force_stop_blockers()
+        except Exception:
+            pass
+
+        try:
+            if self.tray is not None:
+                self.tray.hide()
+        except Exception:
+            pass
+
+        QApplication.instance().quit()
+
     def tray_exit(self):
         if self.is_winws_running():
-            title = self.t('Exit')
+            title = "Выход из программы" if self.lang == 'ru' else "Exit"
             text = (
-                "Обход сейчас активен. Вы хотите завершить его и выйти?"
+                "Обход сейчас активен. Остановить его и выйти?"
                 if self.lang == 'ru'
-                else "Bypass is currently running. Do you want to stop it and exit?"
+                else "Bypass is active. Stop it and exit?"
             )
+
             msg = QMessageBox(self)
             msg.setWindowTitle(title)
             msg.setText(text)
@@ -1496,28 +1681,69 @@ class MainWindow(QWidget):
                 btn_no = msg.addButton("No", QMessageBox.ButtonRole.NoRole)
 
             msg.exec()
-            if msg.clickedButton() == btn_yes:
-                _run_hidden(["taskkill", "/IM", "winws.exe", "/F"])
-                QApplication.instance().quit()
-            return
-        QApplication.instance().quit()
+            if msg.clickedButton() != btn_yes:
+                return
+
+        self._shutdown_and_quit()
 
     def reload_presets(self):
-        self.presets = {'General': 'general.bat'}
-        for fn in sorted(os.listdir(self.core_dir)):
-            low = fn.lower()
-            if not low.endswith(".bat"):
-                continue
-            if low.startswith("__noupdate__"):
-                continue
-            if low in ("general.bat", "discord.bat", "service.bat", "cloudflare_switch.bat"):
-                continue
-            self.presets[os.path.splitext(fn)[0]] = fn
+        alt_re = re.compile(r"\(\s*([A-Za-z\-]*ALT)\s*(\d*)\s*\)\s*$", re.IGNORECASE)
+
+        def sort_key(name: str):
+            s = name.strip()
+
+            m = alt_re.search(s)
+            if m:
+                alt_tag = (m.group(1) or "").casefold()
+                num_str = (m.group(2) or "").strip()
+
+                alt_num = int(num_str) if num_str.isdigit() else 1
+
+                base = s[:m.start()].rstrip()
+
+                parts = re.split(r"(\d+)", base)
+                base_key = []
+                for p in parts:
+                    if p.isdigit():
+                        base_key.append(int(p))
+                    else:
+                        base_key.append(p.casefold())
+
+                return (base_key, 0, alt_tag, alt_num)
+
+            parts = re.split(r"(\d+)", s)
+            out = []
+            for p in parts:
+                if p.isdigit():
+                    out.append(int(p))
+                else:
+                    out.append(p.casefold())
+            return (out, 1, "", 0)
+
+        self.presets = {"General": "general.bat"}
+
+        items = []
+        try:
+            for fn in os.listdir(self.core_dir):
+                low = fn.lower()
+                if not low.endswith(".bat"):
+                    continue
+                if low.startswith("__noupdate__"):
+                    continue
+                if low in ("general.bat", "discord.bat", "service.bat", "cloudflare_switch.bat"):
+                    continue
+                name = os.path.splitext(fn)[0]
+                items.append((name, fn))
+        except FileNotFoundError:
+            items = []
+
+        for name, fn in sorted(items, key=lambda x: sort_key(x[0])):
+            self.presets[name] = fn
 
         self.cb.blockSignals(True)
         self.cb.clear()
         self.cb.addItems(self.presets.keys())
-        self.cb.setCurrentText(self.settings.value('last_profile', 'General'))
+        self.cb.setCurrentText(self.settings.value("last_profile", "General"))
         self.cb.blockSignals(False)
 
         try:
@@ -1532,9 +1758,37 @@ class MainWindow(QWidget):
             self.update_tray_status()
 
     def on_profile_changed(self, text):
-        self.settings.setValue('last_profile', text)
-        self.update_tray_status()
+        self.settings.setValue("last_profile", text)
 
+        if getattr(self, "_in_init", False):
+            self.update_tray_status()
+            return
+
+        if getattr(self, "_switching_profile", False):
+            self.update_tray_status()
+            return
+
+        self._switching_profile = True
+        try:
+            if self.toggle_btn.isChecked():
+                self.toggle_btn.blockSignals(True)
+                self.toggle_btn.setChecked(False)
+                self.toggle_btn.blockSignals(False)
+                self.on_toggle(False)
+
+                self.toggle_btn.blockSignals(True)
+                self.toggle_btn.setChecked(True)
+                self.toggle_btn.blockSignals(False)
+                self.on_toggle(True)
+            else:
+                self.toggle_btn.blockSignals(True)
+                self.toggle_btn.setChecked(True)
+                self.toggle_btn.blockSignals(False)
+                self.on_toggle(True)
+        finally:
+            self._switching_profile = False
+
+        self.update_tray_status()
 
     def unblock_executables(self):
         bin_dir = os.path.join(self.core_dir, 'bin')
@@ -1558,9 +1812,9 @@ class MainWindow(QWidget):
         dialog.setWindowTitle(self.t('Instruction'))
 
         if self.lang == 'ru':
-            dialog.setFixedSize(410, 590)
+            dialog.setFixedSize(410, 420)
         else:
-            dialog.setFixedSize(410, 490)
+            dialog.setFixedSize(410, 350)
 
         dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowType.WindowMaximizeButtonHint)
         dialog.setModal(False)
@@ -1589,6 +1843,14 @@ class MainWindow(QWidget):
 
     def init_ui(self):
         self.setFixedSize(300, 320)
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.CustomizeWindowHint
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -1610,17 +1872,18 @@ class MainWindow(QWidget):
         self.toggle_btn.setIconSize(QSize(48, 48))
 
         self.toggle_btn.setStyleSheet("""
-            QPushButton {
-                border: 2px solid #ffffff;
-                border-radius: 50px;
-                background-color: green;
-                padding-left: 7px;
-                padding-right: 0px;
-            }
-            QPushButton::icon {
-                alignment: center;
-            }
-        """)
+                    QPushButton {
+                        border: 2px solid #ffffff;
+                        border-radius: 50px;
+                        /* OFF = red, ON = green (updated in update_blink) */
+                        background-color: red;
+                        padding-left: 7px;
+                        padding-right: 0px;
+                    }
+                    QPushButton::icon {
+                        alignment: center;
+                    }
+                """)
         self.toggle_btn.setContentsMargins(0, 0, 0, 0)
 
         self.toggle_btn.clicked.connect(self.on_toggle)
@@ -1709,7 +1972,8 @@ class MainWindow(QWidget):
         dim_border = "#666666"  # нейтральный, виден почти везде
 
         color = base_border if self.blink_on else dim_border
-        bg_color = "red" if self.toggle_btn.isChecked() else "green"
+
+        bg_color = "green" if self.toggle_btn.isChecked() else "red"
 
         self.toggle_btn.setStyleSheet(f"""
             QPushButton {{
@@ -1735,14 +1999,20 @@ class MainWindow(QWidget):
 
     def on_toggle(self, checked):
         profile = self.cb.currentText()
-        self.settings.setValue('last_profile', profile)
+        self.settings.setValue("last_profile", profile)
+
         script = os.path.join(self.core_dir, self.presets[profile])
         if not os.path.exists(script):
             QMessageBox.warning(self, "Ошибка", f"Не найден файл:\n{script}")
             self.toggle_btn.setChecked(False)
+            self.update_tray_status()
             return
 
         if checked:
+            # 1) Всегда стартуем "с чистого листа" (важно при конфликте с сервисом/старым winws)
+            _force_stop_blockers()
+
+            # 2) Готовим stdin, чтобы не зависнуть на любых "update/check" вопросах
             inp_path = _ensure_no_update_input()
 
             env = os.environ.copy()
@@ -1754,30 +2024,51 @@ class MainWindow(QWidget):
             except Exception:
                 fin = None
 
-            run_script = script
+            si = None
+            try:
+                if hasattr(subprocess, "STARTUPINFO"):
+                    si = subprocess.STARTUPINFO()
+                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    si.wShowWindow = 0  # SW_HIDE
+            except Exception:
+                si = None
+
+            flags = (
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
 
             try:
+                # ВАЖНО: /k вместо /c
+                # /k оставляет cmd.exe живым, поэтому запуск через start /b не "схлопывается".
                 self.process = subprocess.Popen(
-                    ["cmd.exe", "/d", "/c", run_script],
+                    ["cmd.exe", "/d", "/k", script],
                     cwd=self.core_dir,
                     stdin=fin if fin else subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     env=env,
-                    creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+                    startupinfo=si,
+                    creationflags=flags,
                     close_fds=True
                 )
-                self.status_lbl.setText(self.t('On: {}', profile))
+                self.status_lbl.setText(self.t("On: {}", profile))
             finally:
                 try:
                     if fin:
                         fin.close()
                 except Exception:
                     pass
+
         else:
             _run_hidden(["taskkill", "/IM", "winws.exe", "/F"])
+
+            # ВАЖНО: прибиваем "живой" cmd.exe (иначе будет висеть фоном)
+            if self.process and self.process.poll() is None:
+                _run_hidden(["taskkill", "/PID", str(self.process.pid), "/T", "/F"])
+
             self.process = None
-            self.status_lbl.setText(self.t('Off'))
+            self.status_lbl.setText(self.t("Off"))
 
         self.retranslate_ui()
         self.update_tray_status()
@@ -1810,13 +2101,25 @@ class MainWindow(QWidget):
         except Exception as e:
             print("Autostart error:", e)
 
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.WindowStateChange:
+            if self.isMinimized():
+                QTimer.singleShot(0, self.hide)
+                event.accept()
+                return
+        super().changeEvent(event)
+
     def closeEvent(self, event):
+        if getattr(self, "_exiting", False):
+            event.accept()
+            return
+
         if self.is_winws_running():
             title = "Выход из программы" if self.lang == 'ru' else "Exit"
             text = (
-                "Обход сейчас активен. Вы хотите завершить его и выйти?"
+                "Обход сейчас активен. Остановить его и выйти?"
                 if self.lang == 'ru'
-                else "Bypass is currently running. Do you want to stop it and exit?"
+                else "Bypass is active. Stop it and exit?"
             )
 
             msg = QMessageBox(self)
@@ -1832,14 +2135,12 @@ class MainWindow(QWidget):
                 btn_no = msg.addButton("No", QMessageBox.ButtonRole.NoRole)
 
             msg.exec()
-
-            if msg.clickedButton() == btn_yes:
-                _run_hidden(["taskkill", "/IM", "winws.exe", "/F"])
-                event.accept()
-            else:
+            if msg.clickedButton() != btn_yes:
                 event.ignore()
-        else:
-            event.accept()
+                return
+
+        self._shutdown_and_quit()
+        event.accept()
 
 def main():
     app = QApplication(sys.argv)
@@ -1849,6 +2150,7 @@ def main():
     create_delete_bat()
     settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
     _patch_profiles_if_core_outdated(os.path.join(APP_DIR, "core"), settings)
+    _patch_profiles_hide_windows(os.path.join(APP_DIR, "core"))
     win = MainWindow(settings)
     icon_path = os.path.join(APP_DIR, 'flags', 'z.ico')
     if os.path.exists(icon_path):
