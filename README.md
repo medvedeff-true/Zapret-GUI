@@ -3,44 +3,73 @@
 ## Русский
 # Zapret GUI
 
-**Zapret GUI** — это простая графическая оболочка для обхода интернет-блокировок с помощью Утилиты Zapret ([Оригинальное приложение](https://github.com/bol-van/zapret)).  
+**Zapret GUI** — это простая графическая оболочка для обхода интернет-блокировок с помощью утилиты Zapret ([Оригинальное приложение](https://github.com/bol-van/zapret)).  
 Создано на Python + PyQt6.
 
-![{C833C781-C50A-4FD7-BE0A-9A056F0ADA20}](https://github.com/user-attachments/assets/3cb3b642-eedb-4fe5-94b5-ff5f3d9338bd)
+<img width="1920" height="770" alt="press-release" src="https://github.com/user-attachments/assets/d0d91f48-87ab-48b7-92a5-30607930835d" />
 
-![image](https://github.com/user-attachments/assets/ef988023-c1b0-4772-9cad-8184fc2855d3)
+<img width="616" height="568" alt="press-release2" src="https://github.com/user-attachments/assets/03ed73f7-685c-4046-bc54-a480f6c5e81b" />
 
 ---
 
 ## 🛠 Последние обновления
-<br>
 
-➕ **Добавлен автоматический подбор профиля, чтобы это активировать нажмите на значок** <img width="50" height="47" alt="image" src="https://github.com/user-attachments/assets/ab1baaaa-4da1-4cc6-892f-a9d39a1c1a02" />
-<br>
-<img width="414" height="185" alt="image" src="https://github.com/user-attachments/assets/0c37388c-3a35-4831-bf32-33d958c22986" />
-<img width="488" height="695" alt="image" src="https://github.com/user-attachments/assets/a7ad4597-c587-4cf8-8fe4-1a4b1f519ed6" />
-<br>
+➕ **Исправлена логика индикаторов**
+- 🟢 Обход включён → зелёный  
+- 🔴 Обход выключен → красный  
+- Добавлены разные иконки трея для состояния ON/OFF (tray-on / tray-off)
+
+➕ **Полноценная работа в трее**
+- Кнопка "Свернуть" теперь прячет приложение в трей точно также, как и кнопка <img width="31" height="31" alt="{A6289449-C895-4648-84F3-CBE5A5B09E94}" src="https://github.com/user-attachments/assets/5e9cb844-c172-4cbc-beef-0e5bdd30cde3" />
+- В панели задач не остаётся лишних окон  
+
+➕ **Автоматическое включение при выборе профиля**
+- При выборе профиля обход запускается автоматически  
+
+➕ **Обновлена версия Core**
+- Текущая стратегия обновлена и работает "из коробки" на версии [Flowseal 1.9.6](https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.9.6)
+
+➕ **Исправлена сортировка профилей**
+- Реализована натуральная сортировка
+- `(ALT)` отображается выше `(ALT2)`, `(ALT3)` и т.д.  
+
+➕ **Исправлена система проверки обновлений Core**
+- Текущая версия Core сохраняется в `settings.ini`  
+- После обновления версия корректно обновляется и отображается  
+
+➕ **Добавлено отображение версий**
+  `Версия GUI: X.X.X, Версия Core: X.X.X`  
+
+➕ **Исправлена кнопка "Сбросить соединения winws"**
+- Скрипт `uninstall.bat` больше не зависит от перезатираемой папки `core`  
+
+➕ **Повышена стабильность сборки**
+- Исправлен краш на первом запуске (безопасная обработка `.app_version`)  
+
+> ## ⚠️ **Если у вас возникают какие-то проблемы с запуском новой версии, удалите полностью папку **ZapretGUI** по пути **C:\Users\user** и перезапустите программу**
+
+---
+
+➕ **Начиная с версии 1.6.0 добавлен автоматический подбор профиля, чтобы это активировать нажмите на значок** <img width="50" height="47" alt="image" src="https://github.com/user-attachments/assets/ab1baaaa-4da1-4cc6-892f-a9d39a1c1a02" />
+
+<img width="1005" height="732" alt="press-release3" src="https://github.com/user-attachments/assets/80a49fb5-7b67-49de-bdda-0ccf245d45f6" />
+
 > ⚠️ **Автоподбор не панацея!** Функция была написана на скорую руку, без глубокого тестирования, поэтому на некоторых провайдерах могут быть баги и неверный результат. Если у вас в итоге не выдаёт ни одного рабочего профиля, всё равно попробуйте сами вручную поискать рабочий.
- 
-➕ **Изменена логика проверки обновления, теперь она проверяет только релизы из репозитория [Flowseal](https://github.com/Flowseal/zapret-discord-youtube). Теперь если у Flowseal вышла новая версия, вы просто можете нажать на кнопку "Проверить обновления" в настройках программы и она скачается с заменой профилей**
 
-➕**Текущая стратегия обновлена и работает "из коробки" на версии Flowseal 1.9.5**
-
-➕**Мелкие косметические изменения**
-
-> ⚠️ Если у вас возникают какие-то проблемы с запуском новой версии, удалите полностью папку **ZapretGUI** по пути **C:\Users\user**
+➕ **Изменена логика проверки обновления, теперь она проверяет только релизы из репозитория [Flowseal]([https://github.com/Flowseal/zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube)). Теперь если у Flowseal вышла новая версия, вы просто можете нажать на кнопку "Проверить обновления" в настройках программы и она скачается с заменой профилей**
 
 ---
 
 ## 🧩 Возможности
 
 - ✅ Запуск и остановка в один клик
-- 🌐 Предустановленные профили для разных методов обхода
-- 🛠 Работа и полноценное управление в трее
-- 🔄 Сброс, обновление и диагностика служб запрез прямо из gui
+- 🌐 Предустановленные профили (Flowseal Core) для разных методов обхода
+- 🧠 Автоматический запуск обхода при выборе/переключении профиля
+- 🛠 Полноценная работа в трее: сворачивание обычной кнопкой окна, управление профилями и состоянием из трея
+- 🔄 Сброс соединений winws и остановка служб прямо из GUI (через `uninstall.bat`)
+- 🔁 Проверка обновлений и обновление Core (Flowseal) прямо из настроек + отображение версий GUI/Core
 - 🌍 Выбор языка: русский и английский
 - 🖥 Автозапуск и запуск в свернутом виде
-- 🚀 Автоматический запуск выбранного профиля при старте системы
 
 ---
 
@@ -48,8 +77,8 @@
 
 Установка не требуется. Просто:
 
-1. Скачайте последний архив `Zapret_GUI.zip` из раздела [Releases](https://github.com/medvedeff-true/Zapret-GUI/releases/tag/v1.5.0)
-2. Распакуйте и запустите файл `Zapret_GUI.exe` (при необходимости — от имени администратора)
+1. Скачайте последний релиз `Zapret_GUI.exe` из раздела [Releases](https://github.com/medvedeff-true/Zapret-GUI/releases/tag/v1.7.0)
+2. Запустите файл `Zapret_GUI.exe` (при необходимости — от имени администратора)
 
 > ⚠️ Если Windows выдаёт предупреждение, нажмите **Подробнее → Всё равно запустить**
 
@@ -58,14 +87,16 @@
 ## 🚀 Как пользоваться
 
 1. Выберите профиль из выпадающего списка
-2. Нажмите на зелёную круглую кнопку
-3. Если не работает — выберите другой профиль и повторите
-4. Чтобы свернуть приложение в трей нажмите на значок ![{6AFA9D68-ACFC-4281-971B-7ABD4A1DC91D}](https://github.com/user-attachments/assets/9729ac2c-6a1f-48ee-a10b-c6ba2dc7012a)
-5. Чтобы поставить программу в автозапуск, запускать её свёрнутой, проверить обновления, используйте соответствующие кнопки в настройках
-6. Для того, чтобы установить профиль обхода при автозапуске, изначально активируйте "Автозапуск программы", поставив соответствующую галочку
-7. Для расширенного управления (для опытных пользователей) можете возпользоваться "Сервисным режимом" в настройках
+2. Нажмите круглую кнопку:
+   - 🔴 Красная — обход выключен (нажатие включает)
+   - 🟢 Зелёная — обход включён (нажатие выключает)
+3. При переключении профиля обход включится автоматически (или перезапустится на новом профиле)
+4. Чтобы свернуть приложение в трей — нажмите обычную кнопку **Свернуть (—)**, окно исчезнет из панели задач и останется только значок в трее
+5. Чтобы открыть окно обратно — нажмите на значок в трее
+6. Чтобы проверить обновления Core (Flowseal) — откройте настройки и нажмите **Проверить обновления**
+7. Если нужно полностью оборвать соединения winws/остановить службы — нажмите **Сбросить соединения winws** (откроется консоль, дойдёт до `Success`, подождёт 5 секунд и закроется)
 
-> Всё подробно описано в инструкции, внутри самой программы, если что-то не понятно, откройте и прочитайте её внимательно.
+> Всё подробно описано в инструкции внутри программы. Если что-то непонятно — откройте инструкцию и следуйте шагам.
 
 ---
 
@@ -102,41 +133,70 @@
 **Zapret GUI** is a simple graphical interface for bypassing internet restrictions using pre-configured profiles (like `General`, `Discord`, etc.).  
 Built on Python + PyQt6. One-click launch, multi-language support, no installation required.
 
-![{9D1E8A0B-2FBD-4C1B-8B8A-3AB860394CF7}](https://github.com/user-attachments/assets/523172e5-4d50-4c0e-8c66-974bb4791508)
+<img width="1920" height="770" alt="press-release" src="https://github.com/user-attachments/assets/d0d91f48-87ab-48b7-92a5-30607930835d" />
 
-![image](https://github.com/user-attachments/assets/cf70061a-0908-448a-9a48-ea344c9849b9)
+<img width="616" height="568" alt="press-release2" src="https://github.com/user-attachments/assets/03ed73f7-685c-4046-bc54-a480f6c5e81b" />
 
 ---
 
-## 🛠 Recent updates
-<br>
+## 🛠 Latest Updates
 
-➕ **The automatic profile matching feature has been added. To activate it, click on the icon** <img width="50" height="47" alt="image" src="https://github.com/user-attachments/assets/ab1baaaa-4da1-4cc6-892f-a9d39a1c1a02" />
-<br>
-<img width="414" height="185" alt="image" src="https://github.com/user-attachments/assets/0c37388c-3a35-4831-bf32-33d958c22986" />
-<img width="488" height="695" alt="image" src="https://github.com/user-attachments/assets/a7ad4597-c587-4cf8-8fe4-1a4b1f519ed6" />
-<br>
-> ⚠️ **Auto-assembly is not a panacea!** The function was written in a hurry, without deep testing, so there may be bugs and incorrect results on some providers. If you don't end up with a single work profile, try manually searching for a worker anyway.
- 
-➕ **The update verification logic has been changed, now it checks only releases from the repository [Flowseal](https://github.com/Flowseal/zapret-discord-youtube). Now, if Flowseal has a new version, you can simply click on the "Check for updates" button in the program settings and it will download with the replacement of profiles.**
+➕ **Indicator logic fixed**
+- 🟢 Bypass enabled → green  
+- 🔴 Bypass disabled → red  
+- Added separate tray icons for ON/OFF state (tray-on / tray-off)
 
-➕**The current strategy has been updated and works out of the box on Flowseal version 1.9.3**
+➕ **Full tray functionality**
+- The "Minimize" button now hides the application to the tray, just like the button <img width="31" height="31" alt="{A6289449-C895-4648-84F3-CBE5A5B09E94}" src="https://github.com/user-attachments/assets/5e9cb844-c172-4cbc-beef-0e5bdd30cde3" />
+- No extra windows remain in the taskbar  
 
-➕**Minor cosmetic changes**
+➕ **Automatic enable on profile selection**
+- Selecting a profile automatically starts the bypass  
 
-> ⚠️ If you have any problems launching the new version, delete the folder completely **ZapretGUI** on the way **C:\Users\user**
+➕ **Core version updated**
+- The current strategy has been updated and works "out of the box" with [Flowseal 1.9.6](https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.9.6)
+
+➕ **Profile sorting improved**
+- Natural sorting implemented  
+- `(ALT)` is displayed above `(ALT2)`, `(ALT3)`, etc.  
+
+➕ **Core update system fixed**
+- Current Core version is stored in `settings.ini`  
+- After updating, the version is correctly saved and displayed  
+
+➕ **Version display added**
+  `GUI Version: X.X.X, Core Version: X.X.X`  
+
+➕ **"Reset winws connections" button fixed**
+- The `uninstall.bat` script no longer depends on the overwritten `core` directory  
+
+➕ **Build stability improved**
+- Fixed crash on first launch (safe handling of `.app_version`)  
+
+> ## ⚠️ **If you experience any issues running the new version, completely delete the `ZapretGUI` folder located at `C:\Users\user` and restart the program**
+
+---
+
+➕ **Starting from version 1.6.0, automatic profile selection was added. To activate it, click the icon** <img width="50" height="47" alt="image" src="https://github.com/user-attachments/assets/ab1baaaa-4da1-4cc6-892f-a9d39a1c1a02" />
+
+<img width="1005" height="732" alt="press-release3" src="https://github.com/user-attachments/assets/80a49fb5-7b67-49de-bdda-0ccf245d45f6" />
+
+> ⚠️ **Auto-selection is not a silver bullet!** The feature was implemented quickly without deep testing, so there may be bugs or incorrect results on some providers. If no working profile is found, try selecting one manually.
+
+➕ **Update check logic has been changed. It now checks only releases from the [Flowseal](https://github.com/Flowseal/zapret-discord-youtube) repository. If a new version of Flowseal is available, simply click "Check for updates" in the program settings and it will download and replace the profiles automatically.**
 
 ---
 
 ## 🧩 Features
 
-- ✅ Start and stop in one click
-- 🌐 Preset profiles for different bypass methods
-- 🛠 Work and full control in the tray
-- 🔄 Reset, update and diagnose prohibition services directly from the gui
-- 🌍 Language selection: Russian and English
-- 🖥 Autorun and minimized startup
-- 🚀 Automatic launch of selected profile at system startup
+- ✅ One-click start/stop
+- 🌐 Prebuilt bypass profiles (Flowseal Core) for different strategies
+- 🧠 Auto-start bypass when selecting/switching a profile
+- 🛠 Full tray support: minimize-to-tray using the standard window minimize button, tray controls for status and profiles
+- 🔄 Reset winws connections and stop services прямо from GUI (via `uninstall.bat`)
+- 🔁 Core (Flowseal) update check & update from Settings + GUI/Core version display
+- 🌍 Language switch: Russian and English
+- 🖥 Autostart support and start minimized
 
 ---
 
@@ -144,7 +204,7 @@ Built on Python + PyQt6. One-click launch, multi-language support, no installati
 
 No installation required. Just:
 
-1. Download the latest `Zapret_GUI.zip` file from [Releases](https://github.com/medvedeff-true/Zapret-GUI/releases/tag/v1.5.0)
+1. Download the latest `Zapret_GUI.exe` file from [Releases](https://github.com/medvedeff-true/Zapret-GUI/releases/tag/v1.7.0)
 2. Run it (optionally as administrator)
 
 > ⚠️ If Windows warns you, click **More info → Run anyway**
@@ -153,15 +213,17 @@ No installation required. Just:
 
 ## 🚀 How to use
 
-1. Select a profile from the drop-down list
-2. Click on the green round button
-3. If it doesn't work, select another profile and repeat.
-4. To minimize the application to the tray, click the ![{6AFA9D68-ACFC-4281-971B-7ABD4A1DC91D}](https://github.com/user-attachments/assets/9729ac2c-6a1f-48ee-a10b-c6ba2dc7012a) icon.
-5. To put the program in autorun, run it minimized, check for updates, use the appropriate buttons in the settings
-6. In order to set the autorun bypass profile, initially activate “Program autorun” by checking the corresponding box
-7. For advanced control (for advanced users) you can use the “Service mode” in the settings.
+1. Pick a profile from the dropdown
+2. Click the round button:
+   - 🔴 Red — bypass is OFF (click to turn ON)
+   - 🟢 Green — bypass is ON (click to turn OFF)
+3. Switching a profile will auto-enable bypass (or restart it on the new profile)
+4. To minimize to tray — use the standard **Minimize (—)** button; the app will disappear from the taskbar and stay in the tray only
+5. To restore the window — click the tray icon
+6. To check/update Core (Flowseal) — open Settings and click **Check updates**
+7. To fully reset winws connections / stop services — click **Reset winws connections** (a console window will show progress, reach `Success`, wait 5 seconds, then close)
 
-> Everything is described in detail in the manual, inside the program itself, if something is not clear, open and read it carefully.
+> Detailed instructions are available inside the app. If something is unclear — open the in-app guide and follow the steps.
 
 ---
 
