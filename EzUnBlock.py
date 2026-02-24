@@ -1,8 +1,12 @@
 ﻿import sys
 import os
 import subprocess
-from PyQt6.QtCore import Qt, QSettings, QSize, QTimer, QThread, pyqtSignal, QElapsedTimer, QEvent
-from PyQt6.QtGui import QIcon, QPixmap, QAction, QPalette
+from PyQt6.QtCore import (
+    Qt, QSettings, QSize, QTimer, QThread, pyqtSignal,
+    QElapsedTimer, QEvent, QEasingCurve, QPropertyAnimation, pyqtProperty,
+    QParallelAnimationGroup
+)
+from PyQt6.QtGui import QIcon, QPixmap, QAction, QPalette, QPainter, QColor, QPen
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QDialog, QCheckBox, QMessageBox, QSizePolicy,
@@ -105,11 +109,11 @@ def _safe_copy_tree(src_root: str, dst_root: str, overwrite: bool = False) -> No
             _safe_copy_file(s, d, overwrite=overwrite)
 
 
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 APP_DIR = os.path.join(os.path.expanduser('~'), 'ZapretGUI')
 os.makedirs(APP_DIR, exist_ok=True)
 FLOWSEAL_REPO = "Flowseal/zapret-discord-youtube"
-FLOWSEAL_DEFAULT_VER = "1.9.6"
+FLOWSEAL_DEFAULT_VER = "1.9.7"
 FLOWSEAL_VER_KEY = "flowseal_release"
 
 SETTINGS_FILE = os.path.join(APP_DIR, 'settings.ini')
@@ -962,7 +966,6 @@ class AutoTestWorker(QThread):
             self.finished_err.emit(str(e))
 
     def _test_profile_fast(self, profile_name: str, timeout_per_profile: float = 10.0) -> bool:
-        # Всегда чистим хвосты
         self._kill_winws()
         for svc in ("zapret", "zapret_discord", "WinDivert", "WinDivert14"):
             try:
@@ -994,7 +997,6 @@ class AutoTestWorker(QThread):
 
         proc = None
         try:
-            # ВАЖНО: /k, и сохраняем proc, чтобы потом гарантированно прибить дерево
             with open(AUTOLOG_FILE, "a", encoding="utf-8") as log, open(inp_path, "r", encoding="ascii") as fin:
                 proc = subprocess.Popen(
                     ["cmd.exe", "/d", "/k", bat],
@@ -1007,7 +1009,6 @@ class AutoTestWorker(QThread):
                     close_fds=True
                 )
 
-            # ждём появления winws.exe (увеличил окно: новые профили/сервисы иногда дольше стартуют)
             start_deadline = time.time() + 12.0
             while time.time() < start_deadline:
                 if self._stop:
@@ -1192,6 +1193,265 @@ class AutoProgressDialog(QDialog):
 
     def set_eta_text(self, s: str):
         self.lbl_right.setText(s)
+
+class AnimatedPowerToggleButton(QPushButton):
+
+    def __init__(self, icon_off: QIcon | None = None, icon_on: QIcon | None = None, parent=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setContentsMargins(0, 0, 0, 0)
+
+        self._max_pulse_px = 10
+        self._border_w = 2
+        self._base_pad = self._max_pulse_px + self._border_w + 2  # чтобы свечение не резалось
+
+        self._progress = 1.0 if self.isChecked() else 0.0
+        self._pulse = 0.0
+
+        self._icon_off_pix = None
+        self._icon_on_pix = None
+
+        def _icon_to_pix(ic: QIcon | None) -> QPixmap | None:
+            if ic is None or ic.isNull():
+                return None
+            pm = ic.pixmap(128, 128)  # побольше, чтобы меньше артефактов при вращении
+            return pm if (pm is not None and not pm.isNull()) else None
+
+        self._icon_off_pix = _icon_to_pix(icon_off)
+        self._icon_on_pix = _icon_to_pix(icon_on)
+
+        # текущая иконка
+        self._cur_icon_pix = self._icon_on_pix if self.isChecked() else self._icon_off_pix
+
+        self._anim_progress = QPropertyAnimation(self, b"progress", self)
+        self._anim_progress.setDuration(220)
+        self._anim_progress.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._anim_pulse = QPropertyAnimation(self, b"pulse", self)
+        self._anim_pulse.setDuration(1200)
+        self._anim_pulse.setStartValue(0.0)
+        self._anim_pulse.setEndValue(1.0)
+        self._anim_pulse.setLoopCount(-1)
+        self._anim_pulse.setEasingCurve(QEasingCurve.Type.InOutSine)
+
+        self._icon_angle = 0.0
+        self._icon_scale = 1.0
+
+        self._anim_icon_angle = QPropertyAnimation(self, b"iconAngle", self)
+        self._anim_icon_angle.setDuration(420)
+        self._anim_icon_angle.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        self._anim_icon_scale = QPropertyAnimation(self, b"iconScale", self)
+        self._anim_icon_scale.setDuration(420)
+        self._anim_icon_scale.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._anim_icon_group = QParallelAnimationGroup(self)
+        self._anim_icon_group.addAnimation(self._anim_icon_angle)
+        self._anim_icon_group.addAnimation(self._anim_icon_scale)
+
+        self._pending_icon = None
+        self._swapped_during_scale = False
+        self._anim_icon_scale.valueChanged.connect(self._maybe_swap_icon_on_scale)
+
+        self._anim_icon_group.finished.connect(self._reset_icon_transform)
+
+        self._blink_on = False
+        self._blink_color = QColor("#2db45f")
+        self._idle_border = QColor(45, 180, 95, 90)
+
+        self.toggled.connect(self._on_toggled)
+
+        if self._anim_pulse.state() != QPropertyAnimation.State.Running:
+            self._anim_pulse.start()
+
+        self._on_toggled(self.isChecked())
+
+    def setBlinkOn(self, on: bool):
+        self._blink_on = bool(on)
+        self.update()
+
+    def setBorderColorHex(self, hex_color: str):
+        try:
+            c = QColor(hex_color)
+            if c.isValid():
+                self._blink_color = c
+        except Exception:
+            pass
+        self.update()
+
+    def getProgress(self) -> float:
+        return float(self._progress)
+
+    def setProgress(self, v: float):
+        v = max(0.0, min(1.0, float(v)))
+        if abs(self._progress - v) > 1e-4:
+            self._progress = v
+            self.update()
+
+    progress = pyqtProperty(float, fget=getProgress, fset=setProgress)
+
+    def getPulse(self) -> float:
+        return float(self._pulse)
+
+    def setPulse(self, v: float):
+        v = max(0.0, min(1.0, float(v)))
+        if abs(self._pulse - v) > 1e-4:
+            self._pulse = v
+            self.update()
+
+    pulse = pyqtProperty(float, fget=getPulse, fset=setPulse)
+
+    def getIconAngle(self) -> float:
+        return float(self._icon_angle)
+
+    def setIconAngle(self, v: float):
+        v = float(v)
+        if abs(self._icon_angle - v) > 1e-3:
+            self._icon_angle = v
+            self.update()
+
+    iconAngle = pyqtProperty(float, fget=getIconAngle, fset=setIconAngle)
+
+    def getIconScale(self) -> float:
+        return float(self._icon_scale)
+
+    def setIconScale(self, v: float):
+        v = max(0.60, min(1.20, float(v)))
+        if abs(self._icon_scale - v) > 1e-3:
+            self._icon_scale = v
+            self.update()
+
+    iconScale = pyqtProperty(float, fget=getIconScale, fset=setIconScale)
+
+    @staticmethod
+    def _lerp_color(c1: QColor, c2: QColor, t: float) -> QColor:
+        t = max(0.0, min(1.0, float(t)))
+        r = int(c1.red()   + (c2.red()   - c1.red())   * t)
+        g = int(c1.green() + (c2.green() - c1.green()) * t)
+        b = int(c1.blue()  + (c2.blue()  - c1.blue())  * t)
+        a = int(c1.alpha() + (c2.alpha() - c1.alpha()) * t)
+        return QColor(r, g, b, a)
+
+    def _reset_icon_transform(self):
+        self._icon_angle = 0.0
+        self._icon_scale = 1.0
+        self._pending_icon = None
+        self._swapped_during_scale = False
+        self.update()
+
+    def _maybe_swap_icon_on_scale(self, v):
+        if self._pending_icon is None or self._swapped_during_scale:
+            return
+        try:
+            vv = float(v)
+        except Exception:
+            return
+        if vv < 0.94:
+            self._cur_icon_pix = self._pending_icon
+            self._swapped_during_scale = True
+            self.update()
+
+    def _start_icon_anim(self, direction: int, pending_icon: QPixmap | None):
+        self._anim_icon_group.stop()
+        self._pending_icon = pending_icon
+        self._swapped_during_scale = False
+
+        self._anim_icon_angle.setStartValue(0.0)
+        self._anim_icon_angle.setEndValue(360.0 * float(direction))
+
+        self._anim_icon_scale.setKeyValueAt(0.00, 1.00)
+        self._anim_icon_scale.setKeyValueAt(0.78, 1.00)
+        self._anim_icon_scale.setKeyValueAt(0.90, 0.86)
+        self._anim_icon_scale.setKeyValueAt(1.00, 1.00)
+
+        self._anim_icon_group.start()
+
+    def _on_toggled(self, checked: bool):
+        self._anim_progress.stop()
+        self._anim_progress.setStartValue(self._progress)
+        self._anim_progress.setEndValue(1.0 if checked else 0.0)
+        self._anim_progress.start()
+
+        if checked:
+            self._start_icon_anim(direction=+1, pending_icon=self._icon_on_pix)
+        else:
+            self._start_icon_anim(direction=-1, pending_icon=self._icon_off_pix)
+
+        self.update()
+
+    def paintEvent(self, event):
+        w = self.width()
+        h = self.height()
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        outer = self.rect().adjusted(self._base_pad, self._base_pad, -self._base_pad, -self._base_pad)
+
+        off_col = QColor(220, 50, 50)
+        on_col = QColor(45, 180, 95)
+
+        t = self._progress
+        base_col = self._lerp_color(off_col, on_col, t)
+        if self.isDown():
+            base_col = base_col.darker(116)
+
+        state_ring_col = on_col if self.isChecked() else off_col
+
+        pulse_wave = 1.0 - abs(self._pulse * 2.0 - 1.0)  # 0..1..0
+        grow = int(self._max_pulse_px * (0.35 + 0.65 * pulse_wave))
+        alpha = int(18 + 90 * pulse_wave)
+
+        ring = QColor(state_ring_col)
+        ring.setAlpha(alpha)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(ring)
+        p.drawEllipse(outer.adjusted(-grow, -grow, grow, grow))
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(base_col)
+        p.drawEllipse(outer)
+
+        inner_pad = max(10, min(w, h) // 11)
+        inner = outer.adjusted(inner_pad, inner_pad, -inner_pad, -inner_pad)
+
+        shade = QColor(0, 0, 0, int(52 + 40 * (1.0 - t)))
+        if self.isDown():
+            shade.setAlpha(min(95, shade.alpha() + 20))
+
+        p.setBrush(shade)
+        p.drawEllipse(inner)
+
+        highlight = QColor(255, 255, 255, int(14 + 18 * t))
+        p.setBrush(highlight)
+        hl = inner.adjusted(-2, -2, -2, -2)
+        hl.setHeight(max(6, hl.height() // 2))
+        p.drawEllipse(hl)
+
+        pm = self._cur_icon_pix
+        if pm is not None and not pm.isNull():
+            target = int(min(w, h) * 0.40)
+            scale_to_target = target / max(1.0, float(min(pm.width(), pm.height())))
+
+            cx = w / 2.0
+            cy = h / 2.0
+
+            p.save()
+            p.translate(cx, cy)
+
+            p.rotate(self._icon_angle)
+            s = scale_to_target * self._icon_scale
+            p.scale(s, s)
+
+            p.translate(-pm.width() / 2.0, -pm.height() / 2.0)
+            p.drawPixmap(0, 0, pm)
+            p.restore()
+
+        p.end()
 
 class MainWindow(QWidget):
     def __init__(self, settings):
@@ -1771,19 +2031,16 @@ class MainWindow(QWidget):
         self._switching_profile = True
         try:
             if self.toggle_btn.isChecked():
-                self.toggle_btn.blockSignals(True)
+
                 self.toggle_btn.setChecked(False)
-                self.toggle_btn.blockSignals(False)
                 self.on_toggle(False)
 
-                self.toggle_btn.blockSignals(True)
+
                 self.toggle_btn.setChecked(True)
-                self.toggle_btn.blockSignals(False)
                 self.on_toggle(True)
             else:
-                self.toggle_btn.blockSignals(True)
+
                 self.toggle_btn.setChecked(True)
-                self.toggle_btn.blockSignals(False)
                 self.on_toggle(True)
         finally:
             self._switching_profile = False
@@ -1859,37 +2116,29 @@ class MainWindow(QWidget):
         self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.status_lbl)
 
-        self.toggle_btn = QPushButton()
-        self.toggle_btn.setCheckable(True)
-        self.toggle_btn.setFixedSize(100, 100)
+        icon_off_path = os.path.join(os.path.dirname(__file__), 'flags', 'toggle-off.ico')
+        icon_on_path = os.path.join(os.path.dirname(__file__), 'flags', 'toggle-on.ico')
 
-        icon_path = os.path.join(os.path.dirname(__file__), 'flags', 'toggle.ico')
-        if os.path.exists(icon_path):
-            icon = QIcon(icon_path)
-        else:
-            icon = QIcon.fromTheme("media-playback-start")
-        self.toggle_btn.setIcon(icon)
-        self.toggle_btn.setIconSize(QSize(48, 48))
+        icon_off = QIcon(icon_off_path) if os.path.exists(icon_off_path) else QIcon()
+        icon_on = QIcon(icon_on_path) if os.path.exists(icon_on_path) else QIcon()
 
-        self.toggle_btn.setStyleSheet("""
-                    QPushButton {
-                        border: 2px solid #ffffff;
-                        border-radius: 50px;
-                        /* OFF = red, ON = green (updated in update_blink) */
-                        background-color: red;
-                        padding-left: 7px;
-                        padding-right: 0px;
-                    }
-                    QPushButton::icon {
-                        alignment: center;
-                    }
-                """)
-        self.toggle_btn.setContentsMargins(0, 0, 0, 0)
+        # если новых иконок нет - используем старую toggle.ico или тему
+        legacy_path = os.path.join(os.path.dirname(__file__), 'flags', 'toggle.ico')
+        if icon_off.isNull() or icon_on.isNull():
+            legacy = QIcon(legacy_path) if os.path.exists(legacy_path) else QIcon.fromTheme("media-playback-start")
+            if icon_off.isNull():
+                icon_off = legacy
+            if icon_on.isNull():
+                icon_on = legacy
+
+        self.toggle_btn = AnimatedPowerToggleButton(icon_off=icon_off, icon_on=icon_on, parent=self)
+        self.toggle_btn.setFixedSize(110, 110)
 
         self.toggle_btn.clicked.connect(self.on_toggle)
-        hl = QHBoxLayout();
-        hl.addStretch();
-        hl.addWidget(self.toggle_btn);
+
+        hl = QHBoxLayout()
+        hl.addStretch()
+        hl.addWidget(self.toggle_btn)
         hl.addStretch()
         layout.addLayout(hl)
 
@@ -1968,23 +2217,7 @@ class MainWindow(QWidget):
         self.instruction_btn.setText(self.t('Instruction'))
 
     def update_blink(self):
-        base_border = _theme_text_color_hex(self)
-        dim_border = "#666666"  # нейтральный, виден почти везде
-
-        color = base_border if self.blink_on else dim_border
-
-        bg_color = "green" if self.toggle_btn.isChecked() else "red"
-
-        self.toggle_btn.setStyleSheet(f"""
-            QPushButton {{
-                border: 2px solid {color};
-                border-radius: 50px;
-                background-color: {bg_color};
-                padding-left: 7px;
-                padding-right: 0px;
-            }}
-        """)
-        self.blink_on = not self.blink_on
+        return
 
     def is_winws_running(self):
         try:
@@ -2009,10 +2242,8 @@ class MainWindow(QWidget):
             return
 
         if checked:
-            # 1) Всегда стартуем "с чистого листа" (важно при конфликте с сервисом/старым winws)
             _force_stop_blockers()
 
-            # 2) Готовим stdin, чтобы не зависнуть на любых "update/check" вопросах
             inp_path = _ensure_no_update_input()
 
             env = os.environ.copy()
@@ -2039,8 +2270,6 @@ class MainWindow(QWidget):
             )
 
             try:
-                # ВАЖНО: /k вместо /c
-                # /k оставляет cmd.exe живым, поэтому запуск через start /b не "схлопывается".
                 self.process = subprocess.Popen(
                     ["cmd.exe", "/d", "/k", script],
                     cwd=self.core_dir,
@@ -2063,7 +2292,6 @@ class MainWindow(QWidget):
         else:
             _run_hidden(["taskkill", "/IM", "winws.exe", "/F"])
 
-            # ВАЖНО: прибиваем "живой" cmd.exe (иначе будет висеть фоном)
             if self.process and self.process.poll() is None:
                 _run_hidden(["taskkill", "/PID", str(self.process.pid), "/T", "/F"])
 
