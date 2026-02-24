@@ -1,8 +1,8 @@
 ﻿# version.txt
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 7, 0, 0),
-    prodvers=(1, 7, 0, 0),
+    filevers=(1, 7, 1, 0),
+    prodvers=(1, 7, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x4,
@@ -17,12 +17,12 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'Medvedeff'),
           StringStruct('FileDescription', 'Zapret GUI'),
-          StringStruct('FileVersion', '1.7.0'),
+          StringStruct('FileVersion', '1.7.1'),
           StringStruct('InternalName', 'Zapret GUI'),
           StringStruct('LegalCopyright', '© 2026 Medvedeff'),
           StringStruct('OriginalFilename', 'Zapret GUI.exe'),
           StringStruct('ProductName', 'Zapret GUI'),
-          StringStruct('ProductVersion', '1.7.0')
+          StringStruct('ProductVersion', '1.7.1')
         ])
       ]),
     VarFileInfo([VarStruct('Translation', [1033, 1252])])
