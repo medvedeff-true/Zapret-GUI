@@ -6,7 +6,7 @@
 **Zapret GUI** — это простая графическая оболочка для обхода интернет-блокировок с помощью утилиты Zapret ([Оригинальное приложение](https://github.com/bol-van/zapret)).  
 Создано на Python + PyQt6.
 
-<img width="1920" height="770" alt="press-release" src="https://github.com/user-attachments/assets/d0d91f48-87ab-48b7-92a5-30607930835d" />
+![Анимация](https://github.com/user-attachments/assets/6de56a16-5ca8-4d79-a579-10d9ca5f4ca4)
 
 <img width="616" height="568" alt="press-release2" src="https://github.com/user-attachments/assets/03ed73f7-685c-4046-bc54-a480f6c5e81b" />
 
@@ -137,7 +137,7 @@
 **Zapret GUI** is a simple graphical interface for bypassing internet restrictions using pre-configured profiles (like `General`, `Discord`, etc.).  
 Built on Python + PyQt6. One-click launch, multi-language support, no installation required.
 
-<img width="1920" height="770" alt="press-release" src="https://github.com/user-attachments/assets/d0d91f48-87ab-48b7-92a5-30607930835d" />
+![Анимация](https://github.com/user-attachments/assets/6de56a16-5ca8-4d79-a579-10d9ca5f4ca4)
 
 <img width="616" height="568" alt="press-release2" src="https://github.com/user-attachments/assets/03ed73f7-685c-4046-bc54-a480f6c5e81b" />
 
