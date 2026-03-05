@@ -6,11 +6,11 @@ from PyQt6.QtCore import (
     QElapsedTimer, QEvent, QEasingCurve, QPropertyAnimation, pyqtProperty,
     QParallelAnimationGroup, QPoint
 )
-from PyQt6.QtGui import QIcon, QPixmap, QAction, QPalette, QPainter, QColor, QPen
+from PyQt6.QtGui import QIcon, QPixmap, QAction, QPalette, QPainter, QColor, QPen, QBrush, QConicalGradient
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QDialog, QCheckBox, QMessageBox, QSizePolicy,
-    QSystemTrayIcon, QMenu, QTextBrowser, QProgressDialog, QProgressBar
+    QSystemTrayIcon, QMenu, QTextBrowser, QProgressDialog, QProgressBar, QGraphicsDropShadowEffect
 )
 import shutil
 import requests
@@ -109,11 +109,11 @@ def _safe_copy_tree(src_root: str, dst_root: str, overwrite: bool = False) -> No
             _safe_copy_file(s, d, overwrite=overwrite)
 
 
-APP_VERSION = "1.7.2"
+APP_VERSION = "1.7.3"
 APP_DIR = os.path.join(os.path.expanduser('~'), 'ZapretGUI')
 os.makedirs(APP_DIR, exist_ok=True)
 FLOWSEAL_REPO = "Flowseal/zapret-discord-youtube"
-FLOWSEAL_DEFAULT_VER = "1.9.7"
+FLOWSEAL_DEFAULT_VER = "1.9.7b"
 FLOWSEAL_VER_KEY = "flowseal_release"
 
 SETTINGS_FILE = os.path.join(APP_DIR, 'settings.ini')
@@ -393,9 +393,24 @@ def update_domain_files():
 
         settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
 
+        def _detect_local_core_version() -> str:
+            try:
+                svc = os.path.join(APP_DIR, "core", "service.bat")
+                if not os.path.exists(svc):
+                    return ""
+                raw = _read_text(svc)
+                m = re.search(r'(?im)^\s*set\s+"LOCAL_VERSION\s*=\s*([^"]+)"\s*$', raw)
+                return (m.group(1).strip() if m else "")
+            except Exception:
+                return ""
+
         current_ver = str(settings.value(FLOWSEAL_VER_KEY, "")).strip()
         if not current_ver:
-            current_ver = FLOWSEAL_DEFAULT_VER
+            # Пытаемся взять реальную версию
+            current_ver = _detect_local_core_version().strip()
+            # Если не получилось, используем дефолт как fallback
+            if not current_ver:
+                current_ver = FLOWSEAL_DEFAULT_VER
             settings.setValue(FLOWSEAL_VER_KEY, current_ver)
             settings.sync()
 
@@ -412,19 +427,9 @@ def update_domain_files():
             QMessageBox.warning(None, "Обновление", "Не удалось определить версию последнего релиза.")
             return
 
-        # Сравнение версий
-        def semver_tuple(v: str):
-            parts = v.strip().split(".")
-            nums = []
-            for p in parts:
-                q = "".join(ch for ch in p if ch.isdigit())
-                nums.append(int(q) if q else 0)
-            while len(nums) < 3:
-                nums.append(0)
-            return tuple(nums[:3])
-
+        # Сравнение версий (учитываем суффиксы типа 1.9.7b как "новее", чем 1.9.7)
         try:
-            is_newer = semver_tuple(latest_ver) > semver_tuple(current_ver)
+            is_newer = _version_key(latest_ver) > _version_key(current_ver)
         except Exception:
             is_newer = (latest_ver != current_ver)
 
@@ -541,15 +546,44 @@ def update_domain_files():
     except Exception as e:
         QMessageBox.critical(None, "Ошибка обновления", f"Произошла ошибка:\n{e}")
 
-def _semver_tuple(v: str):
-    parts = v.strip().split(".")
+def _version_key(v: str):
+    s = (v or "").strip()
+    if s.startswith(("v", "V")):
+        s = s[1:].strip()
+
+    m = re.match(r"^\s*(\d+(?:\.\d+){0,3})(.*)\s*$", s)
+    if not m:
+        return ((0, 0, 0, 0), 0, ("",))
+
+    num_part = m.group(1).strip()
+    suffix = (m.group(2) or "").strip()
+
     nums = []
-    for p in parts:
-        q = "".join(ch for ch in p if ch.isdigit())
-        nums.append(int(q) if q else 0)
-    while len(nums) < 3:
+    for p in num_part.split("."):
+        try:
+            nums.append(int(p))
+        except Exception:
+            nums.append(0)
+    while len(nums) < 4:
         nums.append(0)
-    return tuple(nums[:3])
+    nums = tuple(nums[:4])
+
+    suffix = re.sub(r"^[\s\-\._]+", "", suffix)
+
+    has_suffix = 1 if suffix else 0
+
+    if not suffix:
+        suffix_key = ("",)
+    else:
+        toks = []
+        for t in re.findall(r"[A-Za-z]+|\d+|[^A-Za-z\d]+", suffix):
+            if t.isdigit():
+                toks.append((1, int(t)))
+            else:
+                toks.append((0, t.casefold()))
+        suffix_key = tuple(toks)
+
+    return (nums, has_suffix, suffix_key)
 
 def _get_latest_flowseal_release_silent() -> str:
     try:
@@ -586,13 +620,31 @@ def _patch_profiles_if_core_outdated(core_dir: str, settings: QSettings) -> None
         if not latest:
             return
 
-        has_ver = settings.contains(FLOWSEAL_VER_KEY)
-        current = str(settings.value(FLOWSEAL_VER_KEY)) if has_ver else FLOWSEAL_DEFAULT_VER
+        def _detect_local_core_version() -> str:
+            try:
+                svc = os.path.join(core_dir, "service.bat")
+                if not os.path.exists(svc):
+                    return ""
+                raw = _read_text(svc)
+                m = re.search(r'(?im)^\s*set\s+"LOCAL_VERSION\s*=\s*([^"]+)"\s*$', raw)
+                return (m.group(1).strip() if m else "")
+            except Exception:
+                return ""
+
+        current = _detect_local_core_version().strip()
+        if not current:
+            current = str(settings.value(FLOWSEAL_VER_KEY, FLOWSEAL_DEFAULT_VER)).strip() or FLOWSEAL_DEFAULT_VER
 
         try:
-            outdated = _semver_tuple(latest) > _semver_tuple(current)
+            outdated = _version_key(latest) > _version_key(current)
         except Exception:
             outdated = (latest != current)
+
+        try:
+            settings.setValue(FLOWSEAL_VER_KEY, current)
+            settings.sync()
+        except Exception:
+            pass
 
         if not outdated:
             _cleanup_noupdate_files(core_dir)
@@ -994,6 +1046,7 @@ class AutoTestWorker(QThread):
         env = os.environ.copy()
         env["ZAPRETGUI_AUTOTEST"] = "1"
         env["ZAPRETGUI_NOUPDATE"] = "1"
+        env["NO_UPDATE_CHECK"] = "1"
 
         proc = None
         try:
@@ -1090,6 +1143,7 @@ class AutoTestWorker(QThread):
             env = os.environ.copy()
             env["ZAPRETGUI_AUTOTEST"] = "1"
             env["ZAPRETGUI_NOUPDATE"] = "1"
+            env["NO_UPDATE_CHECK"] = "1"
 
             with open(inp_path, "r", encoding="ascii") as fin:
                 r = subprocess.run(
@@ -1142,6 +1196,247 @@ class AutoTestWorker(QThread):
         except Exception:
             pass
 
+class AutoTestSpinner(QWidget):
+    """
+    Круглая анимация для автотеста:
+    - базовая "кнопка" красная (как на главном экране)
+    - по кругу рисуется прогресс-дуга с зелёным свечением
+    - логотип внутри крутится и слегка "дышит" (scale up/down)
+    """
+    def __init__(self, icon: QIcon | None = None, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        self._icon = icon if (icon is not None and (not icon.isNull())) else QIcon()
+        self._icon_pm = None
+        self._rebuild_icon_pix()
+
+        self._progress = 0.0   # 0..1
+        self._pulse = 0.0      # 0..1
+        self._angle = 0.0      # degrees
+        self._scale = 1.0      # 0.9..1.05
+
+        # мягкая анимация заполнения прогресса (не дёргается)
+        self._anim_progress = QPropertyAnimation(self, b"progress", self)
+        self._anim_progress.setDuration(220)
+        self._anim_progress.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        # пульсация свечения
+        self._anim_pulse = QPropertyAnimation(self, b"pulse", self)
+        self._anim_pulse.setDuration(1200)
+        self._anim_pulse.setStartValue(0.0)
+        self._anim_pulse.setEndValue(1.0)
+        self._anim_pulse.setLoopCount(-1)
+        self._anim_pulse.setEasingCurve(QEasingCurve.Type.InOutSine)
+
+        # постоянное вращение иконки
+        self._anim_angle = QPropertyAnimation(self, b"iconAngle", self)
+        self._anim_angle.setDuration(1600)
+        self._anim_angle.setStartValue(0.0)
+        self._anim_angle.setEndValue(360.0)
+        self._anim_angle.setLoopCount(-1)
+        self._anim_angle.setEasingCurve(QEasingCurve.Type.Linear)
+
+        # "дыхание" иконки — заметнее
+        self._anim_scale = QPropertyAnimation(self, b"iconScale", self)
+        self._anim_scale.setDuration(1150)  # чуть медленнее => приятнее читается
+        self._anim_scale.setKeyValueAt(0.00, 1.08)  # выше
+        self._anim_scale.setKeyValueAt(0.50, 0.82)  # ниже (сильнее "вдох/выдох")
+        self._anim_scale.setKeyValueAt(1.00, 1.08)
+        self._anim_scale.setLoopCount(-1)
+        self._anim_scale.setEasingCurve(QEasingCurve.Type.InOutSine)
+
+        self._running = False
+
+    def setIcon(self, icon: QIcon):
+        self._icon = icon if (icon is not None and (not icon.isNull())) else QIcon()
+        self._rebuild_icon_pix()
+        self.update()
+
+    def _rebuild_icon_pix(self):
+        try:
+            if self._icon is None or self._icon.isNull():
+                self._icon_pm = None
+                return
+            pm = self._icon.pixmap(512, 512)
+            self._icon_pm = pm if (pm is not None and not pm.isNull()) else None
+        except Exception:
+            self._icon_pm = None
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._anim_angle.start()
+        self._anim_scale.start()
+
+    def stop(self):
+        self._running = False
+        for a in (self._anim_pulse, self._anim_angle, self._anim_scale, self._anim_progress):
+            try:
+                a.stop()
+            except Exception:
+                pass
+        self.update()
+
+    # --- properties ---
+
+    def getProgress(self) -> float:
+        return float(self._progress)
+
+    def setProgress(self, v: float):
+        v = max(0.0, min(1.0, float(v)))
+        if abs(self._progress - v) > 1e-4:
+            self._progress = v
+            self.update()
+
+    progress = pyqtProperty(float, fget=getProgress, fset=setProgress)
+
+    def animate_to_progress(self, v: float):
+        v = max(0.0, min(1.0, float(v)))
+        self._anim_progress.stop()
+        self._anim_progress.setStartValue(self._progress)
+        self._anim_progress.setEndValue(v)
+        self._anim_progress.start()
+
+    def getPulse(self) -> float:
+        return float(self._pulse)
+
+    def setPulse(self, v: float):
+        v = max(0.0, min(1.0, float(v)))
+        if abs(self._pulse - v) > 1e-4:
+            self._pulse = v
+            self.update()
+
+    pulse = pyqtProperty(float, fget=getPulse, fset=setPulse)
+
+    def getIconAngle(self) -> float:
+        return float(self._angle)
+
+    def setIconAngle(self, v: float):
+        v = float(v)
+        if abs(self._angle - v) > 1e-3:
+            self._angle = v
+            self.update()
+
+    iconAngle = pyqtProperty(float, fget=getIconAngle, fset=setIconAngle)
+
+    def getIconScale(self) -> float:
+        return float(self._scale)
+
+    def setIconScale(self, v: float):
+        v = max(0.70, min(1.20, float(v)))
+        if abs(self._scale - v) > 1e-3:
+            self._scale = v
+            self.update()
+
+    iconScale = pyqtProperty(float, fget=getIconScale, fset=setIconScale)
+
+    def sizeHint(self):
+        return QSize(130, 130)
+
+    def paintEvent(self, event):
+        w = self.width()
+        h = self.height()
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        side = min(w, h)
+        cx = w / 2.0
+        cy = h / 2.0
+
+        # pad делаем чуть меньше, чтобы общий объект выглядел крупнее (как раньше)
+        pad = max(6, side // 14)
+
+        # отдельно резервируем место под прогресс-кольцо СНАРУЖИ, чтобы красная кнопка не уменьшалась
+        ring_w = max(6, int(side * 0.08))
+        ring_gap = 3
+        ring_total = ring_w + ring_gap
+
+        # full — это область под ВНЕШНИЙ прогресс-круг
+        full = self.rect().adjusted(pad, pad, -pad, -pad)
+        ring_rect = full
+
+        # outer — это красная кнопка. Теперь она "отъедает" меньше,
+        # потому что ring_total фактически берётся из уменьшенного pad.
+        outer = self.rect().adjusted(pad + ring_total, pad + ring_total, -(pad + ring_total), -(pad + ring_total))
+
+        # ---- красная база (БЕЗ свечения вокруг) ----
+        off_col = QColor(220, 50, 50)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(off_col)
+        p.drawEllipse(outer)
+
+        # тёмная "внутрянка" (как у кнопки)
+        inner_pad = max(10, min(outer.width(), outer.height()) // 11)
+        inner = outer.adjusted(inner_pad, inner_pad, -inner_pad, -inner_pad)
+
+        shade = QColor(0, 0, 0, 92)  # как в OFF
+        highlight = QColor(255, 255, 255, 14)  # как в OFF
+
+        p.setBrush(shade)
+        p.drawEllipse(inner)
+
+        # лёгкий блик сверху
+        p.setBrush(highlight)
+        hl = inner.adjusted(-2, -2, -2, -2)
+        hl.setHeight(max(6, hl.height() // 2))
+        p.drawEllipse(hl)
+
+        # ---- зелёный круговой прогресс (стабильно: без градиентов, без второй дуги) ----
+        ring_margin = max(2, side // 30)
+        ring_rect = outer.adjusted(ring_margin, ring_margin, -ring_margin, -ring_margin)
+
+        # защита от слишком маленьких размеров (иначе Qt иногда чудит)
+        if ring_rect.width() > 8 and ring_rect.height() > 8:
+            start_deg = -90.0
+            span_deg = 360.0 * float(self._progress)
+            ring_w = max(6, int(side * 0.08))
+
+            green = QColor("#2db45f")
+
+            # 2) Мягкий glow под прогрессом (тихий)
+            pulse_wave2 = 1.0 - abs(self._pulse * 2.0 - 1.0)  # 0..1..0
+            glow = QColor(green)
+            glow.setAlpha(int(10 + 36 * pulse_wave2))
+            pen_glow = QPen(glow, ring_w + 5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap)
+            p.setPen(pen_glow)
+            p.drawArc(ring_rect, int(start_deg * 16), int(-span_deg * 16))
+
+            # 3) Основная дуга прогресса (FlatCap убирает "червячка")
+            base = QColor(green)
+            base.setAlpha(235)
+            pen_base = QPen(base, ring_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap)
+            p.setPen(pen_base)
+            p.drawArc(ring_rect, int(start_deg * 16), int(-span_deg * 16))
+        # ---- вращающийся логотип внутри ----
+        pm = self._icon_pm
+        if pm is not None and (not pm.isNull()):
+            target = int(side * 0.36)
+
+            dpr = float(pm.devicePixelRatio()) if hasattr(pm, "devicePixelRatio") else 1.0
+            logical_w = pm.width() / max(1.0, dpr)
+            logical_h = pm.height() / max(1.0, dpr)
+
+            scale_to_target = target / max(1.0, float(min(logical_w, logical_h)))
+
+            p.save()
+            p.translate(cx, cy)
+            p.rotate(self._angle)
+            s = scale_to_target * float(self._scale)
+            p.scale(s, s)
+            p.translate(-pm.width() / 2.0, -pm.height() / 2.0)
+            p.drawPixmap(0, 0, pm)
+            p.restore()
+
+        p.end()
+
+
 class AutoProgressDialog(QDialog):
     canceled = pyqtSignal()
 
@@ -1149,28 +1444,73 @@ class AutoProgressDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
-        self.setFixedSize(330, 120)
+        self.setFixedSize(330, 240)
+
+        self.setWindowFlags(
+            Qt.WindowType.Dialog |
+            Qt.WindowType.WindowTitleHint |
+            Qt.WindowType.WindowCloseButtonHint
+        )
+
+        flags = self.windowFlags()
+        flags &= ~Qt.WindowType.WindowMaximizeButtonHint
+        self.setWindowFlags(flags)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(12, 12, 12, 12)
-        v.setSpacing(8)
+        v.setSpacing(10)
 
         row = QHBoxLayout()
         self.lbl_left = QLabel(left_text)
-        self.lbl_right = QLabel("")
+        self.lbl_right = QLabel("")  # ETA
         self.lbl_right.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.lbl_right.setStyleSheet("""
+            QLabel {
+                color: rgba(255,255,255,235);
+                font-weight: 600;
+            }
+        """)
+        shadow_eta = QGraphicsDropShadowEffect(self.lbl_right)
+        shadow_eta.setBlurRadius(10)
+        shadow_eta.setOffset(0, 2)
+        shadow_eta.setColor(QColor(0, 0, 0, 180))
+        self.lbl_right.setGraphicsEffect(shadow_eta)
 
         row.addWidget(self.lbl_left, 1)
         row.addWidget(self.lbl_right, 0)
         v.addLayout(row)
 
-        self.bar = QProgressBar()
-        self.bar.setRange(0, 100)
-        self.bar.setValue(0)
-        v.addWidget(self.bar)
+        # --- новый круглый прогресс ---
+        icon_path = os.path.join(APP_DIR, "flags", "toggle-on.ico")
+        ico = QIcon(icon_path) if os.path.exists(icon_path) else QIcon.fromTheme("applications-system")
 
+        self.spinner = AutoTestSpinner(icon=ico, parent=self)
+        self.spinner.setFixedSize(140, 140)
+        self.spinner.start()
+
+        spin_row = QHBoxLayout()
+        spin_row.addStretch()
+        spin_row.addWidget(self.spinner)
+        spin_row.addStretch()
+        v.addLayout(spin_row)
+
+        # подписи под кругом
         self.lbl_profile = QLabel("")
-        self.lbl_profile.setStyleSheet("color: rgba(0,0,0,140);")
+        self.lbl_profile.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # белый + лёгкая тень, чтобы читалось на любом фоне
+        self.lbl_profile.setStyleSheet("""
+            QLabel {
+                color: rgba(255,255,255,235);
+                font-weight: 600;
+            }
+        """)
+        # тень
+        shadow = QGraphicsDropShadowEffect(self.lbl_profile)
+        shadow.setBlurRadius(10)
+        shadow.setOffset(0, 2)
+        shadow.setColor(QColor(0, 0, 0, 180))
+        self.lbl_profile.setGraphicsEffect(shadow)
+
         v.addWidget(self.lbl_profile)
 
         btn_row = QHBoxLayout()
@@ -1180,19 +1520,39 @@ class AutoProgressDialog(QDialog):
         btn_row.addWidget(self.btn_cancel)
         v.addLayout(btn_row)
 
+    def closeEvent(self, e):
+        try:
+            if hasattr(self, "spinner") and self.spinner:
+                self.spinner.stop()
+        except Exception:
+            pass
+        super().closeEvent(e)
+
     def set_progress(self, cur: int, total: int):
-        self.bar.setRange(0, max(1, total))
-        self.bar.setValue(cur)
+        total = max(1, int(total))
+        cur = max(0, min(int(cur), total))
+        frac = float(cur) / float(total)
+        try:
+            self.spinner.animate_to_progress(frac)
+        except Exception:
+            try:
+                self.spinner.progress = frac
+            except Exception:
+                pass
 
     def set_current_profile(self, name: str):
-        self.lbl_profile.setText(name)
+        # красивее читается с префиксом
+        if name:
+            self.lbl_profile.setText(f"Профиль: {name}")
+        else:
+            self.lbl_profile.setText("")
 
     def _on_cancel(self):
         self.canceled.emit()
         self.close()
 
     def set_eta_text(self, s: str):
-        self.lbl_right.setText(s)
+        self.lbl_right.setText(s or "")
 
 class AnimatedPowerToggleButton(QPushButton):
 
@@ -2309,6 +2669,8 @@ class MainWindow(QWidget):
 
             env = os.environ.copy()
             env["ZAPRETGUI_NOUPDATE"] = "1"
+            # не будет редиректа
+            env["NO_UPDATE_CHECK"] = "1"
 
             fin = None
             try:
