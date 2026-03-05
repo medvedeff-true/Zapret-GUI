@@ -4,7 +4,7 @@ import subprocess
 from PyQt6.QtCore import (
     Qt, QSettings, QSize, QTimer, QThread, pyqtSignal,
     QElapsedTimer, QEvent, QEasingCurve, QPropertyAnimation, pyqtProperty,
-    QParallelAnimationGroup
+    QParallelAnimationGroup, QPoint
 )
 from PyQt6.QtGui import QIcon, QPixmap, QAction, QPalette, QPainter, QColor, QPen
 from PyQt6.QtWidgets import (
@@ -109,7 +109,7 @@ def _safe_copy_tree(src_root: str, dst_root: str, overwrite: bool = False) -> No
             _safe_copy_file(s, d, overwrite=overwrite)
 
 
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
 APP_DIR = os.path.join(os.path.expanduser('~'), 'ZapretGUI')
 os.makedirs(APP_DIR, exist_ok=True)
 FLOWSEAL_REPO = "Flowseal/zapret-discord-youtube"
@@ -1216,7 +1216,7 @@ class AnimatedPowerToggleButton(QPushButton):
         def _icon_to_pix(ic: QIcon | None) -> QPixmap | None:
             if ic is None or ic.isNull():
                 return None
-            pm = ic.pixmap(128, 128)  # побольше, чтобы меньше артефактов при вращении
+            pm = ic.pixmap(512, 512)
             return pm if (pm is not None and not pm.isNull()) else None
 
         self._icon_off_pix = _icon_to_pix(icon_off)
@@ -1435,7 +1435,12 @@ class AnimatedPowerToggleButton(QPushButton):
         pm = self._cur_icon_pix
         if pm is not None and not pm.isNull():
             target = int(min(w, h) * 0.40)
-            scale_to_target = target / max(1.0, float(min(pm.width(), pm.height())))
+
+            dpr = float(pm.devicePixelRatio()) if hasattr(pm, "devicePixelRatio") else 1.0
+            logical_w = pm.width() / max(1.0, dpr)
+            logical_h = pm.height() / max(1.0, dpr)
+
+            scale_to_target = target / max(1.0, float(min(logical_w, logical_h)))
 
             cx = w / 2.0
             cy = h / 2.0
@@ -2064,6 +2069,61 @@ class MainWindow(QWidget):
                 except Exception as e:
                     print(f"Failed to unblock {exe_path}: {e}")
 
+    def _side_dialog_target_pos(self, dialog: QDialog, side: str, gap: int = 8) -> QPoint:
+        main = self.frameGeometry()
+        y = main.top()
+
+        if side == "left":
+            x = main.left() - gap - dialog.width()
+        else:
+            x = main.right() + gap
+
+        return QPoint(int(x), int(y))
+
+    def _side_dialog_start_pos(self, dialog: QDialog, side: str) -> QPoint:
+        main = self.frameGeometry()
+        y = main.top()
+
+        if side == "left":
+            x = main.left() + 10
+        else:
+            x = main.right() - dialog.width() - 10
+
+        return QPoint(int(x), int(y))
+
+    def _animate_side_dialog_open(self, dialog: QDialog, side: str, gap: int = 8) -> None:
+        end_pos = self._side_dialog_target_pos(dialog, side, gap=gap)
+        start_pos = self._side_dialog_start_pos(dialog, side)
+
+        dialog.move(start_pos)
+        try:
+            dialog.setWindowOpacity(0.0)
+        except Exception:
+            pass
+
+        pos_anim = QPropertyAnimation(dialog, b"pos", dialog)
+        pos_anim.setDuration(260)
+        pos_anim.setStartValue(start_pos)
+        pos_anim.setEndValue(end_pos)
+        pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        op_anim = QPropertyAnimation(dialog, b"windowOpacity", dialog)
+        op_anim.setDuration(220)
+        op_anim.setStartValue(0.0)
+        op_anim.setEndValue(1.0)
+        op_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        grp = QParallelAnimationGroup(dialog)
+        grp.addAnimation(pos_anim)
+        grp.addAnimation(op_anim)
+
+        # чтобы анимации не умирали сборщиком мусора
+        dialog._open_anim_grp = grp
+        dialog._open_anim_pos = pos_anim  #
+        dialog._open_anim_op = op_anim
+
+        grp.start()
+
     def open_instruction(self):
         dialog = QDialog(self)
         dialog.setWindowTitle(self.t('Instruction'))
@@ -2086,6 +2146,7 @@ class MainWindow(QWidget):
         layout.addWidget(browser)
 
         dialog.show()
+        self._animate_side_dialog_open(dialog, side="left", gap=8)
 
     def t(self, key, *args):
         return translations[self.lang].get(key, key).format(*args)
@@ -2307,9 +2368,30 @@ class MainWindow(QWidget):
         dlg.profile_cb.addItem(" ")
         dlg.profile_cb.addItems([p for p in self.presets if p != " "])
         dlg.profile_cb.setCurrentText(self.settings.value('autostart_profile', ' '))
-        dlg.exec()
-        self.autostart = self.settings.value('autostart', False, type=bool)
-        self.set_autostart(self.autostart)
+
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+
+        self._settings_dlg = dlg
+
+        start_pos = self._side_dialog_start_pos(dlg, side="right")
+        dlg.move(start_pos)
+        try:
+            dlg.setWindowOpacity(0.0)
+        except Exception:
+            pass
+
+        def _after_close(_=0):
+            self.autostart = self.settings.value('autostart', False, type=bool)
+            self.set_autostart(self.autostart)
+            try:
+                self._settings_dlg = None
+            except Exception:
+                pass
+
+        dlg.finished.connect(_after_close)
+
+        dlg.open()
+        QTimer.singleShot(0, lambda d=dlg: self._animate_side_dialog_open(d, side="right", gap=8))
 
     def set_autostart(self, enable: bool):
         try:
@@ -2371,6 +2453,31 @@ class MainWindow(QWidget):
         event.accept()
 
 def main():
+    if sys.platform.startswith("win"):
+        try:
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+            ctypes.windll.user32.SetProcessDpiAwarenessContext(
+                ctypes.c_void_p(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+            )
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
+    try:
+        # Не даём Qt криво округлять scale factor на 125/150/175/200%
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+    except Exception:
+        pass
+
+    try:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
     wipe_app_dir_if_new_version()
     extract_files_from_meipass()
