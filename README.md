@@ -14,41 +14,20 @@
 
 ## 🛠 Последние обновления
 
-➕ **Изменена кнопка включения и добавлена анимация**
+### ➕ Изменён внешний вид Авто-подбора профилей, добавлен стилизованный анимированный прогрессбар
+![Анимация2](https://github.com/user-attachments/assets/6c376b42-47ed-4a16-bb8d-5fd917a35f7b)
 
-![Анимация](https://github.com/user-attachments/assets/bc996461-b3dc-4f43-9668-a224bf919700)
+### ➕ Исправлено сравнение версий Core (Flowseal)
+Теперь обновление определяется не только для 1.9.7, но и для тегов с суффиксами/текстом (например 1.9.7b, 1.9.7 beta).
 
-➕ **Исправлена логика индикаторов**
-- 🟢 Обход включён → зелёный  
-- 🔴 Обход выключен → красный  
-- Добавлены разные иконки трея для состояния ON/OFF (tray-on / tray-off)
+### ➕ Защита от редиректа в браузер при запуске профилей.
+При запуске батников из GUI выставляется NO_UPDATE_CHECK=1, из-за чего service.bat check_updates не выполняется и браузер не открывается.
 
-➕ **Полноценная работа в трее**
-- Кнопка "Свернуть" теперь прячет приложение в трей точно также, как и кнопка <img width="31" height="31" alt="{A6289449-C895-4648-84F3-CBE5A5B09E94}" src="https://github.com/user-attachments/assets/5e9cb844-c172-4cbc-beef-0e5bdd30cde3" />
-- В панели задач не остаётся лишних окон  
+### ➕ Корректное определение текущей версии Core из встроенных файлов
+При первом запуске/после вайпа версия Core берётся из core/service.bat (LOCAL_VERSION=...) и сохраняется в settings, чтобы не было ложного обновления core, если он уже встроен в EXE.
 
-➕ **Автоматическое включение при выборе профиля**
-- При выборе профиля обход запускается автоматически  
-
-➕ **Обновлена версия Core**
-- Текущая стратегия обновлена и работает "из коробки" на версии [Flowseal 1.9.7](https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.9.7)
-
-➕ **Исправлена сортировка профилей**
-- Реализована натуральная сортировка
-- `(ALT)` отображается выше `(ALT2)`, `(ALT3)` и т.д.  
-
-➕ **Исправлена система проверки обновлений Core**
-- Текущая версия Core сохраняется в `settings.ini`  
-- После обновления версия корректно обновляется и отображается  
-
-➕ **Добавлено отображение версий**
-  `Версия GUI: X.X.X, Версия Core: X.X.X`  
-
-➕ **Исправлена кнопка "Сбросить соединения winws"**
-- Скрипт `uninstall.bat` больше не зависит от перезатираемой папки `core`  
-
-➕ **Повышена стабильность сборки**
-- Исправлен краш на первом запуске (безопасная обработка `.app_version`)  
+### ➕ То же поведение для автотеста/диагностики
+В автотесте и диагностическом прогоне тоже выставляется NO_UPDATE_CHECK=1, чтобы нигде не всплывал редирект/проверка обновлений.
 
 > ## ⚠️ **Если у вас возникают какие-то проблемы с запуском новой версии, удалите полностью папку **ZapretGUI** по пути **C:\Users\user** и перезапустите программу**
 
@@ -56,7 +35,8 @@
 
 ➕ **Начиная с версии 1.6.0 добавлен автоматический подбор профиля, чтобы это активировать нажмите на значок** <img width="50" height="47" alt="image" src="https://github.com/user-attachments/assets/ab1baaaa-4da1-4cc6-892f-a9d39a1c1a02" />
 
-<img width="1005" height="732" alt="press-release3" src="https://github.com/user-attachments/assets/80a49fb5-7b67-49de-bdda-0ccf245d45f6" />
+![Анимация2](https://github.com/user-attachments/assets/bd1a677e-ba71-4666-8c25-daeb005bbd8b)
+<img width="387" height="552" alt="{76777BE7-4C31-4FFE-8774-A06166E97935}" src="https://github.com/user-attachments/assets/4ca91776-0c79-4809-97ad-46f9eb9cb9a4" />
 
 > ⚠️ **Автоподбор не панацея!** Функция была написана на скорую руку, без глубокого тестирования, поэтому на некоторых провайдерах могут быть баги и неверный результат. Если у вас в итоге не выдаёт ни одного рабочего профиля, всё равно попробуйте сами вручную поискать рабочий.
 
@@ -145,37 +125,20 @@ Built on Python + PyQt6. One-click launch, multi-language support, no installati
 
 ## 🛠 Latest Updates
 
-➕ **Indicator logic fixed**
-- 🟢 Bypass enabled → green  
-- 🔴 Bypass disabled → red  
-- Added separate tray icons for ON/OFF state (tray-on / tray-off)
+### ➕ Updated the Auto Profile Selection UI, added a styled animated progress bar
+![Animation2](https://github.com/user-attachments/assets/6c376b42-47ed-4a16-bb8d-5fd917a35f7b)
 
-➕ **Full tray functionality**
-- The "Minimize" button now hides the application to the tray, just like the button <img width="31" height="31" alt="{A6289449-C895-4648-84F3-CBE5A5B09E94}" src="https://github.com/user-attachments/assets/5e9cb844-c172-4cbc-beef-0e5bdd30cde3" />
-- No extra windows remain in the taskbar  
+### ➕ Fixed Core (Flowseal) version comparison
+Updates are now detected not only for 1.9.7, but also for tags with suffixes/text (e.g. 1.9.7b, 1.9.7 beta).
 
-➕ **Automatic enable on profile selection**
-- Selecting a profile automatically starts the bypass  
+### ➕ Protection against browser redirects when launching profiles
+When running batch files from the GUI, NO_UPDATE_CHECK=1 is set, so service.bat check_updates is skipped and the browser does not open.
 
-➕ **Core version updated**
-- The current strategy has been updated and works "out of the box" with [Flowseal 1.9.6](https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.9.6)
+### ➕ Correct detection of the current Core version from bundled files
+On first launch / after a wipe, the Core version is taken from core/service.bat (LOCAL_VERSION=...) and saved to settings, preventing false Core update prompts when it’s already bundled in the EXE.
 
-➕ **Profile sorting improved**
-- Natural sorting implemented  
-- `(ALT)` is displayed above `(ALT2)`, `(ALT3)`, etc.  
-
-➕ **Core update system fixed**
-- Current Core version is stored in `settings.ini`  
-- After updating, the version is correctly saved and displayed  
-
-➕ **Version display added**
-  `GUI Version: X.X.X, Core Version: X.X.X`  
-
-➕ **"Reset winws connections" button fixed**
-- The `uninstall.bat` script no longer depends on the overwritten `core` directory  
-
-➕ **Build stability improved**
-- Fixed crash on first launch (safe handling of `.app_version`)  
+### ➕ Same behavior for autotest/diagnostics
+Autotest and diagnostic runs also set NO_UPDATE_CHECK=1, so no redirects / update checks can pop up anywhere.
 
 > ## ⚠️ **If you experience any issues running the new version, completely delete the `ZapretGUI` folder located at `C:\Users\user` and restart the program**
 
@@ -183,7 +146,8 @@ Built on Python + PyQt6. One-click launch, multi-language support, no installati
 
 ➕ **Starting from version 1.6.0, automatic profile selection was added. To activate it, click the icon** <img width="50" height="47" alt="image" src="https://github.com/user-attachments/assets/ab1baaaa-4da1-4cc6-892f-a9d39a1c1a02" />
 
-<img width="1005" height="732" alt="press-release3" src="https://github.com/user-attachments/assets/80a49fb5-7b67-49de-bdda-0ccf245d45f6" />
+![Анимация2](https://github.com/user-attachments/assets/bd1a677e-ba71-4666-8c25-daeb005bbd8b)
+<img width="387" height="552" alt="{76777BE7-4C31-4FFE-8774-A06166E97935}" src="https://github.com/user-attachments/assets/4ca91776-0c79-4809-97ad-46f9eb9cb9a4" />
 
 > ⚠️ **Auto-selection is not a silver bullet!** The feature was implemented quickly without deep testing, so there may be bugs or incorrect results on some providers. If no working profile is found, try selecting one manually.
 
