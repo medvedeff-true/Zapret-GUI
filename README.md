@@ -14,20 +14,18 @@
 
 ## 🛠 Последние обновления
 
-### ➕ Изменён внешний вид Авто-подбора профилей, добавлен стилизованный анимированный прогрессбар
-![Анимация2](https://github.com/user-attachments/assets/6c376b42-47ed-4a16-bb8d-5fd917a35f7b)
-
-### ➕ Исправлено сравнение версий Core (Flowseal)
-Теперь обновление определяется не только для 1.9.7, но и для тегов с суффиксами/текстом (например 1.9.7b, 1.9.7 beta).
-
-### ➕ Защита от редиректа в браузер при запуске профилей.
-При запуске батников из GUI выставляется NO_UPDATE_CHECK=1, из-за чего service.bat check_updates не выполняется и браузер не открывается.
-
-### ➕ Корректное определение текущей версии Core из встроенных файлов
-При первом запуске/после вайпа версия Core берётся из core/service.bat (LOCAL_VERSION=...) и сохраняется в settings, чтобы не было ложного обновления core, если он уже встроен в EXE.
-
-### ➕ То же поведение для автотеста/диагностики
-В автотесте и диагностическом прогоне тоже выставляется NO_UPDATE_CHECK=1, чтобы нигде не всплывал редирект/проверка обновлений.
+- **Отдельный слой пользовательских списков**: Добавлен выделенный слой для пользовательских списков сайтов, который сохраняется при обновлениях ядра, чтобы ваши домены не терялись.
+- **Система слияния списков**: Реализована бесшовная система слияния списков ядра и пользователя для избежания дубликатов и поддержания порядка.
+- **Валидация доменов**: Улучшена обработка доменов и сайтов с лучшей валидацией, нормализацией и поддержкой различных форматов, таких как URL, JSON и CSV.
+- **Синхронизация списков Flowseal**: Добавлена эффективная синхронизация списков Flowseal с проверкой хешей, обновляющая только при наличии изменений.
+- **Улучшенный процесс обновления**: Переработан процесс обновления файлов доменов для определения локальных версий, синхронизации списков даже при актуальности, сохранения пользовательских данных и предоставления более ясных сообщений о статусе.
+- **Защита пользовательских данных**: Пользовательские директории теперь исключаются из очистки директории приложения, защищая ваши настройки.
+- **Сохранение результатов автотеста**: Добавлено сохранение результатов автотеста профилей для удобства справки и устранения неисправностей.
+- **Расширенная диагностика автотеста**: Увеличено логирование и анализ ошибок для лучшей отладки проблем с профилями.
+- **Модуль UI Менеджера сайтов**: Новый инструмент в приложении для просмотра и редактирования пользовательских списков сайтов прямо в GUI.
+- **Обновленные инструкции**: Расширены инструкции в приложении, включая использование нового Менеджера сайтов.
+- **Быстрые действия в трее**: Добавлены ярлыки в системном трее для открытия Менеджера сайтов и быстрого добавления доменов в списки.
+- **Обновленные зависимости**: Обновлены импорты и модули для поддержки новых функций.
 
 > ## ⚠️ **Если у вас возникают какие-то проблемы с запуском новой версии, удалите полностью папку **ZapretGUI** по пути **C:\Users\user** и перезапустите программу**
 
@@ -125,20 +123,18 @@ Built on Python + PyQt6. One-click launch, multi-language support, no installati
 
 ## 🛠 Latest Updates
 
-### ➕ Updated the Auto Profile Selection UI, added a styled animated progress bar
-![Animation2](https://github.com/user-attachments/assets/6c376b42-47ed-4a16-bb8d-5fd917a35f7b)
-
-### ➕ Fixed Core (Flowseal) version comparison
-Updates are now detected not only for 1.9.7, but also for tags with suffixes/text (e.g. 1.9.7b, 1.9.7 beta).
-
-### ➕ Protection against browser redirects when launching profiles
-When running batch files from the GUI, NO_UPDATE_CHECK=1 is set, so service.bat check_updates is skipped and the browser does not open.
-
-### ➕ Correct detection of the current Core version from bundled files
-On first launch / after a wipe, the Core version is taken from core/service.bat (LOCAL_VERSION=...) and saved to settings, preventing false Core update prompts when it’s already bundled in the EXE.
-
-### ➕ Same behavior for autotest/diagnostics
-Autotest and diagnostic runs also set NO_UPDATE_CHECK=1, so no redirects / update checks can pop up anywhere.
+- **Separate User Lists Layer**: Added a dedicated user layer for site lists that survives core updates, ensuring your custom domains aren't lost.
+- **List Merging System**: Implemented seamless merging of core and user lists to avoid duplicates and keep everything organized.
+- **Domain Validation**: Enhanced handling of domains and sites with better validation, normalization, and support for various formats like URLs, JSON, and CSV.
+- **Flowseal Lists Synchronization**: Added efficient syncing of Flowseal lists with hash-based checks, updating only when changes occur.
+- **Improved Update Process**: Redesigned domain file updates to detect local versions, sync lists even when up-to-date, preserve user data during updates, and provide clearer status messages.
+- **User Data Protection**: User directories are now excluded from app directory wipes, protecting your custom settings.
+- **Autotest Results Saving**: Introduced saving of autoprofile test results for easier reference and troubleshooting.
+- **Enhanced Autotest Diagnostics**: Expanded logging and error analysis for better debugging of profile issues.
+- **Site Manager UI Module**: New in-app tool for viewing and editing user site lists directly through the GUI.
+- **Updated Instructions**: Expanded in-app guidance to include how to use the new Site Manager.
+- **Tray Quick Actions**: Added shortcuts in the system tray to open the Site Manager and quickly add domains to lists.
+- **Updated Dependencies**: Added necessary imports and modules to support the new features.
 
 > ## ⚠️ **If you experience any issues running the new version, completely delete the `ZapretGUI` folder located at `C:\Users\user` and restart the program**
 
