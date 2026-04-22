@@ -3,6 +3,8 @@ import os
 import subprocess
 import csv
 import ipaddress
+import base64
+import math
 from PyQt6.QtCore import (
     Qt, QSettings, QSize, QTimer, QThread, pyqtSignal,
     QElapsedTimer, QEvent, QEasingCurve, QPropertyAnimation, pyqtProperty,
@@ -15,9 +17,9 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QDialog, QCheckBox, QMessageBox, QSizePolicy,
-    QSystemTrayIcon, QMenu, QTextBrowser, QProgressDialog, QProgressBar, QGraphicsDropShadowEffect,
+    QSystemTrayIcon, QMenu, QTextBrowser, QProgressDialog, QGraphicsDropShadowEffect,
     QListWidget, QListWidgetItem, QInputDialog, QTabWidget, QToolButton, QFileDialog, QLineEdit,
-    QAbstractItemView, QStyle, QStyledItemDelegate, QTabBar
+    QAbstractItemView, QStyle, QStyledItemDelegate, QTabBar, QFrame
 )
 import shutil
 import requests
@@ -29,6 +31,7 @@ import time
 import ctypes
 import json
 import hashlib
+from urllib.parse import urlsplit
 
 def _run_hidden(args, cwd=None, timeout=None):
     try:
@@ -42,6 +45,8 @@ def _run_hidden(args, cwd=None, timeout=None):
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="ignore",
             timeout=timeout,
             startupinfo=si,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -118,7 +123,7 @@ def _safe_copy_tree(src_root: str, dst_root: str, overwrite: bool = False) -> No
             _safe_copy_file(s, d, overwrite=overwrite)
 
 
-APP_VERSION = "1.8.0"
+APP_VERSION = "2.0.0"
 APP_DIR = os.path.join(os.path.expanduser('~'), 'ZapretGUI')
 os.makedirs(APP_DIR, exist_ok=True)
 
@@ -138,6 +143,18 @@ FLOWSEAL_LIST_FILES = (
     "list-google.txt",
 )
 
+GAMING_LISTS_REPO = "medvedeff-true/ru-gaming-blocklist"
+GAMING_LISTS_API_URL = f"https://api.github.com/repos/{GAMING_LISTS_REPO}/contents/"
+GAME_MODE_KEY = "game_mode_enabled"
+GAME_MODE_MAIN_BYPASS_KEY = "game_mode/main_bypass_enabled"
+GAME_MODE_USER_LISTS_KEY = "game_mode/user_lists_enabled"
+GAME_MODE_DISCORD_KEY = "game_mode/discord_enabled"
+GAME_LIST_DOMAIN_SHA_KEY = "gaming_lists/domain_remote_sha"
+GAME_LIST_DOMAIN_HASH_KEY = "gaming_lists/domain_local_sha256"
+GAME_LIST_IP_SHA_KEY = "gaming_lists/ip_remote_sha"
+GAME_LIST_IP_HASH_KEY = "gaming_lists/ip_local_sha256"
+GAME_FILTER_FLAG_MODE = "all"
+
 SETTINGS_FILE = os.path.join(APP_DIR, 'settings.ini')
 VERSION_FILE = os.path.join(APP_DIR, '.app_version')
 AUTOLOG_FILE = os.path.join(APP_DIR, "autotest_last.log")
@@ -149,9 +166,77 @@ NOUPDATE_INP = os.path.join(APP_DIR, "_no_update_input.txt")
 
 USER_GENERAL_FILE = os.path.join(USER_DIR, "list-general-user.txt")
 USER_EXCLUDE_FILE = os.path.join(USER_DIR, "list-exclude-user.txt")
+USER_IP_ALL_FILE = os.path.join(USER_DIR, "ipset-all-user.txt")
+USER_IP_EXCLUDE_FILE = os.path.join(USER_DIR, "ipset-exclude-user.txt")
+USER_GAME_DOMAIN_FILE = os.path.join(USER_DIR, "medvedeff-game-list-all.txt")
+USER_GAME_IP_FILE = os.path.join(USER_DIR, "medvedeff-game-ipset.txt")
+FLOWSEAL_SOURCE_PREFIX = "flowseal-source-"
 
 RUNTIME_GENERAL_FILE = os.path.join(APP_DIR, "core", "lists", "list-general.txt")
 RUNTIME_EXCLUDE_FILE = os.path.join(APP_DIR, "core", "lists", "list-exclude.txt")
+RUNTIME_IP_ALL_FILE = os.path.join(APP_DIR, "core", "lists", "ipset-all.txt")
+RUNTIME_IP_EXCLUDE_FILE = os.path.join(APP_DIR, "core", "lists", "ipset-exclude.txt")
+RUNTIME_GOOGLE_FILE = os.path.join(APP_DIR, "core", "lists", "list-google.txt")
+RUNTIME_DISCORD_FILE = os.path.join(APP_DIR, "core", "lists", "list-discord.txt")
+RUNTIME_GENERAL_USER_FILE = os.path.join(APP_DIR, "core", "lists", "list-general-user.txt")
+RUNTIME_EXCLUDE_USER_FILE = os.path.join(APP_DIR, "core", "lists", "list-exclude-user.txt")
+RUNTIME_IP_ALL_USER_FILE = os.path.join(APP_DIR, "core", "lists", "ipset-all-user.txt")
+RUNTIME_IP_EXCLUDE_USER_FILE = os.path.join(APP_DIR, "core", "lists", "ipset-exclude-user.txt")
+GAME_FILTER_FLAG_FILE = os.path.join(APP_DIR, "core", "utils", "game_filter.enabled")
+USER_LIST_SEEDED_BACKUP_SUFFIX = ".seeded-backup"
+USER_LIST_SEEDED_OVERLAP_RATIO = 0.60
+PLACEHOLDER_ITEM_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+EMPTY_USER_LIST_PLACEHOLDERS = {
+    USER_GENERAL_FILE: ["example.com"],
+    USER_EXCLUDE_FILE: ["example.org"],
+    USER_IP_ALL_FILE: ["203.0.113.10"],
+    USER_IP_EXCLUDE_FILE: ["203.0.113.11"],
+}
+
+USER_LIST_FILE_MAP = {
+    ("domain", "add"): USER_GENERAL_FILE,
+    ("domain", "exclude"): USER_EXCLUDE_FILE,
+    ("ip", "add"): USER_IP_ALL_FILE,
+    ("ip", "exclude"): USER_IP_EXCLUDE_FILE,
+}
+
+GAMING_LIST_TARGETS = {
+    "medvedeff-game-list-all.txt": {
+        "path": USER_GAME_DOMAIN_FILE,
+        "remote_sha_key": GAME_LIST_DOMAIN_SHA_KEY,
+        "local_hash_key": GAME_LIST_DOMAIN_HASH_KEY,
+    },
+    "medvedeff-game-ipset.txt": {
+        "path": USER_GAME_IP_FILE,
+        "remote_sha_key": GAME_LIST_IP_SHA_KEY,
+        "local_hash_key": GAME_LIST_IP_HASH_KEY,
+    },
+}
+
+DNS_MALW_IPV4_SERVERS = (
+    "84.21.189.133",
+    "193.23.209.189",
+)
+DNS_MALW_IPV6_SERVERS = (
+    "2a12:bec4:1460:294::2",
+    "2a01:ecc0:680:120::2",
+)
+DNS_MALW_DOH_TEMPLATE = "https://dns.malw.link/dns-query"
+DNS_MALW_LAST_ATTEMPT_KEY = "dns_malw_link/last_attempt"
+DNS_MALW_LAST_SUCCESS_KEY = "dns_malw_link/last_success"
+DNS_MALW_LAST_STATUS_KEY = "dns_malw_link/last_status"
+DNS_MALW_LAST_ERROR_KEY = "dns_malw_link/last_error"
+DNS_MALW_LAST_UPDATED_KEY = "dns_malw_link/last_updated"
+DNS_MALW_LAST_DOH_KEY = "dns_malw_link/last_doh"
+DNS_MALW_ENABLED_BY_APP_KEY = "dns_malw_link/enabled_by_app"
+DNS_MALW_RESTORE_SNAPSHOT_KEY = "dns_malw_link/restore_snapshot"
+DNS_MALW_HOSTS_URL = "https://raw.githubusercontent.com/ImMALWARE/dns.malw.link/master/hosts"
+DNS_MALW_ADDITIONAL_URL = "https://raw.githubusercontent.com/AvenCores/Goida-AI-Unlocker/main/additional_hosts.py"
+DNS_MALW_HOSTS_PATH = r"C:\Windows\System32\drivers\etc\hosts"
+DNS_MALW_HOSTS_BACKUP_PATH = os.path.join(APP_DIR, "dns_malw_hosts_backup.txt")
+DNS_MALW_ADDITIONAL_VERSION_RE = re.compile(r'version_add\s*=\s*["\\\']([^"\\\']+)["\\\']')
+DNS_MALW_ADDITIONAL_HOSTS_RE = re.compile(r'hosts_add\s*=\s*"""(.*?)"""', re.S)
 
 def _ensure_no_update_input(lines: int = 12) -> str:
     try:
@@ -372,9 +457,20 @@ def _read_file_bytes(path: str) -> bytes:
 def _atomic_write_bytes(path: str, data: bytes) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp_path = path + ".tmp"
-    with open(tmp_path, "wb") as f:
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+        os.replace(tmp_path, path)
+        return
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+    with open(path, "wb") as f:
         f.write(data)
-    os.replace(tmp_path, path)
 
 def _read_lines_utf8(path: str) -> list[str]:
     try:
@@ -398,13 +494,22 @@ def _write_lines_utf8(path: str, lines: list[str]) -> None:
         seen.add(k)
         uniq.append(s)
 
+    content = "\n".join(uniq) + ("\n" if uniq else "")
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-        if uniq:
-            f.write("\n".join(uniq) + "\n")
-        else:
-            f.write("")
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+        os.replace(tmp, path)
+        return
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(content)
 
 
 def _copy_if_missing(src: str, dst: str) -> None:
@@ -416,15 +521,1740 @@ def _copy_if_missing(src: str, dst: str) -> None:
         pass
 
 
+def _bundled_root_dir() -> str:
+    if hasattr(sys, "_MEIPASS"):
+        return sys._MEIPASS
+    return os.path.dirname(__file__)
+
+
+def _bundled_path(*parts: str) -> str:
+    return os.path.join(_bundled_root_dir(), *parts)
+
+
+def _flowseal_source_path(filename: str) -> str:
+    return os.path.join(USER_DIR, f"{FLOWSEAL_SOURCE_PREFIX}{filename}")
+
+
+def _flowseal_base_paths(filename: str) -> tuple[str, ...]:
+    return (
+        _flowseal_source_path(filename),
+        _bundled_path("core", "lists", filename),
+        os.path.join(APP_DIR, "core", "lists", filename),
+    )
+
+
+def _read_flowseal_base_lines(filename: str) -> list[str]:
+    for path in _flowseal_base_paths(filename):
+        if os.path.exists(path):
+            lines = _read_lines_utf8(path)
+            if lines or path != _flowseal_source_path(filename):
+                return lines
+    return []
+
+
+def _load_icon_preserving_modes(path: str, fallback: QIcon | None = None) -> QIcon:
+    pixmap = QPixmap(path) if os.path.exists(path) else QPixmap()
+    if pixmap.isNull():
+        return fallback if fallback is not None else QIcon()
+
+    icon = QIcon()
+    for mode in (
+        QIcon.Mode.Normal,
+        QIcon.Mode.Disabled,
+        QIcon.Mode.Active,
+        QIcon.Mode.Selected,
+    ):
+        for state in (QIcon.State.Off, QIcon.State.On):
+            icon.addPixmap(pixmap, mode, state)
+    return icon
+
+
+def _runtime_user_list_paths() -> tuple[str, ...]:
+    return (
+        RUNTIME_GENERAL_USER_FILE,
+        RUNTIME_EXCLUDE_USER_FILE,
+        RUNTIME_IP_ALL_USER_FILE,
+        RUNTIME_IP_EXCLUDE_USER_FILE,
+    )
+
+
+def _normalized_value_keys(lines: list[str]) -> set[str]:
+    out = set()
+    for line in lines:
+        s = (line or "").strip()
+        if not s or s.startswith("#"):
+            continue
+        out.add(s.casefold())
+    return out
+
+
+def _ensure_flowseal_source_lists() -> None:
+    runtime_lists_dir = os.path.join(APP_DIR, "core", "lists")
+
+    for filename in FLOWSEAL_LIST_FILES:
+        dst = _flowseal_source_path(filename)
+        if os.path.exists(dst):
+            continue
+
+        copied = False
+        for src in (
+            _bundled_path("core", "lists", filename),
+            os.path.join(runtime_lists_dir, filename),
+        ):
+            if os.path.exists(src):
+                try:
+                    _copy_if_missing(src, dst)
+                    copied = os.path.exists(dst)
+                    if copied:
+                        break
+                except Exception:
+                    copied = False
+
+        if not copied:
+            try:
+                _write_lines_utf8(dst, [])
+            except Exception:
+                pass
+
+
+def _backup_user_list_before_migration(path: str) -> None:
+    backup_path = path + USER_LIST_SEEDED_BACKUP_SUFFIX
+    try:
+        if os.path.exists(path) and not os.path.exists(backup_path):
+            shutil.copy2(path, backup_path)
+    except Exception:
+        pass
+
+
+def _prune_seeded_user_file(user_path: str, base_paths: list[str]) -> bool:
+    current_lines = _read_lines_utf8(user_path)
+    current_keys = _normalized_value_keys(current_lines)
+    if not current_keys:
+        return False
+
+    base_keys = set()
+    for base_path in base_paths:
+        base_keys.update(_normalized_value_keys(_read_lines_utf8(base_path)))
+
+    if not base_keys:
+        return False
+
+    overlap = current_keys & base_keys
+    if not overlap:
+        return False
+
+    overlap_ratio = len(overlap) / max(1, len(current_keys))
+    if overlap_ratio < USER_LIST_SEEDED_OVERLAP_RATIO and len(overlap) != len(current_keys):
+        return False
+
+    filtered_lines = [
+        line for line in current_lines
+        if (line or "").strip().casefold() not in base_keys
+    ]
+    if len(filtered_lines) == len(current_lines):
+        return False
+
+    try:
+        _backup_user_list_before_migration(user_path)
+        _write_lines_utf8(user_path, filtered_lines)
+        return True
+    except Exception:
+        return False
+
+
+def _migrate_seeded_user_lists() -> None:
+    _ensure_flowseal_source_lists()
+
+    _prune_seeded_user_file(
+        USER_GENERAL_FILE,
+        [
+            _flowseal_source_path("list-general.txt"),
+            _bundled_path("core", "lists", "list-general.txt"),
+            RUNTIME_GENERAL_FILE,
+        ]
+    )
+    _prune_seeded_user_file(
+        USER_EXCLUDE_FILE,
+        [
+            _flowseal_source_path("list-exclude.txt"),
+            _bundled_path("core", "lists", "list-exclude.txt"),
+            RUNTIME_EXCLUDE_FILE,
+        ]
+    )
+    _prune_seeded_user_file(
+        USER_IP_ALL_FILE,
+        [
+            _flowseal_source_path("ipset-all.txt"),
+            _bundled_path("core", "lists", "ipset-all.txt"),
+            RUNTIME_IP_ALL_FILE,
+        ]
+    )
+    _prune_seeded_user_file(
+        USER_IP_EXCLUDE_FILE,
+        [
+            _flowseal_source_path("ipset-exclude.txt"),
+            _bundled_path("core", "lists", "ipset-exclude.txt"),
+            RUNTIME_IP_EXCLUDE_FILE,
+        ]
+    )
+
+
 def _ensure_user_lists_initialized() -> None:
     os.makedirs(USER_DIR, exist_ok=True)
-    _copy_if_missing(os.path.join(APP_DIR, "core", "lists", "list-general.txt"), USER_GENERAL_FILE)
-    _copy_if_missing(os.path.join(APP_DIR, "core", "lists", "list-exclude.txt"), USER_EXCLUDE_FILE)
+    _ensure_flowseal_source_lists()
 
     if not os.path.exists(USER_GENERAL_FILE):
-        _write_lines_utf8(USER_GENERAL_FILE, [])
+        try:
+            _write_lines_utf8(USER_GENERAL_FILE, [])
+        except Exception:
+            pass
     if not os.path.exists(USER_EXCLUDE_FILE):
-        _write_lines_utf8(USER_EXCLUDE_FILE, [])
+        try:
+            _write_lines_utf8(USER_EXCLUDE_FILE, [])
+        except Exception:
+            pass
+    if not os.path.exists(USER_IP_ALL_FILE):
+        try:
+            _write_lines_utf8(USER_IP_ALL_FILE, [])
+        except Exception:
+            pass
+    if not os.path.exists(USER_IP_EXCLUDE_FILE):
+        try:
+            _write_lines_utf8(USER_IP_EXCLUDE_FILE, [])
+        except Exception:
+            pass
+
+    try:
+        _migrate_seeded_user_lists()
+    except Exception:
+        pass
+
+
+def _load_settings_if_needed(settings: QSettings | None = None) -> QSettings:
+    return settings if settings is not None else QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
+
+
+def _safe_int_setting(qs: QSettings, key: str, default: int = 0) -> int:
+    try:
+        return int(qs.value(key, default) or default)
+    except Exception:
+        return default
+
+
+def _dns_malw_link_common_powershell() -> str:
+    return r"""
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+function Normalize-Servers([object[]]$servers) {
+    return @(
+        $servers |
+        Where-Object { $_ } |
+        ForEach-Object { $_.ToString().Trim().ToLowerInvariant() } |
+        Sort-Object -Unique
+    )
+}
+
+function Test-SameServers([object[]]$left, [object[]]$right) {
+    $a = Normalize-Servers $left
+    $b = Normalize-Servers $right
+    if ($a.Count -ne $b.Count) {
+        return $false
+    }
+    for ($i = 0; $i -lt $a.Count; $i++) {
+        if ($a[$i] -ne $b[$i]) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-AdminState() {
+    try {
+        $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
+}
+
+$ipv4Servers = @(__IPV4__)
+$ipv6Servers = @(__IPV6__)
+$desiredServers = @($ipv4Servers + $ipv6Servers)
+$dohTemplate = '__DOH__'
+"""
+
+
+def _build_dns_malw_link_status_script() -> str:
+    script = _dns_malw_link_common_powershell() + r"""
+$result = [ordered]@{
+    ok = $false
+    active = $false
+    error = ''
+    admin = Get-AdminState
+    adapters = 0
+    matched = 0
+    method = ''
+}
+
+try {
+    $getDnsClient = Get-Command Get-DnsClient -ErrorAction SilentlyContinue
+    $getDnsClientServerAddress = Get-Command Get-DnsClientServerAddress -ErrorAction SilentlyContinue
+
+    if ($getDnsClient -and $getDnsClientServerAddress) {
+        $result.method = 'dnsclient'
+        $adapters = @(
+            Get-DnsClient |
+            Where-Object {
+                $_.InterfaceAlias -and
+                $_.InterfaceOperationalStatus -eq 'Up' -and
+                $_.InterfaceAlias -notmatch 'Loopback|isatap|Teredo'
+            } |
+            Sort-Object InterfaceIndex -Unique
+        )
+        $result.adapters = $adapters.Count
+
+        foreach ($adapter in $adapters) {
+            $currentServers = @(
+                Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ErrorAction SilentlyContinue |
+                ForEach-Object { @($_.ServerAddresses) } |
+                Where-Object { $_ }
+            )
+            if (Test-SameServers $currentServers $desiredServers) {
+                $result.matched += 1
+            }
+        }
+    } elseif (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
+        $result.method = 'cim'
+        $adapters = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=TRUE" -ErrorAction Stop)
+        $result.adapters = $adapters.Count
+
+        foreach ($adapter in $adapters) {
+            if (Test-SameServers @($adapter.DNSServerSearchOrder) $desiredServers) {
+                $result.matched += 1
+            }
+        }
+    } elseif (Get-Command Get-WmiObject -ErrorAction SilentlyContinue) {
+        $result.method = 'wmi'
+        $adapters = @(Get-WmiObject Win32_NetworkAdapterConfiguration -Filter "IPEnabled=TRUE" -ErrorAction Stop)
+        $result.adapters = $adapters.Count
+
+        foreach ($adapter in $adapters) {
+            if (Test-SameServers @($adapter.DNSServerSearchOrder) $desiredServers) {
+                $result.matched += 1
+            }
+        }
+    } else {
+        throw 'No DNS query backend available'
+    }
+
+    $result.active = ($result.adapters -gt 0 -and $result.matched -eq $result.adapters)
+    $result.ok = $true
+} catch {
+    $result.error = [string]$_.Exception.Message
+}
+
+$result | ConvertTo-Json -Compress
+"""
+    return (
+        script
+        .replace("__IPV4__", ", ".join(f"'{server}'" for server in DNS_MALW_IPV4_SERVERS))
+        .replace("__IPV6__", ", ".join(f"'{server}'" for server in DNS_MALW_IPV6_SERVERS))
+        .replace("__DOH__", DNS_MALW_DOH_TEMPLATE)
+    )
+
+
+def _build_dns_malw_link_enable_script() -> str:
+    script = _dns_malw_link_common_powershell() + r"""
+$result = [ordered]@{
+    ok = $false
+    error = ''
+    admin = Get-AdminState
+    adapters = 0
+    applied = 0
+    updated = 0
+    doh = $false
+    method = ''
+    snapshot = @()
+}
+
+try {
+    if (-not $result.admin) {
+        throw 'not-admin'
+    }
+
+    $addDohCommand = Get-Command Add-DnsClientDohServerAddress -ErrorAction SilentlyContinue
+    $setDohCommand = Get-Command Set-DnsClientDohServerAddress -ErrorAction SilentlyContinue
+    $getDohCommand = Get-Command Get-DnsClientDohServerAddress -ErrorAction SilentlyContinue
+
+    if ($addDohCommand -or $setDohCommand) {
+        foreach ($server in $desiredServers) {
+            try {
+                $hasExisting = $false
+                if ($getDohCommand) {
+                    $existing = @(Get-DnsClientDohServerAddress -ServerAddress $server -ErrorAction SilentlyContinue)
+                    $hasExisting = ($existing.Count -gt 0)
+                }
+
+                if ($hasExisting -and $setDohCommand) {
+                    Set-DnsClientDohServerAddress -ServerAddress $server -DohTemplate $dohTemplate -AutoUpgrade $true -AllowFallbackToUdp $true -ErrorAction Stop | Out-Null
+                    $result.doh = $true
+                    continue
+                }
+                if ($addDohCommand) {
+                    Add-DnsClientDohServerAddress -ServerAddress $server -DohTemplate $dohTemplate -AutoUpgrade $true -AllowFallbackToUdp $true -ErrorAction Stop | Out-Null
+                    $result.doh = $true
+                    continue
+                }
+                if ($setDohCommand) {
+                    Set-DnsClientDohServerAddress -ServerAddress $server -DohTemplate $dohTemplate -AutoUpgrade $true -AllowFallbackToUdp $true -ErrorAction Stop | Out-Null
+                    $result.doh = $true
+                }
+            } catch {
+                try {
+                    if ($setDohCommand) {
+                        Set-DnsClientDohServerAddress -ServerAddress $server -DohTemplate $dohTemplate -AutoUpgrade $true -AllowFallbackToUdp $true -ErrorAction Stop | Out-Null
+                        $result.doh = $true
+                    }
+                } catch {
+                }
+            }
+        }
+    }
+
+    $getDnsClient = Get-Command Get-DnsClient -ErrorAction SilentlyContinue
+    $getDnsClientServerAddress = Get-Command Get-DnsClientServerAddress -ErrorAction SilentlyContinue
+    $setDnsClientServerAddress = Get-Command Set-DnsClientServerAddress -ErrorAction SilentlyContinue
+
+    if ($getDnsClient -and $getDnsClientServerAddress -and $setDnsClientServerAddress) {
+        $result.method = 'dnsclient'
+        $adapters = @(
+            Get-DnsClient |
+            Where-Object {
+                $_.InterfaceAlias -and
+                $_.InterfaceOperationalStatus -eq 'Up' -and
+                $_.InterfaceAlias -notmatch 'Loopback|isatap|Teredo'
+            } |
+            Sort-Object InterfaceIndex -Unique
+        )
+        $result.adapters = $adapters.Count
+
+        foreach ($adapter in $adapters) {
+            $currentServers = @(
+                Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ErrorAction SilentlyContinue |
+                ForEach-Object { @($_.ServerAddresses) } |
+                Where-Object { $_ }
+            )
+            $result.snapshot += [pscustomobject]@{
+                interface_index = $adapter.InterfaceIndex
+                alias = $adapter.InterfaceAlias
+                servers = @($currentServers)
+            }
+            if (Test-SameServers $currentServers $desiredServers) {
+                $result.applied += 1
+                continue
+            }
+
+            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses $desiredServers -ErrorAction Stop | Out-Null
+            $result.updated += 1
+            $result.applied += 1
+        }
+    } elseif (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
+        $result.method = 'cim'
+        $adapters = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=TRUE" -ErrorAction Stop)
+        $result.adapters = $adapters.Count
+
+        foreach ($adapter in $adapters) {
+            $currentServers = @($adapter.DNSServerSearchOrder)
+            $result.snapshot += [pscustomobject]@{
+                interface_index = [int]$adapter.InterfaceIndex
+                alias = [string]$adapter.Description
+                servers = @($currentServers)
+            }
+            if (Test-SameServers $currentServers $desiredServers) {
+                $result.applied += 1
+                continue
+            }
+
+            $invokeResult = Invoke-CimMethod -InputObject $adapter -MethodName SetDNSServerSearchOrder -Arguments @{DNSServerSearchOrder = $desiredServers} -ErrorAction Stop
+            if (($invokeResult.ReturnValue -eq 0) -or ($invokeResult.ReturnValue -eq 1)) {
+                $result.updated += 1
+                $result.applied += 1
+            }
+        }
+    } elseif (Get-Command Get-WmiObject -ErrorAction SilentlyContinue) {
+        $result.method = 'wmi'
+        $adapters = @(Get-WmiObject Win32_NetworkAdapterConfiguration -Filter "IPEnabled=TRUE" -ErrorAction Stop)
+        $result.adapters = $adapters.Count
+
+        foreach ($adapter in $adapters) {
+            $currentServers = @($adapter.DNSServerSearchOrder)
+            $result.snapshot += [pscustomobject]@{
+                interface_index = [int]$adapter.InterfaceIndex
+                alias = [string]$adapter.Description
+                servers = @($currentServers)
+            }
+            if (Test-SameServers $currentServers $desiredServers) {
+                $result.applied += 1
+                continue
+            }
+
+            $invokeResult = $adapter.SetDNSServerSearchOrder($desiredServers)
+            if (($invokeResult.ReturnValue -eq 0) -or ($invokeResult.ReturnValue -eq 1)) {
+                $result.updated += 1
+                $result.applied += 1
+            }
+        }
+    } else {
+        throw 'No DNS configuration backend available'
+    }
+
+    if ($result.adapters -le 0) {
+        throw 'no-active-adapters'
+    }
+    if ($result.applied -le 0) {
+        throw 'dns-apply-failed'
+    }
+
+    try {
+        if (Get-Command Clear-DnsClientCache -ErrorAction SilentlyContinue) {
+            Clear-DnsClientCache | Out-Null
+        } else {
+            & ipconfig /flushdns | Out-Null
+        }
+    } catch {
+    }
+
+    $result.ok = $true
+} catch {
+    $result.error = [string]$_.Exception.Message
+}
+
+$result | ConvertTo-Json -Compress -Depth 6
+"""
+    return (
+        script
+        .replace("__IPV4__", ", ".join(f"'{server}'" for server in DNS_MALW_IPV4_SERVERS))
+        .replace("__IPV6__", ", ".join(f"'{server}'" for server in DNS_MALW_IPV6_SERVERS))
+        .replace("__DOH__", DNS_MALW_DOH_TEMPLATE)
+    )
+
+
+def _build_dns_malw_link_disable_script(snapshot_json: str) -> str:
+    escaped_snapshot = snapshot_json.replace("'", "''")
+    script = _dns_malw_link_common_powershell() + rf"""
+$result = [ordered]@{{
+    ok = $false
+    error = ''
+    admin = Get-AdminState
+    adapters = 0
+    applied = 0
+    updated = 0
+    method = ''
+}}
+
+try {{
+    if (-not $result.admin) {{
+        throw 'not-admin'
+    }}
+
+    $snapshotRaw = @'
+{escaped_snapshot}
+'@
+    $snapshot = @()
+    if ($snapshotRaw.Trim()) {{
+        $snapshot = @((ConvertFrom-Json $snapshotRaw -ErrorAction Stop))
+    }}
+    if ($snapshot.Count -le 0) {{
+        throw 'no-snapshot'
+    }}
+    $result.adapters = $snapshot.Count
+
+    $getDnsClientServerAddress = Get-Command Get-DnsClientServerAddress -ErrorAction SilentlyContinue
+    $setDnsClientServerAddress = Get-Command Set-DnsClientServerAddress -ErrorAction SilentlyContinue
+
+    if ($getDnsClientServerAddress -and $setDnsClientServerAddress) {{
+        $result.method = 'dnsclient'
+        foreach ($adapter in $snapshot) {{
+            $index = [int]$adapter.interface_index
+            $servers = @($adapter.servers)
+            $currentServers = @(
+                Get-DnsClientServerAddress -InterfaceIndex $index -ErrorAction SilentlyContinue |
+                ForEach-Object {{ @($_.ServerAddresses) }} |
+                Where-Object {{ $_ }}
+            )
+            if (Test-SameServers $currentServers $servers) {{
+                $result.applied += 1
+                continue
+            }}
+
+            if ($servers.Count -gt 0) {{
+                Set-DnsClientServerAddress -InterfaceIndex $index -ServerAddresses $servers -ErrorAction Stop | Out-Null
+            }} else {{
+                Set-DnsClientServerAddress -InterfaceIndex $index -ResetServerAddresses -ErrorAction Stop | Out-Null
+            }}
+            $result.updated += 1
+            $result.applied += 1
+        }}
+    }} elseif (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {{
+        $result.method = 'cim'
+        foreach ($entry in $snapshot) {{
+            $index = [int]$entry.interface_index
+            $servers = @($entry.servers)
+            $adapter = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=TRUE" -ErrorAction Stop | Where-Object {{ [int]$_.InterfaceIndex -eq $index }} | Select-Object -First 1
+            if (-not $adapter) {{
+                continue
+            }}
+            $currentServers = @($adapter.DNSServerSearchOrder)
+            if (Test-SameServers $currentServers $servers) {{
+                $result.applied += 1
+                continue
+            }}
+            $target = if ($servers.Count -gt 0) {{ $servers }} else {{ $null }}
+            $invokeResult = Invoke-CimMethod -InputObject $adapter -MethodName SetDNSServerSearchOrder -Arguments @{{DNSServerSearchOrder = $target}} -ErrorAction Stop
+            if (($invokeResult.ReturnValue -eq 0) -or ($invokeResult.ReturnValue -eq 1)) {{
+                $result.updated += 1
+                $result.applied += 1
+            }}
+        }}
+    }} elseif (Get-Command Get-WmiObject -ErrorAction SilentlyContinue) {{
+        $result.method = 'wmi'
+        foreach ($entry in $snapshot) {{
+            $index = [int]$entry.interface_index
+            $servers = @($entry.servers)
+            $adapter = Get-WmiObject Win32_NetworkAdapterConfiguration -Filter "IPEnabled=TRUE" -ErrorAction Stop | Where-Object {{ [int]$_.InterfaceIndex -eq $index }} | Select-Object -First 1
+            if (-not $adapter) {{
+                continue
+            }}
+            $currentServers = @($adapter.DNSServerSearchOrder)
+            if (Test-SameServers $currentServers $servers) {{
+                $result.applied += 1
+                continue
+            }}
+            $target = if ($servers.Count -gt 0) {{ $servers }} else {{ $null }}
+            $invokeResult = $adapter.SetDNSServerSearchOrder($target)
+            if (($invokeResult.ReturnValue -eq 0) -or ($invokeResult.ReturnValue -eq 1)) {{
+                $result.updated += 1
+                $result.applied += 1
+            }}
+        }}
+    }} else {{
+        throw 'No DNS configuration backend available'
+    }}
+
+    if ($result.applied -le 0) {{
+        throw 'dns-restore-failed'
+    }}
+
+    try {{
+        if (Get-Command Clear-DnsClientCache -ErrorAction SilentlyContinue) {{
+            Clear-DnsClientCache | Out-Null
+        }} else {{
+            & ipconfig /flushdns | Out-Null
+        }}
+    }} catch {{
+    }}
+
+    $result.ok = $true
+}} catch {{
+    $result.error = [string]$_.Exception.Message
+}}
+
+$result | ConvertTo-Json -Compress
+"""
+    return (
+        script
+        .replace("__IPV4__", ", ".join(f"'{server}'" for server in DNS_MALW_IPV4_SERVERS))
+        .replace("__IPV6__", ", ".join(f"'{server}'" for server in DNS_MALW_IPV6_SERVERS))
+        .replace("__DOH__", DNS_MALW_DOH_TEMPLATE)
+    )
+
+
+def _run_hidden_powershell_json(script: str, timeout: int = 35) -> dict:
+    result = {"ok": False, "error": "powershell-launch-failed"}
+    try:
+        encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        completed = _run_hidden(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-EncodedCommand",
+                encoded_script,
+            ],
+            timeout=timeout,
+        )
+        if completed is None:
+            return result
+
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+        if stdout:
+            for line in reversed([line.strip() for line in stdout.splitlines() if line.strip()]):
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(payload, dict):
+                    if "error" not in payload:
+                        payload["error"] = ""
+                    return payload
+
+        if stderr:
+            result["error"] = stderr.splitlines()[-1].strip()
+        elif completed.returncode not in (0, None):
+            result["error"] = f"powershell-exit-{completed.returncode}"
+        else:
+            result["error"] = "empty-powershell-result"
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def _normalize_dns_server_string(value: str) -> str:
+    s = (value or "").strip().lower()
+    if not s or s in {"none", "нет"}:
+        return ""
+    if "%" in s:
+        s = s.split("%", 1)[0].strip()
+    return s
+
+
+def _parse_netsh_dns_servers(text: str) -> dict[str, list[str]]:
+    blocks: dict[str, list[str]] = {}
+    current = None
+    collecting = False
+
+    for raw_line in (text or "").splitlines():
+        line = raw_line.rstrip()
+        m = re.match(r'^\s*(?:Configuration for interface|Настройка интерфейса)\s+"(.*)"\s*$', line)
+        if m:
+            current = m.group(1).strip()
+            blocks.setdefault(current, [])
+            collecting = False
+            continue
+
+        if current is None:
+            continue
+
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if (
+            "Register with which suffix" in stripped
+            or "Зарегистрировать с суффиксом" in stripped
+        ):
+            collecting = False
+            continue
+
+        if (
+            "DNS Servers" in stripped
+            or "DNS servers" in stripped
+            or "DNS-серверы" in stripped
+        ):
+            collecting = True
+            _, _, value_part = stripped.partition(":")
+            candidate = _normalize_dns_server_string(value_part)
+            if candidate:
+                blocks[current].append(candidate)
+            continue
+
+        if collecting and raw_line[:1].isspace():
+            candidate = _normalize_dns_server_string(stripped)
+            if candidate:
+                blocks[current].append(candidate)
+
+    return {name: _merge_unique(values) for name, values in blocks.items()}
+
+
+def _get_connected_interface_names() -> list[str]:
+    try:
+        completed = subprocess.run(
+            ["netsh", "interface", "show", "interface"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        output = completed.stdout or ""
+    except Exception:
+        return []
+
+    names = []
+    excluded_markers = (
+        "loopback",
+        "bluetooth",
+        "virtual",
+        "hyper-v",
+        "vmware",
+        "vbox",
+        "tap",
+        "tun",
+        "vpn",
+        "wintun",
+        "teredo",
+    )
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        if (
+            line.lstrip().startswith("Admin State")
+            or line.lstrip().startswith("Состояние адм.")
+            or set(line.strip()) == {"-"}
+        ):
+            continue
+        m = re.match(r'^\s*\S+\s+(?:Connected|Подключен)\s+\S+\s+(.+?)\s*$', line)
+        if not m:
+            continue
+        name = m.group(1).strip()
+        name_cf = name.casefold()
+        if name and not any(marker in name_cf for marker in excluded_markers):
+            names.append(name)
+    return names
+
+
+def _parse_netsh_dns_details(text: str) -> dict[str, dict]:
+    blocks: dict[str, dict] = {}
+    current = None
+    collecting = False
+
+    for raw_line in (text or "").splitlines():
+        line = raw_line.rstrip()
+        m = re.match(r'^\s*(?:Configuration for interface|Настройка интерфейса)\s+"(.*)"\s*$', line)
+        if m:
+            current = m.group(1).strip()
+            blocks[current] = {"mode": "", "servers": []}
+            collecting = False
+            continue
+
+        if current is None:
+            continue
+
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if (
+            "Register with which suffix" in stripped
+            or "Зарегистрировать с суффиксом" in stripped
+        ):
+            collecting = False
+            continue
+
+        if (
+            "DNS Servers" in stripped
+            or "DNS servers" in stripped
+            or "DNS-серверы" in stripped
+        ):
+            collecting = True
+            low = stripped.casefold()
+            if "dhcp" in low:
+                blocks[current]["mode"] = "dhcp"
+            elif ("static" in low) or ("статичес" in low):
+                blocks[current]["mode"] = "static"
+            _, _, value_part = stripped.partition(":")
+            candidate = _normalize_dns_server_string(value_part)
+            if candidate:
+                blocks[current]["servers"].append(candidate)
+            continue
+
+        if collecting and raw_line[:1].isspace():
+            candidate = _normalize_dns_server_string(stripped)
+            if candidate:
+                blocks[current]["servers"].append(candidate)
+
+    for name, info in blocks.items():
+        info["servers"] = _merge_unique(info.get("servers", []))
+        if not info.get("mode"):
+            info["mode"] = "static" if info["servers"] else "dhcp"
+    return blocks
+
+
+def _run_netsh_command(args: list[str]) -> tuple[bool, str]:
+    try:
+        completed = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        ok = completed.returncode == 0
+        msg = (completed.stderr or completed.stdout or "").strip()
+        return ok, msg
+    except Exception as e:
+        return False, str(e)
+
+
+def _get_current_dns_snapshot(interface_names: list[str] | None = None) -> list[dict]:
+    names = interface_names if interface_names is not None else _get_connected_interface_names()
+    ipv4_ok, ipv4_text = _run_netsh_command(["netsh", "interface", "ipv4", "show", "dnsservers"])
+    ipv6_ok, ipv6_text = _run_netsh_command(["netsh", "interface", "ipv6", "show", "dnsservers"])
+    ipv4_details = _parse_netsh_dns_details(ipv4_text if ipv4_ok else "")
+    ipv6_details = _parse_netsh_dns_details(ipv6_text if ipv6_ok else "")
+    snapshot = []
+    for name in names:
+        snapshot.append({
+            "name": name,
+            "ipv4": dict(ipv4_details.get(name, {"mode": "dhcp", "servers": []})),
+            "ipv6": dict(ipv6_details.get(name, {"mode": "dhcp", "servers": []})),
+        })
+    return snapshot
+
+
+def _apply_netsh_dns_family(interface_name: str, family: str, mode: str, servers: list[str]) -> tuple[bool, str]:
+    fam = "ipv6" if family == "ipv6" else "ipv4"
+    normalized = [_normalize_dns_server_string(s) for s in servers if _normalize_dns_server_string(s)]
+    quoted_name = f'name="{interface_name}"' if fam == "ipv4" else interface_name
+
+    if mode == "dhcp":
+        args = ["netsh", "interface", fam, "set", "dnsservers"]
+        if fam == "ipv4":
+            args.extend([quoted_name, "source=dhcp", "validate=no"])
+        else:
+            args.extend([quoted_name, "source=dhcp", "validate=no"])
+        return _run_netsh_command(args)
+
+    if not normalized:
+        return _run_netsh_command(
+            ["netsh", "interface", fam, "set", "dnsservers", quoted_name, "source=dhcp", "validate=no"]
+        )
+
+    if fam == "ipv4":
+        ok, msg = _run_netsh_command(
+            ["netsh", "interface", "ipv4", "set", "dnsservers", quoted_name, "static", normalized[0], "primary", "validate=no"]
+        )
+    else:
+        ok, msg = _run_netsh_command(
+            ["netsh", "interface", "ipv6", "set", "dnsservers", quoted_name, "static", normalized[0], "primary", "validate=no"]
+        )
+    if not ok:
+        return ok, msg
+
+    for index, server in enumerate(normalized[1:], start=2):
+        if fam == "ipv4":
+            ok, msg = _run_netsh_command(
+                ["netsh", "interface", "ipv4", "add", "dnsservers", quoted_name, server, f"index={index}", "validate=no"]
+            )
+        else:
+            ok, msg = _run_netsh_command(
+                ["netsh", "interface", "ipv6", "add", "dnsservers", quoted_name, server, f"index={index}", "validate=no"]
+            )
+        if not ok:
+            return ok, msg
+    return True, ""
+
+
+def _is_dns_malw_link_enabled_by_app(settings: QSettings | None = None) -> bool:
+    try:
+        qs = _load_settings_if_needed(settings)
+        return bool(qs.value(DNS_MALW_ENABLED_BY_APP_KEY, False, type=bool))
+    except Exception:
+        return False
+
+
+def _set_dns_malw_link_enabled_by_app(enabled: bool, settings: QSettings | None = None) -> None:
+    qs = _load_settings_if_needed(settings)
+    qs.setValue(DNS_MALW_ENABLED_BY_APP_KEY, bool(enabled))
+    qs.sync()
+
+
+def _load_dns_malw_link_snapshot(settings: QSettings | None = None) -> list[dict]:
+    try:
+        qs = _load_settings_if_needed(settings)
+        raw = str(qs.value(DNS_MALW_RESTORE_SNAPSHOT_KEY, "") or "").strip()
+        if not raw:
+            return []
+        payload = json.loads(raw)
+        return payload if isinstance(payload, list) else []
+    except Exception:
+        return []
+
+
+def _save_dns_malw_link_snapshot(snapshot: list[dict], settings: QSettings | None = None) -> None:
+    qs = _load_settings_if_needed(settings)
+    try:
+        raw = json.dumps(snapshot or [], ensure_ascii=False)
+    except Exception:
+        raw = "[]"
+    qs.setValue(DNS_MALW_RESTORE_SNAPSHOT_KEY, raw)
+    qs.sync()
+
+
+def _read_hosts_file(path: str = DNS_MALW_HOSTS_PATH) -> str:
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except Exception:
+        return ""
+
+    for enc in ("utf-8-sig", "utf-8", "utf-16", "cp1251", "mbcs"):
+        try:
+            return raw.decode(enc)
+        except Exception:
+            continue
+    return raw.decode("utf-8", errors="ignore")
+
+
+def _write_hosts_file(content: str, path: str = DNS_MALW_HOSTS_PATH) -> None:
+    normalized = (content or "").replace("\r\n", "\n").replace("\r", "\n")
+    if normalized and not normalized.endswith("\n"):
+        normalized += "\n"
+    data = normalized.encode("utf-8")
+    attempts = 5 if os.path.normcase(path) == os.path.normcase(DNS_MALW_HOSTS_PATH) else 1
+    last_error = None
+
+    for attempt in range(attempts):
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+            return
+        except (PermissionError, OSError) as e:
+            last_error = e
+            is_permission_error = isinstance(e, PermissionError) or getattr(e, "errno", None) == 13 or getattr(e, "winerror", None) == 5
+            if (not is_permission_error) or attempt >= attempts - 1:
+                raise
+            try:
+                os.chmod(path, 0o666)
+            except Exception:
+                pass
+            time.sleep(0.18 + attempt * 0.22)
+
+    if last_error is not None:
+        raise last_error
+
+
+def _hosts_contains_ai_marker(text: str) -> bool:
+    hay = (text or "").casefold()
+    return (
+        "dns.malw.link" in hay
+        or "goida ai unlocker" in hay
+        or "openai.com.cdn.cloudflare.net" in hay
+        or "claude.ai.cdn.cloudflare.net" in hay
+    )
+
+
+def _download_ai_hosts_bundle() -> tuple[str, str]:
+    headers = {"User-Agent": "ZapretGUI-AiDNS"}
+    main_resp = requests.get(DNS_MALW_HOSTS_URL, headers=headers, timeout=25)
+    main_resp.raise_for_status()
+    main_hosts = (main_resp.text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    additional_block = ""
+    additional_version = ""
+    try:
+        add_resp = requests.get(DNS_MALW_ADDITIONAL_URL, headers=headers, timeout=20)
+        add_resp.raise_for_status()
+        add_text = add_resp.text or ""
+        m_ver = DNS_MALW_ADDITIONAL_VERSION_RE.search(add_text)
+        m_hosts = DNS_MALW_ADDITIONAL_HOSTS_RE.search(add_text)
+        if m_ver:
+            additional_version = m_ver.group(1).strip()
+        if m_hosts:
+            additional_block = m_hosts.group(1).strip()
+    except Exception:
+        additional_block = ""
+        additional_version = ""
+
+    pieces = [main_hosts]
+    if additional_block:
+        header = "# Goida-AI-Unlocker additional hosts"
+        if additional_version:
+            header += f" ({additional_version})"
+        pieces.append(header)
+        pieces.append(additional_block)
+
+    final_hosts = "\n\n".join(part for part in pieces if part).strip() + "\n"
+    return final_hosts, additional_version
+
+
+def _sync_ai_dns_if_enabled(settings: QSettings | None = None) -> dict:
+    qs = _load_settings_if_needed(settings)
+    result = {"ok": False, "skipped": False, "error": ""}
+    if not _is_dns_malw_link_enabled_by_app(qs):
+        result["skipped"] = True
+        return result
+
+    try:
+        is_admin_now = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        is_admin_now = False
+
+    if not is_admin_now:
+        result["skipped"] = True
+        return result
+
+    sync_result = _enable_dns_malw_link(qs)
+    result["ok"] = bool(sync_result.get("ok"))
+    result["error"] = str(sync_result.get("error", "") or "")
+    return result
+
+
+def _get_dns_malw_link_status() -> dict:
+    result = {
+        "ok": True,
+        "active": False,
+        "error": "",
+        "admin": False,
+        "adapters": 0,
+        "matched": 0,
+        "method": "hosts",
+    }
+
+    try:
+        hosts_text = _read_hosts_file()
+        result["active"] = _hosts_contains_ai_marker(hosts_text)
+    except Exception as e:
+        result["ok"] = False
+        result["error"] = str(e)
+
+    return result
+
+
+def _enable_dns_malw_link(settings: QSettings | None = None) -> dict:
+    qs = _load_settings_if_needed(settings)
+    result = {
+        "ok": False,
+        "error": "",
+        "admin": False,
+        "adapters": 1,
+        "applied": 0,
+        "updated": 0,
+        "doh": False,
+        "method": "hosts",
+        "snapshot": [],
+    }
+
+    try:
+        result["admin"] = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        result["admin"] = False
+
+    if not result["admin"]:
+        result["error"] = "not-admin"
+    else:
+        try:
+            current_hosts = _read_hosts_file()
+            if not os.path.exists(DNS_MALW_HOSTS_BACKUP_PATH):
+                _write_hosts_file(current_hosts, DNS_MALW_HOSTS_BACKUP_PATH)
+            elif not _is_dns_malw_link_enabled_by_app(qs):
+                _write_hosts_file(current_hosts, DNS_MALW_HOSTS_BACKUP_PATH)
+
+            new_hosts, additional_version = _download_ai_hosts_bundle()
+            _write_hosts_file(new_hosts, DNS_MALW_HOSTS_PATH)
+            _run_hidden(["ipconfig", "/flushdns"])
+            _run_hidden(["ipconfig", "/registerdns"])
+            result["ok"] = True
+            result["applied"] = 1
+            result["updated"] = 1
+            result["snapshot"] = [{"backup": DNS_MALW_HOSTS_BACKUP_PATH, "additional_version": additional_version}]
+        except Exception as e:
+            result["error"] = str(e)
+
+    try:
+        qs.setValue(DNS_MALW_LAST_ATTEMPT_KEY, int(time.time()))
+        qs.setValue(DNS_MALW_LAST_STATUS_KEY, "ok" if result.get("ok") else "error")
+        qs.setValue(DNS_MALW_LAST_ERROR_KEY, str(result.get("error", "") or ""))
+        qs.setValue(DNS_MALW_LAST_UPDATED_KEY, int(result.get("updated", 0) or 0))
+        qs.setValue(DNS_MALW_LAST_DOH_KEY, bool(result.get("doh")))
+        if result.get("ok"):
+            qs.setValue(DNS_MALW_LAST_SUCCESS_KEY, int(time.time()))
+            _save_dns_malw_link_snapshot(result.get("snapshot") or [], qs)
+            qs.setValue(DNS_MALW_ENABLED_BY_APP_KEY, True)
+        qs.sync()
+    except Exception:
+        pass
+    return result
+
+
+def _disable_dns_malw_link(settings: QSettings | None = None) -> dict:
+    qs = _load_settings_if_needed(settings)
+    result = {
+        "ok": False,
+        "error": "",
+        "admin": False,
+        "adapters": 1,
+        "applied": 0,
+        "updated": 0,
+        "method": "hosts",
+    }
+    try:
+        result["admin"] = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        result["admin"] = False
+
+    if not result["admin"]:
+        result["error"] = "not-admin"
+    elif not os.path.exists(DNS_MALW_HOSTS_BACKUP_PATH):
+        result["error"] = "no-snapshot"
+    else:
+        try:
+            backup_hosts = _read_hosts_file(DNS_MALW_HOSTS_BACKUP_PATH)
+            _write_hosts_file(backup_hosts, DNS_MALW_HOSTS_PATH)
+            _run_hidden(["ipconfig", "/flushdns"])
+            _run_hidden(["ipconfig", "/registerdns"])
+            result["ok"] = True
+            result["applied"] = 1
+            result["updated"] = 1
+        except Exception as e:
+            result["error"] = str(e)
+
+    try:
+        qs.setValue(DNS_MALW_LAST_ATTEMPT_KEY, int(time.time()))
+        qs.setValue(DNS_MALW_LAST_STATUS_KEY, "ok" if result.get("ok") else "error")
+        qs.setValue(DNS_MALW_LAST_ERROR_KEY, str(result.get("error", "") or ""))
+        if result.get("ok"):
+            qs.setValue(DNS_MALW_ENABLED_BY_APP_KEY, False)
+            qs.setValue(DNS_MALW_RESTORE_SNAPSHOT_KEY, "")
+            qs.setValue(DNS_MALW_LAST_UPDATED_KEY, int(result.get("updated", 0) or 0))
+        qs.sync()
+    except Exception:
+        pass
+    return result
+
+
+def _run_self_as_admin_for_dns_action(action: str) -> bool:
+    try:
+        action = (action or "").strip().lower()
+        if action not in {"enable", "disable"}:
+            return False
+
+        if getattr(sys, "frozen", False):
+            executable = sys.executable
+            params = subprocess.list2cmdline([f"--dns-malw-link-action={action}"])
+        else:
+            executable = sys.executable
+            params = subprocess.list2cmdline([os.path.abspath(sys.argv[0]), f"--dns-malw-link-action={action}"])
+
+        res = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            executable,
+            params,
+            None,
+            0,
+        )
+        return int(res) > 32
+    except Exception:
+        return False
+
+
+def _build_dns_malw_link_script() -> str:
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+function Normalize-Servers([object[]]$servers) {
+    return @(
+        $servers |
+        Where-Object { $_ } |
+        ForEach-Object { $_.ToString().Trim().ToLowerInvariant() } |
+        Sort-Object -Unique
+    )
+}
+
+function Test-SameServers([object[]]$left, [object[]]$right) {
+    $a = Normalize-Servers $left
+    $b = Normalize-Servers $right
+    if ($a.Count -ne $b.Count) {
+        return $false
+    }
+    for ($i = 0; $i -lt $a.Count; $i++) {
+        if ($a[$i] -ne $b[$i]) {
+            return $false
+        }
+    }
+    return $true
+}
+
+$result = [ordered]@{
+    ok = $false
+    skipped = $false
+    reason = ''
+    error = ''
+    admin = $false
+    adapters = 0
+    applied = 0
+    updated = 0
+    doh = $false
+    method = ''
+}
+
+try {
+    try {
+        $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+        $result.admin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        $result.admin = $false
+    }
+
+    if (-not $result.admin) {
+        $result.skipped = $true
+        $result.reason = 'not-admin'
+        $result | ConvertTo-Json -Compress
+        exit 0
+    }
+
+    $ipv4Servers = @(__IPV4__)
+    $ipv6Servers = @(__IPV6__)
+    $desiredServers = @($ipv4Servers + $ipv6Servers)
+    $dohTemplate = '__DOH__'
+
+    $addDohCommand = Get-Command Add-DnsClientDohServerAddress -ErrorAction SilentlyContinue
+    $setDohCommand = Get-Command Set-DnsClientDohServerAddress -ErrorAction SilentlyContinue
+    $getDohCommand = Get-Command Get-DnsClientDohServerAddress -ErrorAction SilentlyContinue
+
+    if ($addDohCommand -or $setDohCommand) {
+        foreach ($server in $desiredServers) {
+            try {
+                $hasExisting = $false
+                if ($getDohCommand) {
+                    $existing = @(Get-DnsClientDohServerAddress -ServerAddress $server -ErrorAction SilentlyContinue)
+                    $hasExisting = ($existing.Count -gt 0)
+                }
+
+                if ($hasExisting -and $setDohCommand) {
+                    Set-DnsClientDohServerAddress -ServerAddress $server -DohTemplate $dohTemplate -AutoUpgrade $true -AllowFallbackToUdp $true -ErrorAction Stop | Out-Null
+                    $result.doh = $true
+                    continue
+                }
+
+                if ($addDohCommand) {
+                    Add-DnsClientDohServerAddress -ServerAddress $server -DohTemplate $dohTemplate -AutoUpgrade $true -AllowFallbackToUdp $true -ErrorAction Stop | Out-Null
+                    $result.doh = $true
+                    continue
+                }
+
+                if ($setDohCommand) {
+                    Set-DnsClientDohServerAddress -ServerAddress $server -DohTemplate $dohTemplate -AutoUpgrade $true -AllowFallbackToUdp $true -ErrorAction Stop | Out-Null
+                    $result.doh = $true
+                }
+            } catch {
+                try {
+                    if ($setDohCommand) {
+                        Set-DnsClientDohServerAddress -ServerAddress $server -DohTemplate $dohTemplate -AutoUpgrade $true -AllowFallbackToUdp $true -ErrorAction Stop | Out-Null
+                        $result.doh = $true
+                    }
+                } catch {
+                }
+            }
+        }
+    }
+
+    $getDnsClient = Get-Command Get-DnsClient -ErrorAction SilentlyContinue
+    $getDnsClientServerAddress = Get-Command Get-DnsClientServerAddress -ErrorAction SilentlyContinue
+    $setDnsClientServerAddress = Get-Command Set-DnsClientServerAddress -ErrorAction SilentlyContinue
+
+    if ($getDnsClient -and $getDnsClientServerAddress -and $setDnsClientServerAddress) {
+        $result.method = 'dnsclient'
+        $adapters = @(
+            Get-DnsClient |
+            Where-Object {
+                $_.InterfaceAlias -and
+                $_.InterfaceOperationalStatus -eq 'Up' -and
+                $_.InterfaceAlias -notmatch 'Loopback|isatap|Teredo'
+            } |
+            Sort-Object InterfaceIndex -Unique
+        )
+        $result.adapters = $adapters.Count
+
+        foreach ($adapter in $adapters) {
+            try {
+                $currentServers = @(
+                    Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ErrorAction SilentlyContinue |
+                    ForEach-Object { @($_.ServerAddresses) } |
+                    Where-Object { $_ }
+                )
+                if (Test-SameServers $currentServers $desiredServers) {
+                    $result.applied += 1
+                    continue
+                }
+
+                Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses $desiredServers -ErrorAction Stop | Out-Null
+                $result.updated += 1
+                $result.applied += 1
+            } catch {
+            }
+        }
+    } elseif (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
+        $result.method = 'cim'
+        $adapters = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=TRUE" -ErrorAction Stop)
+        $result.adapters = $adapters.Count
+
+        foreach ($adapter in $adapters) {
+            try {
+                $currentServers = @($adapter.DNSServerSearchOrder)
+                if (Test-SameServers $currentServers $desiredServers) {
+                    $result.applied += 1
+                    continue
+                }
+
+                $invokeResult = Invoke-CimMethod -InputObject $adapter -MethodName SetDNSServerSearchOrder -Arguments @{DNSServerSearchOrder = $desiredServers} -ErrorAction Stop
+                if (($invokeResult.ReturnValue -eq 0) -or ($invokeResult.ReturnValue -eq 1)) {
+                    $result.updated += 1
+                    $result.applied += 1
+                }
+            } catch {
+            }
+        }
+    } elseif (Get-Command Get-WmiObject -ErrorAction SilentlyContinue) {
+        $result.method = 'wmi'
+        $adapters = @(Get-WmiObject Win32_NetworkAdapterConfiguration -Filter "IPEnabled=TRUE" -ErrorAction Stop)
+        $result.adapters = $adapters.Count
+
+        foreach ($adapter in $adapters) {
+            try {
+                $currentServers = @($adapter.DNSServerSearchOrder)
+                if (Test-SameServers $currentServers $desiredServers) {
+                    $result.applied += 1
+                    continue
+                }
+
+                $invokeResult = $adapter.SetDNSServerSearchOrder($desiredServers)
+                if (($invokeResult.ReturnValue -eq 0) -or ($invokeResult.ReturnValue -eq 1)) {
+                    $result.updated += 1
+                    $result.applied += 1
+                }
+            } catch {
+            }
+        }
+    } else {
+        throw 'No DNS configuration backend available'
+    }
+
+    if ($result.adapters -le 0) {
+        $result.skipped = $true
+        $result.reason = 'no-active-adapters'
+        $result | ConvertTo-Json -Compress
+        exit 0
+    }
+
+    if ($result.applied -le 0) {
+        throw 'dns-apply-failed'
+    }
+
+    try {
+        if (Get-Command Clear-DnsClientCache -ErrorAction SilentlyContinue) {
+            Clear-DnsClientCache | Out-Null
+        } else {
+            & ipconfig /flushdns | Out-Null
+        }
+    } catch {
+    }
+
+    $result.ok = $true
+} catch {
+    $result.error = [string]$_.Exception.Message
+}
+
+$result | ConvertTo-Json -Compress
+"""
+    return (
+        script
+        .replace("__IPV4__", ", ".join(f"'{server}'" for server in DNS_MALW_IPV4_SERVERS))
+        .replace("__IPV6__", ", ".join(f"'{server}'" for server in DNS_MALW_IPV6_SERVERS))
+        .replace("__DOH__", DNS_MALW_DOH_TEMPLATE)
+    )
+
+
+def _ensure_dns_malw_link(
+    settings: QSettings | None = None,
+    min_retry_seconds: int = 0,
+) -> dict:
+    result = {
+        "ok": False,
+        "skipped": False,
+        "reason": "",
+        "error": "",
+        "admin": False,
+        "adapters": 0,
+        "applied": 0,
+        "updated": 0,
+        "doh": False,
+        "method": "",
+    }
+
+    qs = _load_settings_if_needed(settings)
+    now = int(time.time())
+    last_attempt_to_store = now
+
+    if not sys.platform.startswith("win"):
+        result["skipped"] = True
+        result["reason"] = "non-windows"
+    else:
+        should_run = True
+        if min_retry_seconds > 0:
+            last_attempt = _safe_int_setting(qs, DNS_MALW_LAST_ATTEMPT_KEY, 0)
+            last_status = str(qs.value(DNS_MALW_LAST_STATUS_KEY, "") or "").strip().lower()
+            if last_attempt > 0 and (now - last_attempt) < min_retry_seconds:
+                result["skipped"] = True
+                result["reason"] = "recent-attempt"
+                last_attempt_to_store = last_attempt
+                should_run = False
+                if last_status == "ok":
+                    result["ok"] = True
+                    result["doh"] = bool(qs.value(DNS_MALW_LAST_DOH_KEY, False, type=bool))
+                    result["updated"] = _safe_int_setting(qs, DNS_MALW_LAST_UPDATED_KEY, 0)
+                try:
+                    result["admin"] = bool(ctypes.windll.shell32.IsUserAnAdmin())
+                except Exception:
+                    result["admin"] = False
+        if should_run:
+            encoded_script = base64.b64encode(
+                _build_dns_malw_link_script().encode("utf-16le")
+            ).decode("ascii")
+            completed = _run_hidden(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy", "Bypass",
+                    "-EncodedCommand",
+                    encoded_script,
+                ],
+                timeout=35,
+            )
+
+            if completed is None:
+                result["error"] = "powershell-launch-failed"
+            else:
+                stdout = (completed.stdout or "").strip()
+                stderr = (completed.stderr or "").strip()
+                payload = None
+                if stdout:
+                    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+                    for line in reversed(lines):
+                        try:
+                            parsed = json.loads(line)
+                        except Exception:
+                            continue
+                        if isinstance(parsed, dict):
+                            payload = parsed
+                            break
+
+                if isinstance(payload, dict):
+                    for key in result:
+                        if key in payload:
+                            result[key] = payload[key]
+                elif stderr:
+                    result["error"] = stderr.splitlines()[-1].strip()
+
+                if completed.returncode not in (0, None) and not result["error"]:
+                    result["error"] = f"powershell-exit-{completed.returncode}"
+
+    try:
+        qs.setValue(DNS_MALW_LAST_ATTEMPT_KEY, last_attempt_to_store)
+        qs.setValue(
+            DNS_MALW_LAST_STATUS_KEY,
+            "ok" if result["ok"] else ("skipped" if result["skipped"] else "error"),
+        )
+        qs.setValue(
+            DNS_MALW_LAST_ERROR_KEY,
+            str(result.get("error") or result.get("reason") or "").strip(),
+        )
+        qs.setValue(DNS_MALW_LAST_UPDATED_KEY, int(result.get("updated", 0) or 0))
+        qs.setValue(DNS_MALW_LAST_DOH_KEY, bool(result.get("doh")))
+        if result["ok"]:
+            qs.setValue(DNS_MALW_LAST_SUCCESS_KEY, now)
+        qs.sync()
+    except Exception:
+        pass
+
+    return result
+
+
+def _is_game_mode_enabled(settings: QSettings | None = None) -> bool:
+    try:
+        qs = _load_settings_if_needed(settings)
+        return bool(qs.value(GAME_MODE_KEY, False, type=bool))
+    except Exception:
+        return False
+
+
+def _set_game_mode_enabled(enabled: bool, settings: QSettings | None = None) -> None:
+    qs = _load_settings_if_needed(settings)
+    qs.setValue(GAME_MODE_KEY, bool(enabled))
+    qs.sync()
+
+
+def _get_game_mode_options(settings: QSettings | None = None) -> dict:
+    try:
+        qs = _load_settings_if_needed(settings)
+        return {
+            "main_bypass_enabled": bool(qs.value(GAME_MODE_MAIN_BYPASS_KEY, True, type=bool)),
+            "user_lists_enabled": bool(qs.value(GAME_MODE_USER_LISTS_KEY, True, type=bool)),
+            "discord_enabled": bool(qs.value(GAME_MODE_DISCORD_KEY, False, type=bool)),
+        }
+    except Exception:
+        return {
+            "main_bypass_enabled": True,
+            "user_lists_enabled": True,
+            "discord_enabled": False,
+        }
+
+
+def _set_game_mode_options(
+    main_bypass_enabled: bool | None = None,
+    user_lists_enabled: bool | None = None,
+    discord_enabled: bool | None = None,
+    settings: QSettings | None = None,
+) -> None:
+    qs = _load_settings_if_needed(settings)
+    if main_bypass_enabled is not None:
+        qs.setValue(GAME_MODE_MAIN_BYPASS_KEY, bool(main_bypass_enabled))
+    if user_lists_enabled is not None:
+        qs.setValue(GAME_MODE_USER_LISTS_KEY, bool(user_lists_enabled))
+    if discord_enabled is not None:
+        qs.setValue(GAME_MODE_DISCORD_KEY, bool(discord_enabled))
+    qs.sync()
+
+
+def _get_effective_game_mode_options(settings: QSettings | None = None) -> dict:
+    if not _is_game_mode_enabled(settings):
+        return {
+            "main_bypass_enabled": True,
+            "user_lists_enabled": True,
+            "discord_enabled": False,
+        }
+    return _get_game_mode_options(settings)
+
+
+def _get_game_filter_ports(settings: QSettings | None = None) -> tuple[str, str]:
+    if not _is_game_mode_enabled(settings):
+        return ("12", "12")
+
+    mode = (GAME_FILTER_FLAG_MODE or "all").strip().casefold()
+    if mode == "tcp":
+        return ("1024-65535", "12")
+    if mode == "udp":
+        return ("12", "1024-65535")
+    return ("1024-65535", "1024-65535")
+
+
+def _apply_game_mode_state_to_core(settings: QSettings | None = None) -> None:
+    enabled = _is_game_mode_enabled(settings)
+    try:
+        if enabled:
+            os.makedirs(os.path.dirname(GAME_FILTER_FLAG_FILE), exist_ok=True)
+            _atomic_write_bytes(GAME_FILTER_FLAG_FILE, (GAME_FILTER_FLAG_MODE + "\n").encode("ascii"))
+        else:
+            if os.path.exists(GAME_FILTER_FLAG_FILE):
+                os.remove(GAME_FILTER_FLAG_FILE)
+    except Exception:
+        pass
+
+
+def _create_lists_sync_session(user_agent: str) -> requests.Session:
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": user_agent,
+        "Accept": "*/*",
+        "Cache-Control": "no-cache",
+    })
+    return session
+
+
+def _download_sync_bytes(session: requests.Session, url: str) -> bytes:
+    r = session.get(
+        url,
+        timeout=(2.5, 6.0),
+        allow_redirects=True,
+    )
+    r.raise_for_status()
+    return r.content
+
+
+def _sync_gaming_lists(settings: QSettings | None = None, session: requests.Session | None = None) -> dict:
+    result = {
+        "ok": False,
+        "updated": 0,
+        "error": "",
+        "offline": False,
+        "silent_missing": False,
+    }
+
+    qs = _load_settings_if_needed(settings)
+    own_session = session is None
+    missing_before = sum(0 if os.path.exists(meta["path"]) else 1 for meta in GAMING_LIST_TARGETS.values())
+
+    try:
+        os.makedirs(USER_DIR, exist_ok=True)
+
+        if session is None:
+            session = _create_lists_sync_session("ZapretGUI-GamingLists")
+
+        response = session.get(
+            GAMING_LISTS_API_URL,
+            timeout=(2.5, 6.0),
+            allow_redirects=True,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise RuntimeError("Unexpected gaming lists API response")
+
+        remote_items = {
+            str(item.get("name")): item
+            for item in payload
+            if isinstance(item, dict) and item.get("type") == "file"
+        }
+
+        for name, meta in GAMING_LIST_TARGETS.items():
+            remote = remote_items.get(name)
+            if not remote:
+                continue
+
+            dst = meta["path"]
+            remote_sha = str(remote.get("sha") or "").strip()
+            download_url = str(remote.get("download_url") or "").strip()
+            stored_remote_sha = str(qs.value(meta["remote_sha_key"], "") or "").strip()
+            stored_local_hash = str(qs.value(meta["local_hash_key"], "") or "").strip()
+            local_data = _read_file_bytes(dst)
+            local_hash = _sha256_bytes(local_data)
+
+            needs_download = (
+                not os.path.exists(dst)
+                or not local_hash
+                or local_hash != stored_local_hash
+                or (remote_sha and remote_sha != stored_remote_sha)
+            )
+
+            if needs_download and download_url:
+                remote_data = _download_sync_bytes(session, download_url)
+                remote_hash = _sha256_bytes(remote_data)
+                if remote_hash != local_hash:
+                    _atomic_write_bytes(dst, remote_data)
+                    result["updated"] += 1
+                local_hash = remote_hash
+
+            if remote_sha:
+                qs.setValue(meta["remote_sha_key"], remote_sha)
+            if local_hash:
+                qs.setValue(meta["local_hash_key"], local_hash)
+
+        qs.sync()
+        result["ok"] = True
+    except requests.exceptions.RequestException as e:
+        result["offline"] = True
+        result["error"] = str(e)
+        if missing_before > 0:
+            result["silent_missing"] = True
+    except Exception as e:
+        result["error"] = str(e)
+        if missing_before > 0:
+            result["silent_missing"] = True
+    finally:
+        if own_session and session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    return result
 
 
 def _is_valid_domain_like(s: str) -> bool:
@@ -453,6 +2283,14 @@ def _is_ip_address_like(s: str) -> bool:
         return False
 
 
+def _is_single_ip_address_like(s: str) -> bool:
+    try:
+        ipaddress.ip_address(_normalize_ip_candidate(s))
+        return True
+    except ValueError:
+        return False
+
+
 def _normalize_domain_candidate(raw: str) -> str:
     s = (raw or "").strip().lower()
     if not s:
@@ -472,6 +2310,63 @@ def _normalize_domain_candidate(raw: str) -> str:
             s = host
 
     return s.lstrip(".").strip().strip("\"'[](){}<>")
+
+
+def _normalize_ip_candidate(raw: str) -> str:
+    s = (raw or "").strip()
+    if not s:
+        return ""
+
+    s = s.split("#", 1)[0].strip().strip("\"'(){}<>")
+    if not s:
+        return ""
+
+    if "://" in s:
+        try:
+            s = (urlsplit(s).hostname or "").strip()
+        except Exception:
+            s = s.split("://", 1)[1]
+
+    s = s.split("\\", 1)[0].strip()
+    if s.startswith("[") and "]" in s:
+        s = s[1:s.index("]")]
+    elif "/" in s:
+        host, suffix = s.split("/", 1)
+        if not suffix.isdigit():
+            s = host
+
+    if s.count(":") == 1 and "." in s:
+        host, port = s.rsplit(":", 1)
+        if port.isdigit():
+            s = host
+
+    return s.strip().strip("\"'[](){}<>")
+
+
+def _is_valid_ip_or_network_like(s: str) -> bool:
+    try:
+        ipaddress.ip_network(_normalize_ip_candidate(s), strict=False)
+        return True
+    except ValueError:
+        return False
+
+
+def _entity_kind_for_target_file(target_file: str) -> str:
+    if target_file in (USER_IP_ALL_FILE, USER_IP_EXCLUDE_FILE):
+        return "ip"
+    return "domain"
+
+
+def _normalize_value_for_target_file(target_file: str, raw: str) -> str:
+    if _entity_kind_for_target_file(target_file) == "ip":
+        return _normalize_ip_candidate(raw)
+    return _normalize_domain_candidate(raw)
+
+
+def _is_valid_value_for_target_file(target_file: str, value: str) -> bool:
+    if _entity_kind_for_target_file(target_file) == "ip":
+        return _is_valid_ip_or_network_like(value)
+    return _is_valid_domain_like(value)
 
 
 def _extract_string_values(value) -> list[str]:
@@ -540,19 +2435,42 @@ def _merge_unique(*lists: list[str]) -> list[str]:
 
 def _rebuild_runtime_lists(settings: QSettings | None = None) -> None:
     try:
+        _ensure_flowseal_source_lists()
         _ensure_user_lists_initialized()
+        game_mode_enabled = _is_game_mode_enabled(settings)
+        effective_options = _get_effective_game_mode_options(settings)
+        main_bypass_enabled = bool(effective_options["main_bypass_enabled"])
+        user_lists_enabled = bool(effective_options["user_lists_enabled"])
+        discord_enabled = bool(effective_options["discord_enabled"])
 
-        core_general = _read_lines_utf8(os.path.join(APP_DIR, "core", "lists", "list-general.txt"))
-        core_exclude = _read_lines_utf8(os.path.join(APP_DIR, "core", "lists", "list-exclude.txt"))
+        core_general = _read_flowseal_base_lines("list-general.txt") if main_bypass_enabled else []
+        core_exclude = _read_flowseal_base_lines("list-exclude.txt") if main_bypass_enabled else []
+        core_google = _read_flowseal_base_lines("list-google.txt") if main_bypass_enabled else []
+        core_ip_all = _read_flowseal_base_lines("ipset-all.txt") if main_bypass_enabled else []
+        core_ip_exclude = _read_flowseal_base_lines("ipset-exclude.txt") if main_bypass_enabled else []
 
-        user_general = _read_lines_utf8(USER_GENERAL_FILE)
-        user_exclude = _read_lines_utf8(USER_EXCLUDE_FILE)
+        user_general = _read_lines_utf8(USER_GENERAL_FILE) if user_lists_enabled else []
+        user_exclude = _read_lines_utf8(USER_EXCLUDE_FILE) if user_lists_enabled else []
+        user_ip_all = _read_lines_utf8(USER_IP_ALL_FILE) if user_lists_enabled else []
+        user_ip_exclude = _read_lines_utf8(USER_IP_EXCLUDE_FILE) if user_lists_enabled else []
+        user_game_domains = _read_lines_utf8(USER_GAME_DOMAIN_FILE) if game_mode_enabled else []
+        user_game_ip = _read_lines_utf8(USER_GAME_IP_FILE) if game_mode_enabled else []
+        discord_domains = _read_lines_utf8(RUNTIME_DISCORD_FILE) if (game_mode_enabled and discord_enabled) else []
 
-        merged_general = _merge_unique(core_general, user_general)
+        merged_general = _merge_unique(core_general, user_general, user_game_domains, discord_domains)
         merged_exclude = _merge_unique(core_exclude, user_exclude)
+        merged_google = _merge_unique(core_google)
+        merged_ip_all = _merge_unique(core_ip_all, user_ip_all, user_game_ip)
+        merged_ip_exclude = _merge_unique(core_ip_exclude, user_ip_exclude)
 
         _write_lines_utf8(RUNTIME_GENERAL_FILE, merged_general)
         _write_lines_utf8(RUNTIME_EXCLUDE_FILE, merged_exclude)
+        _write_lines_utf8(RUNTIME_GOOGLE_FILE, merged_google)
+        _write_lines_utf8(RUNTIME_IP_ALL_FILE, merged_ip_all)
+        _write_lines_utf8(RUNTIME_IP_EXCLUDE_FILE, merged_ip_exclude)
+        for runtime_user_path in _runtime_user_list_paths():
+            _write_lines_utf8(runtime_user_path, [])
+        _apply_game_mode_state_to_core(settings)
     except Exception:
         pass
 
@@ -562,27 +2480,24 @@ def _sync_flowseal_lists(settings: QSettings | None = None) -> dict:
         "ok": False,
         "offline": False,
         "flowseal_updated": 0,
+        "gaming_updated": 0,
+        "gaming_error": "",
+        "gaming_offline": False,
+        "gaming_silent_missing": False,
         "error": "",
     }
+    session = None
     try:
-        lists_dir = os.path.join(APP_DIR, "core", "lists")
-        os.makedirs(lists_dir, exist_ok=True)
         os.makedirs(USER_DIR, exist_ok=True)
+        _ensure_flowseal_source_lists()
 
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "ZapretGUI-ListsSync",
-            "Accept": "*/*",
-            "Cache-Control": "no-cache",
-        })
+        session = _create_lists_sync_session("ZapretGUI-ListsSync")
 
         flowseal_updates = []
         for fn in FLOWSEAL_LIST_FILES:
             url = FLOWSEAL_LIST_BASE_URL + fn
-            r = session.get(url, timeout=(2.5, 6.0), allow_redirects=True)
-            r.raise_for_status()
-            remote_data = r.content
-            dst = os.path.join(lists_dir, fn)
+            remote_data = _download_sync_bytes(session, url)
+            dst = _flowseal_source_path(fn)
             local_data = _read_file_bytes(dst)
             if _sha256_bytes(local_data) != _sha256_bytes(remote_data):
                 flowseal_updates.append((dst, remote_data))
@@ -590,17 +2505,180 @@ def _sync_flowseal_lists(settings: QSettings | None = None) -> dict:
         for dst, data in flowseal_updates:
             _atomic_write_bytes(dst, data)
 
+        gaming_result = _sync_gaming_lists(settings, session=session)
         _ensure_user_lists_initialized()
         _rebuild_runtime_lists(settings)
 
         result["ok"] = True
         result["flowseal_updated"] = len(flowseal_updates)
+        result["gaming_updated"] = gaming_result.get("updated", 0)
+        result["gaming_error"] = gaming_result.get("error", "")
+        result["gaming_offline"] = bool(gaming_result.get("offline"))
+        result["gaming_silent_missing"] = bool(gaming_result.get("silent_missing"))
     except requests.exceptions.RequestException as e:
         result["offline"] = True
         result["error"] = str(e)
     except Exception as e:
         result["error"] = str(e)
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
     return result
+
+
+def _format_lists_status_text(result: dict, lang: str = "ru") -> str:
+    flowseal_updated = int(result.get("flowseal_updated", 0) or 0)
+    gaming_updated = int(result.get("gaming_updated", 0) or 0)
+    gaming_error = str(result.get("gaming_error", "") or "").strip()
+    gaming_silent_missing = bool(result.get("gaming_silent_missing"))
+
+    if lang == "ru":
+        parts = []
+        if flowseal_updated > 0:
+            parts.append(f"Основные списки обновлены: {flowseal_updated}")
+        else:
+            parts.append("Основные списки актуальны.")
+
+        if gaming_updated > 0:
+            parts.append(f"Игровые списки обновлены: {gaming_updated}")
+        elif gaming_error and not gaming_silent_missing:
+            parts.append("Игровые списки не удалось обновить, используются локальные файлы.")
+
+        return "\n".join(parts)
+
+    parts = []
+    if flowseal_updated > 0:
+        parts.append(f"Main lists updated: {flowseal_updated}")
+    else:
+        parts.append("Main lists are up to date.")
+
+    if gaming_updated > 0:
+        parts.append(f"Gaming lists updated: {gaming_updated}")
+    elif gaming_error and not gaming_silent_missing:
+        parts.append("Gaming lists could not be updated; local files are kept.")
+
+    return "\n".join(parts)
+
+
+def _read_text_full(path: str) -> str:
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except Exception:
+        return ""
+
+    for enc in ("utf-8", "cp1251", "utf-16"):
+        try:
+            return data.decode(enc)
+        except Exception:
+            pass
+    return data.decode("utf-8", errors="replace")
+
+
+def _extract_profile_launch_parts(script_path: str) -> tuple[str, list[str]]:
+    raw_text = _read_text_full(script_path)
+    if not raw_text:
+        raise RuntimeError("Profile script is empty")
+
+    lines = raw_text.splitlines()
+    start_index = None
+    for idx, line in enumerate(lines):
+        if "%BIN%winws.exe" in line:
+            start_index = idx
+            break
+
+    if start_index is None:
+        raise RuntimeError("winws launch command not found")
+
+    collected = []
+    for idx in range(start_index, len(lines)):
+        line = lines[idx].strip()
+        if not line:
+            continue
+        collected.append(line)
+        if not line.rstrip().endswith("^"):
+            break
+
+    if not collected:
+        raise RuntimeError("winws launch command is empty")
+
+    marker = '"%BIN%winws.exe"'
+    if marker not in collected[0]:
+        raise RuntimeError("winws marker not found")
+
+    preamble = collected[0].split(marker, 1)[1].strip()
+    if preamble.endswith("^"):
+        preamble = preamble[:-1].rstrip()
+
+    segments = []
+    for raw_line in collected[1:]:
+        segment = raw_line.rstrip()
+        if segment.endswith("^"):
+            segment = segment[:-1].rstrip()
+        if segment:
+            segments.append(segment)
+
+    return preamble, segments
+
+
+def _expand_profile_placeholders(
+    text: str,
+    core_dir: str,
+    game_filter_tcp: str,
+    game_filter_udp: str,
+) -> str:
+    bin_dir = os.path.join(core_dir, "bin") + os.sep
+    lists_dir = os.path.join(core_dir, "lists") + os.sep
+    game_filter_any = "1024-65535" if (game_filter_tcp != "12" or game_filter_udp != "12") else "12"
+    return (
+        text.replace("%BIN%", bin_dir)
+        .replace("%LISTS%", lists_dir)
+        .replace("%GameFilterTCP%", game_filter_tcp)
+        .replace("%GameFilterUDP%", game_filter_udp)
+        .replace("%GameFilter%", game_filter_any)
+        .replace("^!", "!")
+        .strip()
+    )
+
+
+def _build_game_mode_winws_command(
+    script_path: str,
+    core_dir: str,
+    settings: QSettings | None = None,
+) -> str:
+    preamble, segments = _extract_profile_launch_parts(script_path)
+    game_filter_tcp, game_filter_udp = _get_game_filter_ports(settings)
+    effective_options = _get_effective_game_mode_options(settings)
+    main_bypass_enabled = bool(effective_options["main_bypass_enabled"])
+    discord_enabled = bool(effective_options["discord_enabled"])
+    include_discord_segments = main_bypass_enabled or discord_enabled
+
+    winws_path = os.path.join(core_dir, "bin", "winws.exe")
+    expanded_segments = []
+    for segment in segments:
+        lower = segment.casefold()
+        if "list-google.txt" in lower and not main_bypass_enabled:
+            continue
+        if "discord" in lower and not include_discord_segments:
+            continue
+        expanded_segments.append(
+            _expand_profile_placeholders(segment, core_dir, game_filter_tcp, game_filter_udp)
+        )
+
+    expanded_preamble = _expand_profile_placeholders(
+        preamble,
+        core_dir,
+        game_filter_tcp,
+        game_filter_udp,
+    )
+    command_parts = [f'"{winws_path}"']
+    if expanded_preamble:
+        command_parts.append(expanded_preamble)
+    command_parts.extend(seg for seg in expanded_segments if seg)
+    return " ".join(command_parts).strip()
 
 
 def _force_stop_blockers():
@@ -620,6 +2698,20 @@ def _force_stop_blockers():
     except Exception:
         pass
 
+
+def _is_winws_running_silent() -> bool:
+    try:
+        out = subprocess.check_output(
+            'tasklist /FI "IMAGENAME eq winws.exe" /NH',
+            shell=True,
+            text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return "winws.exe" in out.lower()
+    except Exception:
+        return False
+
+
 def wipe_app_dir_if_new_version():
     if not hasattr(sys, "_MEIPASS"):
         return
@@ -631,9 +2723,15 @@ def wipe_app_dir_if_new_version():
     _force_stop_blockers()
 
     try:
+        preserved_names = {
+            "user",
+            os.path.basename(SETTINGS_FILE).lower(),
+            os.path.basename(AUTOLOG_FILE).lower(),
+            os.path.basename(AUTORESULT_FILE).lower(),
+        }
         if os.path.isdir(APP_DIR):
             for name in os.listdir(APP_DIR):
-                if name.lower() == "user":
+                if name.lower() in preserved_names:
                     continue
 
                 p = os.path.join(APP_DIR, name)
@@ -739,23 +2837,18 @@ def update_domain_files():
 
         if not is_newer:
             lists_result = _sync_flowseal_lists(settings)
+            _sync_ai_dns_if_enabled(settings)
             if lists_result.get("offline"):
                 QMessageBox.warning(
                     None,
                     "Обновление",
                     f"У вас уже актуальная версия: {current_ver}\nНе удалось проверить списки, проверьте интернет-соединение."
                 )
-            elif lists_result.get("flowseal_updated", 0) > 0:
-                QMessageBox.information(
-                    None,
-                    "Обновление",
-                    f"У вас уже актуальная версия: {current_ver}\nСписки обновлены: {lists_result.get('flowseal_updated', 0)}"
-                )
             else:
                 QMessageBox.information(
                     None,
                     "Обновление",
-                    f"У вас уже актуальная версия: {current_ver}\nСписки актуальны."
+                    f"У вас уже актуальная версия: {current_ver}\n{_format_lists_status_text(lists_result, 'ru')}"
                 )
             return
 
@@ -840,8 +2933,10 @@ def update_domain_files():
         settings.setValue(FLOWSEAL_VER_KEY, latest_ver)
         settings.sync()
 
+        _apply_game_mode_state_to_core(settings)
         lists_result = _sync_flowseal_lists(settings)
-        list_status = "Списки актуальны." if lists_result.get("flowseal_updated", 0) == 0 else f"Списки обновлены: {lists_result.get('flowseal_updated', 0)}"
+        _sync_ai_dns_if_enabled(settings)
+        list_status = _format_lists_status_text(lists_result, "ru")
         if lists_result.get("offline"):
             list_status = "Обновлено, но список не удалось проверить/обновить: проверьте интернет-соединение."
         elif lists_result.get("error"):
@@ -872,6 +2967,221 @@ def update_domain_files():
         QMessageBox.critical(None, "Ошибка обновления", "Скачанный архив повреждён или не является zip.")
     except Exception as e:
         QMessageBox.critical(None, "Ошибка обновления", f"Произошла ошибка:\n{e}")
+
+
+def _detect_runtime_core_version(settings: QSettings | None = None) -> str:
+    qs = _load_settings_if_needed(settings)
+
+    try:
+        current_ver = str(qs.value(FLOWSEAL_VER_KEY, "") or "").strip()
+    except Exception:
+        current_ver = ""
+    if current_ver:
+        return current_ver
+
+    try:
+        svc = os.path.join(APP_DIR, "core", "service.bat")
+        if os.path.exists(svc):
+            raw = _read_text(svc)
+            m = re.search(r'(?im)^\s*set\s+"LOCAL_VERSION\s*=\s*([^"]+)"\s*$', raw)
+            current_ver = (m.group(1).strip() if m else "")
+    except Exception:
+        current_ver = ""
+
+    if not current_ver:
+        current_ver = FLOWSEAL_DEFAULT_VER
+
+    try:
+        qs.setValue(FLOWSEAL_VER_KEY, current_ver)
+        qs.sync()
+    except Exception:
+        pass
+
+    return current_ver
+
+
+def _find_flowseal_download_url(release_payload: dict) -> str:
+    assets = release_payload.get("assets") or []
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        name = (asset.get("name") or "").lower()
+        if name.endswith(".zip"):
+            return str(asset.get("browser_download_url") or "").strip()
+    return str(release_payload.get("zipball_url") or "").strip()
+
+
+def _check_flowseal_update_async(settings: QSettings | None = None) -> dict:
+    qs = _load_settings_if_needed(settings)
+    result = {
+        "ok": False,
+        "status": "",
+        "error": "",
+        "offline": False,
+        "current_ver": "",
+        "latest_ver": "",
+        "download_url": "",
+        "lists_result": {},
+        "ai_dns_error": "",
+    }
+
+    if _is_winws_running_silent():
+        result["status"] = "winws-running"
+        result["error"] = "winws-running"
+        return result
+
+    try:
+        current_ver = _detect_runtime_core_version(qs)
+        result["current_ver"] = current_ver
+
+        api_url = f"https://api.github.com/repos/{FLOWSEAL_REPO}/releases/latest"
+        headers = {"User-Agent": "ZapretGUI-Updater", "Accept": "application/vnd.github+json"}
+        response = requests.get(api_url, headers=headers, timeout=20)
+        response.raise_for_status()
+        payload = response.json()
+
+        tag = (payload.get("tag_name") or "").strip()
+        latest_ver = tag[1:] if tag.startswith("v") else tag
+        latest_ver = (latest_ver or "").strip()
+        if not latest_ver:
+            result["status"] = "error"
+            result["error"] = "latest-version-missing"
+            return result
+
+        result["latest_ver"] = latest_ver
+
+        try:
+            is_newer = _version_key(latest_ver) > _version_key(current_ver)
+        except Exception:
+            is_newer = latest_ver != current_ver
+
+        if is_newer:
+            download_url = _find_flowseal_download_url(payload)
+            if not download_url:
+                result["status"] = "error"
+                result["error"] = "download-url-missing"
+                return result
+
+            result["ok"] = True
+            result["status"] = "update-available"
+            result["download_url"] = download_url
+            return result
+
+        lists_result = _sync_flowseal_lists(qs)
+        ai_result = _sync_ai_dns_if_enabled(qs)
+        result["ok"] = True
+        result["status"] = "up-to-date"
+        result["lists_result"] = lists_result
+        result["ai_dns_error"] = str(ai_result.get("error") or "")
+        return result
+
+    except requests.exceptions.RequestException as e:
+        result["offline"] = True
+        result["status"] = "offline"
+        result["error"] = str(e)
+    except Exception as e:
+        result["status"] = "error"
+        result["error"] = str(e)
+    return result
+
+
+def _apply_flowseal_update_async(latest_ver: str, download_url: str, settings: QSettings | None = None) -> dict:
+    qs = _load_settings_if_needed(settings)
+    result = {
+        "ok": False,
+        "status": "",
+        "error": "",
+        "offline": False,
+        "latest_ver": latest_ver,
+        "replaced": 0,
+        "core_target": os.path.join(APP_DIR, "core"),
+        "lists_result": {},
+        "ai_dns_error": "",
+    }
+
+    if _is_winws_running_silent():
+        result["status"] = "winws-running"
+        result["error"] = "winws-running"
+        return result
+
+    try:
+        headers = {"User-Agent": "ZapretGUI-Updater", "Accept": "application/vnd.github+json"}
+        response = requests.get(download_url, headers=headers, timeout=60)
+        response.raise_for_status()
+        archive = zipfile.ZipFile(io.BytesIO(response.content))
+
+        core_target = os.path.join(APP_DIR, "core")
+        os.makedirs(core_target, exist_ok=True)
+        os.makedirs(USER_DIR, exist_ok=True)
+
+        for name in os.listdir(core_target):
+            path = os.path.join(core_target, name)
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=False)
+            else:
+                os.remove(path)
+
+        names = [name for name in archive.namelist() if name and not name.startswith("__MACOSX/")]
+        top_levels = set()
+        for name in names:
+            segment = name.split("/", 1)[0]
+            if segment:
+                top_levels.add(segment)
+
+        root_prefix = ""
+        if len(top_levels) == 1:
+            root_prefix = next(iter(top_levels)) + "/"
+
+        replaced = 0
+        for member in names:
+            if member.endswith("/"):
+                continue
+            if root_prefix and not member.startswith(root_prefix):
+                continue
+
+            rel = member[len(root_prefix):] if root_prefix else member
+            if not rel:
+                continue
+
+            dst_path = os.path.join(core_target, rel)
+            os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+
+            base = os.path.basename(dst_path).lower()
+            if base in {"windivert64.sys", "windivert32.sys"}:
+                continue
+
+            with archive.open(member) as src, open(dst_path, "wb") as dst:
+                dst.write(src.read())
+            replaced += 1
+
+        qs.setValue(FLOWSEAL_VER_KEY, latest_ver)
+        qs.sync()
+
+        _apply_game_mode_state_to_core(qs)
+        lists_result = _sync_flowseal_lists(qs)
+        ai_result = _sync_ai_dns_if_enabled(qs)
+
+        result["ok"] = True
+        result["status"] = "updated"
+        result["replaced"] = replaced
+        result["lists_result"] = lists_result
+        result["ai_dns_error"] = str(ai_result.get("error") or "")
+    except requests.exceptions.RequestException as e:
+        result["offline"] = True
+        result["status"] = "offline"
+        result["error"] = str(e)
+    except zipfile.BadZipFile:
+        result["status"] = "bad-zip"
+        result["error"] = "bad-zip"
+    except PermissionError as e:
+        result["status"] = "permission"
+        result["error"] = str(e)
+    except Exception as e:
+        result["status"] = "error"
+        result["error"] = str(e)
+
+    return result
+
 
 def _version_key(v: str):
     s = (v or "").strip()
@@ -1047,13 +3357,21 @@ translations = {
         'Sites': 'Сайты',
         'Add': 'Добавить',
         'Exclude': 'Исключить',
+        'Add Domain': 'Добавить домен',
+        'Exclude Domain': 'Исключить домен',
+        'Add IP': 'Добавить IP',
+        'Exclude IP': 'Исключить IP',
+        'Game Mode': 'Игровой режим',
+        'Game Mode Settings': 'Настройки игрового режима',
+        'Game Mode Placeholder': 'Настройки игрового режима появятся позже.',
         'Instruction Text': """
-        <b>1.</b> Выберите из выпадающего списка <b>профиль настроек</b>, затем нажмите на <span style="color:red;"><b>большую красную кнопку</b></span>, чтобы запустить обход блокировок.<br><br>
-        <b>2.</b> Если выбранный профиль не сработал — <span style="color:green;"><b>нажмите на зелёную кнопку</b></span> для отключения и выберите другой профиль.<br><br>
-        <b>3.</b> В настройках можно включить <b>Автозапуск</b> вместе с Windows и выбрать профиль для автозапуска.<br><br>
-        <b>4.</b> Чтобы проверить, работает ли обход — попробуйте открыть сайты, которые у вас не открывались, или сделайте проверку на сайте: <a href="https://www.youtube.com">@YouTube</a> или <a href="https://discord.com/">@Discord</a><br><br>
-        <b>5.</b> Для автоматического подбора профиля можно воспользоваться кнопкой - <span style="color:green;"><b>зелёный кружок с буквой "А" внутри.</b></span> Процесс подбора обычно занимает несколько минут.<br><br>
-        <b>6.</b> Инструкцию по использованию Менеджера сайтов можно открыть по кнопке "i" внутри окна, либо по этой кнопке -
+        <b>1.</b> Выберите из выпадающего списка <b>профиль настроек</b>, затем нажмите на <span style="display:inline-block; padding:2px 8px; border-radius:8px; background:#d94b4b; color:white;"><b>большую красную кнопку</b></span>, чтобы запустить обход блокировок. Если выбранный профиль не сработал, переходите к следующему.<br><br>
+        <b>2.</b> Проверить, работает ли текущий профиль можно, например на: <a href="https://www.youtube.com">@YouTube</a> или <a href="https://discord.com/">@Discord</a><br><br>
+        <b>3.</b> В настройках можно включить <b>Автозапуск</b> вместе с Windows и выбрать профиль для автозапуска. А также проверить обновления списков и приложения.<br><br>
+        <b>4.</b> Игровой режим <span style="display:inline-block; min-width:18px; padding:2px 7px; border-radius:999px; background:#2db45f; color:white;"><b>G</b></span> активирует Game Filters, чтобы обходить блокировки игровых сервисов. Его можно настроить по <b>шестерёнке</b> рядом с ним.<br><br>
+        <b>5.</b> Для автоподбора профилей можно воспользоваться кнопкой <span style="display:inline-block; min-width:18px; padding:2px 7px; border-radius:999px; background:#2db45f; color:white;"><b>A</b></span>. Это может занять несколько минут.<br><br>
+        <b>6.</b> Кнопка <span style="display:inline-block; min-width:22px; padding:2px 7px; border-radius:999px; background:#2db45f; color:white;"><b>Ai</b></span> открывает для доступ к недоступным нейросетям БЕЗ VPN.<br><br>
+        <b>7.</b> Инструкцию по использованию Менеджера сайтов можно открыть по кнопке <span style="display:inline-block; min-width:18px; padding:2px 7px; border-radius:999px; background:#2db45f; color:white;"><b>i</b></span> внутри окна, либо по этой кнопке:
         <a href="app://site-manager-tutorial" style="display:inline-block; padding:3px 10px; border-radius:8px; background:#2db45f; color:white; text-decoration:none;"><b>Нажми сюда</b></a>
         """,
         'Enable bypass': 'Включить обход',
@@ -1079,13 +3397,22 @@ translations = {
         'Sites': 'Sites',
         'Add': 'Add',
         'Exclude': 'Exclude',
+        'Add Domain': 'Add domain',
+        'Exclude Domain': 'Exclude domain',
+        'Add IP': 'Add IP',
+        'Exclude IP': 'Exclude IP',
+        'Game Mode': 'Game mode',
+        'Game Mode Settings': 'Game mode settings',
+        'Game Mode Placeholder': 'Game mode settings will be added later.',
         'Instruction Text': """
-        <b>1.</b> Select a <b>profile</b> from the dropdown list, then click the <span style="color:red;"><b>big red button</b></span> to start the bypass. <i>(By default, profile <b>General</b> is used).</i><br><br>
-        <b>2.</b> If the selected profile doesn’t work — <span style="color:green;"><b>click the green button</b></span> to stop and choose another profile.<br><br>
+        <b>1.</b> Select a <b>profile</b> from the dropdown list, then click the <span style="display:inline-block; padding:2px 8px; border-radius:8px; background:#d94b4b; color:white;"><b>big red button</b></span> to start the bypass. <i>By default, profile <b>General</b> is used.</i><br><br>
+        <b>2.</b> If the selected profile does not work, stop bypass with the <span style="display:inline-block; padding:2px 8px; border-radius:8px; background:#2db45f; color:white;"><b>green button</b></span> and choose another profile.<br><br>
         <b>3.</b> In settings you can enable <b>Autostart</b> with Windows and choose a profile for autostart.<br><br>
         <b>4.</b> To check if bypass works — try opening websites that were blocked for you, or test on: <a href="https://www.youtube.com">@YouTube</a> or <a href="https://discord.com/">@Discord</a><br><br>
-        <b>5.</b> To automatically select a profile, you can use the button - <span style="color:green;"><b>green circle with the letter “A” inside.</b></span> The selection process usually takes a few minutes.<br><br>
-        <b>6.</b> You can open the Site Manager guide from the "i" button inside that window, or by pressing this button -
+        <b>5.</b> Game mode <span style="display:inline-block; min-width:18px; padding:2px 7px; border-radius:999px; background:#2db45f; color:white;"><b>G</b></span> enables Game Filters for blocked game services. Use the gear button next to it for settings.<br><br>
+        <b>6.</b> Button <span style="display:inline-block; min-width:18px; padding:2px 7px; border-radius:999px; background:#2db45f; color:white;"><b>A</b></span> runs the old quick test of ready-made Flowseal profiles. It usually takes a few minutes.<br><br>
+        <b>7.</b> Button <span style="display:inline-block; min-width:22px; padding:2px 7px; border-radius:999px; background:#2db45f; color:white;"><b>Ai</b></span> enables Ai DNS for restricted neural-network services.<br><br>
+        <b>8.</b> You can open the Site Manager guide from the <span style="display:inline-block; min-width:18px; padding:2px 7px; border-radius:999px; background:#2db45f; color:white;"><b>i</b></span> button inside that window, or by pressing this button:
         <a href="app://site-manager-tutorial" style="display:inline-block; padding:3px 10px; border-radius:8px; background:#2db45f; color:white; text-decoration:none;"><b>Click here</b></a>
         """,
         'Enable bypass': 'Enable bypass',
@@ -1098,10 +3425,15 @@ translations = {
 }
 
 class SettingsDialog(QDialog):
+    NORMAL_HEIGHT = 320
+    STATUS_HEIGHT = 420
+
     def __init__(self, parent=None, settings=None):
         super().__init__(parent)
         self.settings = settings
         self.lang = settings.value('lang', 'ru')
+        self._update_worker = None
+        self._update_close_after_finish = False
         self.init_ui()
         self.load_settings()
         self.retranslate_ui()
@@ -1111,7 +3443,7 @@ class SettingsDialog(QDialog):
 
     def init_ui(self):
         self.setWindowTitle('')
-        self.setFixedSize(400, 320)
+        self.setFixedSize(400, self.NORMAL_HEIGHT)
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -1198,6 +3530,23 @@ class SettingsDialog(QDialog):
         self.update_btn.clicked.connect(self.check_updates)
         layout.addWidget(self.update_btn)
 
+        self.update_status_box = QTextBrowser()
+        self.update_status_box.setFixedHeight(68)
+        self.update_status_box.setOpenExternalLinks(False)
+        self.update_status_box.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.update_status_box.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.update_status_box.setStyleSheet("""
+            QTextBrowser {
+                border: none;
+                background: transparent;
+                color: rgba(180,180,180,0.95);
+                font-size: 11px;
+                padding: 0;
+            }
+        """)
+        self.update_status_box.hide()
+        layout.addWidget(self.update_status_box)
+
         self.about_label = QLabel()
         self.about_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.about_label.setTextFormat(Qt.TextFormat.RichText)
@@ -1254,6 +3603,8 @@ class SettingsDialog(QDialog):
         if not core_ver:
             core_ver = FLOWSEAL_DEFAULT_VER
         self.version_label.setText(f"GUI: {APP_VERSION} + Core: {core_ver}")
+        if not self._is_update_running():
+            self._set_update_status_text("")
 
     def change_lang(self, lang_code):
         self.lang = lang_code
@@ -1305,11 +3656,173 @@ class SettingsDialog(QDialog):
         except Exception as e:
             QMessageBox.warning(self, self.t('Settings'), f"Не удалось запустить uninstall.bat:\n{e}")
 
+    def _is_update_running(self) -> bool:
+        return self._update_worker is not None and self._update_worker.isRunning()
+
+    def _set_update_busy(self, busy: bool, text: str = "") -> None:
+        self.update_btn.setEnabled(not busy)
+        if text or not busy:
+            self._set_update_status_text(text)
+
+    def _set_update_status_text(self, text: str) -> None:
+        text = (text or "").strip()
+        if not text:
+            self.update_status_box.clear()
+            self.update_status_box.hide()
+            self.setFixedSize(400, self.NORMAL_HEIGHT)
+            return
+
+        escaped = (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\n", "<br>")
+        )
+        self.update_status_box.setHtml(
+            f"<div style='font-family:Segoe UI; font-size:11px; text-align:center; color:rgba(180,180,180,0.95);'>{escaped}</div>"
+        )
+        self.setFixedSize(400, self.STATUS_HEIGHT)
+        self.update_status_box.show()
+
+    def _start_update_worker(self, mode: str, latest_ver: str = "", download_url: str = "") -> None:
+        if self._is_update_running():
+            return
+
+        if mode == "apply":
+            text = (
+                "Обновление core..." if self.lang == "ru" else "Updating core..."
+            )
+        else:
+            text = (
+                "Проверка обновлений..." if self.lang == "ru" else "Checking updates..."
+            )
+
+        self._set_update_busy(True, text)
+        worker = ReleaseUpdateWorker(mode, latest_ver, download_url, self)
+        self._update_worker = worker
+        worker.finished_update.connect(self._on_update_worker_finished)
+        worker.start()
+
+    def _format_update_result_text(self, result: dict) -> str:
+        status = str(result.get("status") or "")
+        current_ver = str(result.get("current_ver") or "")
+        latest_ver = str(result.get("latest_ver") or "")
+        lists_result = result.get("lists_result") or {}
+
+        if self.lang == "ru":
+            if status == "up-to-date":
+                head = f"У вас уже актуальная версия: {current_ver}"
+                body = _format_lists_status_text(lists_result, "ru") if lists_result else ""
+                return f"{head}\n{body}".strip()
+            if status == "updated":
+                head = f"Обновлено до: {latest_ver}"
+                body = _format_lists_status_text(lists_result, "ru") if lists_result else ""
+                return f"{head}\n{body}".strip()
+            if status == "winws-running":
+                return "Сначала выключите обход, затем повторите проверку."
+            if status == "offline":
+                return "Не удалось проверить обновления: проверьте интернет-соединение."
+            if status == "bad-zip":
+                return "Скачанный архив повреждён или не является zip."
+            if status == "permission":
+                return "Не удалось записать файлы core. Остановите обход и повторите."
+            return "Не удалось завершить проверку обновлений."
+
+        if status == "up-to-date":
+            head = f"You already have the latest version: {current_ver}"
+            body = _format_lists_status_text(lists_result, "en") if lists_result else ""
+            return f"{head}\n{body}".strip()
+        if status == "updated":
+            head = f"Updated to: {latest_ver}"
+            body = _format_lists_status_text(lists_result, "en") if lists_result else ""
+            return f"{head}\n{body}".strip()
+        if status == "winws-running":
+            return "Stop the bypass first, then check again."
+        if status == "offline":
+            return "Could not check updates: check your internet connection."
+        if status == "bad-zip":
+            return "The downloaded archive is damaged or is not a zip file."
+        if status == "permission":
+            return "Could not write core files. Stop the bypass and try again."
+        return "Could not finish the update check."
+
+    def _finish_update_ui(self, result: dict) -> None:
+        self._set_update_busy(False, self._format_update_result_text(result))
+        parent = self.parent()
+        if parent and hasattr(parent, "refresh_runtime_lists_after_user_change"):
+            try:
+                parent.refresh_runtime_lists_after_user_change()
+            except Exception:
+                pass
+        try:
+            core_ver = str(self.settings.value(FLOWSEAL_VER_KEY, FLOWSEAL_DEFAULT_VER)).strip() or FLOWSEAL_DEFAULT_VER
+            self.version_label.setText(f"GUI: {APP_VERSION} + Core: {core_ver}")
+        except Exception:
+            pass
+
+    def _on_update_worker_finished(self, mode: str, result: dict) -> None:
+        self._update_worker = None
+
+        if mode == "check" and result.get("ok") and result.get("status") == "update-available":
+            latest_ver = str(result.get("latest_ver") or "")
+            current_ver = str(result.get("current_ver") or "")
+            download_url = str(result.get("download_url") or "")
+            if self._update_close_after_finish:
+                self._set_update_busy(False, "")
+                self.close()
+                return
+
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Обновление" if self.lang == "ru" else "Update")
+            msg.setIcon(QMessageBox.Icon.Question)
+            msg.setText(
+                (
+                    f"Доступен новый релиз: {latest_ver}\n"
+                    f"Текущая версия: {current_ver}\n\n"
+                    "Будет обновлена папка core, пользовательская папка user сохранится.\n"
+                    "Продолжить?"
+                )
+                if self.lang == "ru" else
+                (
+                    f"New release available: {latest_ver}\n"
+                    f"Current version: {current_ver}\n\n"
+                    "The core folder will be updated; your user folder will be kept.\n"
+                    "Continue?"
+                )
+            )
+            btn_yes = msg.addButton("Да" if self.lang == "ru" else "Yes", QMessageBox.ButtonRole.YesRole)
+            msg.addButton("Нет" if self.lang == "ru" else "No", QMessageBox.ButtonRole.NoRole)
+            msg.exec()
+
+            if msg.clickedButton() == btn_yes and download_url:
+                self._start_update_worker("apply", latest_ver, download_url)
+                return
+
+            result = {
+                "ok": True,
+                "status": "cancelled",
+                "error": "",
+            }
+            self._set_update_busy(False, "Обновление отменено." if self.lang == "ru" else "Update cancelled.")
+        else:
+            self._finish_update_ui(result)
+
+        if self._update_close_after_finish:
+            self.close()
+
     def check_updates(self):
-        update_domain_files()
+        self._update_close_after_finish = False
+        self._start_update_worker("check")
 
     def closeEvent(self, event):
         self.save_settings()
+        if self._is_update_running():
+            self._update_close_after_finish = True
+            self._set_update_status_text(
+                "Дождитесь завершения проверки..." if self.lang == "ru" else "Waiting for the update check to finish..."
+            )
+            event.ignore()
+            return
         super().closeEvent(event)
 
 class AutoTestWorker(QThread):
@@ -1545,61 +4058,73 @@ class ListsUpdateWorker(QThread):
         self.core_lists_dir = core_lists_dir
         self.user_lists_dir = user_lists_dir
 
-    def _download_bytes(self, session: requests.Session, url: str) -> bytes:
-        r = session.get(
-            url,
-            timeout=(2.5, 6.0),
-            allow_redirects=True,
-        )
-        r.raise_for_status()
-        return r.content
-
     def run(self):
-        result = {
-            "ok": False,
-            "offline": False,
-            "flowseal_updated": 0,
-            "error": "",
-        }
-
         try:
-            os.makedirs(self.core_lists_dir, exist_ok=True)
-            os.makedirs(self.user_lists_dir, exist_ok=True)
-
-            session = requests.Session()
-            session.headers.update({
-                "User-Agent": "ZapretGUI-ListsSync",
-                "Accept": "*/*",
-                "Cache-Control": "no-cache",
-            })
-
-            remote_flowseal = {}
-            for fn in FLOWSEAL_LIST_FILES:
-                url = FLOWSEAL_LIST_BASE_URL + fn
-                remote_flowseal[fn] = self._download_bytes(session, url)
-
-            flowseal_updates = []
-            for fn, remote_data in remote_flowseal.items():
-                dst = os.path.join(self.core_lists_dir, fn)
-                local_data = _read_file_bytes(dst)
-                if _sha256_bytes(local_data) != _sha256_bytes(remote_data):
-                    flowseal_updates.append((dst, remote_data))
-
-            for dst, data in flowseal_updates:
-                _atomic_write_bytes(dst, data)
-
-            _ensure_user_lists_initialized()
-
-            result["ok"] = True
-            result["flowseal_updated"] = len(flowseal_updates)
-
-        except requests.exceptions.RequestException as e:
-            result["offline"] = True
-            result["error"] = str(e)
+            settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
+            result = _sync_flowseal_lists(settings)
+            ai_result = _sync_ai_dns_if_enabled(settings)
+            result["ai_dns_error"] = str(ai_result.get("error") or "")
         except Exception as e:
-            result["error"] = str(e)
+            result = {
+                "ok": False,
+                "offline": False,
+                "flowseal_updated": 0,
+                "gaming_updated": 0,
+                "gaming_error": "",
+                "gaming_offline": False,
+                "gaming_silent_missing": False,
+                "ai_dns_error": "",
+                "error": str(e),
+            }
 
         self.finished_sync.emit(result)
+
+
+class DnsMalwLinkWorker(QThread):
+    finished_dns = pyqtSignal(str, dict)
+
+    def __init__(self, action: str, parent=None):
+        super().__init__(parent)
+        self.action = (action or "").strip().lower()
+
+    def run(self):
+        if self.action == "disable":
+            result = _disable_dns_malw_link()
+        elif self.action == "enable":
+            result = _enable_dns_malw_link()
+        else:
+            result = {"ok": False, "error": "invalid-action"}
+        self.finished_dns.emit(self.action, result)
+
+
+class ReleaseUpdateWorker(QThread):
+    finished_update = pyqtSignal(str, dict)
+
+    def __init__(self, mode: str, latest_ver: str = "", download_url: str = "", parent=None):
+        super().__init__(parent)
+        self.mode = (mode or "check").strip().lower()
+        self.latest_ver = latest_ver
+        self.download_url = download_url
+
+    def run(self):
+        settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
+        if self.mode == "apply":
+            result = _apply_flowseal_update_async(self.latest_ver, self.download_url, settings)
+        else:
+            result = _check_flowseal_update_async(settings)
+        self.finished_update.emit(self.mode, result)
+
+
+class GameModeRestartWorker(QThread):
+    finished_restart = pyqtSignal(str)
+
+    def run(self):
+        error = ""
+        try:
+            _force_stop_blockers()
+        except Exception as e:
+            error = str(e)
+        self.finished_restart.emit(error)
 
 class AutoTestSpinner(QWidget):
     def __init__(self, icon: QIcon | None = None, parent=None):
@@ -2206,6 +4731,9 @@ class ToggleSwitch(QCheckBox):
     def sizeHint(self):
         return QSize(44, 24)
 
+    def hitButton(self, pos):
+        return self.rect().contains(pos)
+
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -2230,6 +4758,238 @@ class ToggleSwitch(QCheckBox):
 
         p.end()
 
+class ClickableLabel(QLabel):
+    clicked = pyqtSignal()
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+class SmallCircleButton(QPushButton):
+    def __init__(self, text: str = "", icon_kind: str = "text", parent=None):
+        super().__init__(text, parent)
+        self._visual_active = True
+        self._icon_kind = icon_kind or "text"
+        self._display_text = text or ""
+        self._busy = False
+        self._busy_phase = 0.0
+        self._busy_timer = QTimer(self)
+        self._busy_timer.setInterval(28)
+        self._busy_timer.timeout.connect(self._advance_busy_indicator)
+
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFlat(True)
+        self.setStyleSheet(
+            "QPushButton { background: transparent; border: none; padding: 0; }"
+        )
+
+    def setVisualActive(self, active: bool) -> None:
+        active = bool(active)
+        if self._visual_active != active:
+            self._visual_active = active
+            self.update()
+
+    def setIconKind(self, icon_kind: str) -> None:
+        icon_kind = icon_kind or "text"
+        if self._icon_kind != icon_kind:
+            self._icon_kind = icon_kind
+            self.update()
+
+    def setBusy(self, busy: bool) -> None:
+        busy = bool(busy)
+        if self._busy == busy:
+            return
+        self._busy = busy
+        if busy:
+            self._busy_timer.start()
+        else:
+            self._busy_timer.stop()
+            self._busy_phase = 0.0
+        self.update()
+
+    def _advance_busy_indicator(self) -> None:
+        self._busy_phase = (self._busy_phase + 7.0) % 360.0
+        self.update()
+
+    def setText(self, text: str) -> None:
+        self._display_text = text or ""
+        super().setText(text)
+        self.update()
+
+    def _alpha(self, color: QColor, factor: float) -> QColor:
+        c = QColor(color)
+        c.setAlpha(max(0, min(255, int(c.alpha() * factor))))
+        return c
+
+    def _colors(self) -> tuple[QColor, QColor, QColor]:
+        if self._visual_active:
+            border = QColor(45, 180, 95, 238)
+            fill = QColor(45, 180, 95, 54)
+            symbol = QColor(138, 240, 176, 255)
+        else:
+            border = QColor(120, 120, 120, 232)
+            fill = QColor(110, 110, 110, 34)
+            symbol = QColor(222, 222, 222, 245)
+
+        if self.isChecked() and self._visual_active:
+            fill = QColor(45, 180, 95, 76)
+            symbol = QColor(167, 255, 198, 255)
+
+        if self.underMouse():
+            fill.setAlpha(min(255, fill.alpha() + 18))
+
+        if self.isDown():
+            fill.setAlpha(min(255, fill.alpha() + 28))
+
+        if not self.isEnabled():
+            border = self._alpha(border, 0.84)
+            fill = self._alpha(fill, 0.90)
+            symbol = self._alpha(symbol, 0.88)
+
+        return border, fill, symbol
+
+    def _draw_text_symbol(self, painter: QPainter, rect: QRectF, color: QColor) -> None:
+        text = self._display_text or self.text() or ""
+        if not text:
+            return
+
+        painter.setPen(color)
+        font = painter.font()
+        font.setBold(True)
+
+        size_ratio = 0.46 if len(text) == 1 else 0.38
+        if text == "Ai":
+            size_ratio = 0.37
+        font.setPixelSize(max(9, int(min(rect.width(), rect.height()) * size_ratio)))
+        painter.setFont(font)
+
+        text_rect = QRectF(rect)
+        if text.lower() == "i":
+            text_rect.translate(0, -0.6)
+        elif len(text) > 1:
+            text_rect.translate(0, -0.2)
+
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    def _draw_gear_symbol(self, painter: QPainter, rect: QRectF, color: QColor, hole_color: QColor) -> None:
+        cx = rect.center().x()
+        cy = rect.center().y()
+        scale = min(rect.width(), rect.height()) / 28.0
+
+        pen = QPen(color, max(1.5, 1.6 * scale), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        inner_r = 4.0 * scale
+        outer_r = 6.2 * scale
+        for i in range(8):
+            angle = (math.pi / 4.0) * i
+            x1 = cx + math.cos(angle) * inner_r
+            y1 = cy + math.sin(angle) * inner_r
+            x2 = cx + math.cos(angle) * outer_r
+            y2 = cy + math.sin(angle) * outer_r
+            painter.drawLine(int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2)))
+
+        gear_rect = QRectF(cx - 3.8 * scale, cy - 3.8 * scale, 7.6 * scale, 7.6 * scale)
+        painter.drawEllipse(gear_rect)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(hole_color)
+        hole_rect = QRectF(cx - 1.8 * scale, cy - 1.8 * scale, 3.6 * scale, 3.6 * scale)
+        painter.drawEllipse(hole_rect)
+
+    def _draw_gamepad_symbol(self, painter: QPainter, rect: QRectF, color: QColor) -> None:
+        cx = rect.center().x()
+        cy = rect.center().y()
+        scale = min(rect.width(), rect.height()) / 28.0
+
+        pen = QPen(color, max(1.45, 1.55 * scale), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        body = QRectF(cx - 7.0 * scale, cy - 4.2 * scale, 14.0 * scale, 8.4 * scale)
+        painter.drawRoundedRect(body, 3.6 * scale, 3.6 * scale)
+
+        painter.drawLine(
+            int(round(cx - 5.0 * scale)),
+            int(round(cy)),
+            int(round(cx - 2.2 * scale)),
+            int(round(cy)),
+        )
+        painter.drawLine(
+            int(round(cx - 3.6 * scale)),
+            int(round(cy - 1.4 * scale)),
+            int(round(cx - 3.6 * scale)),
+            int(round(cy + 1.4 * scale)),
+        )
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        button_r = 1.2 * scale
+        painter.drawEllipse(QRectF(cx + 2.1 * scale - button_r, cy - 1.3 * scale - button_r, button_r * 2, button_r * 2))
+        painter.drawEllipse(QRectF(cx + 4.8 * scale - button_r, cy + 0.7 * scale - button_r, button_r * 2, button_r * 2))
+
+    def _draw_busy_indicator(self, painter: QPainter, rect: QRectF) -> None:
+        arc_rect = QRectF(rect).adjusted(1.6, 1.6, -1.6, -1.6)
+        start_angle = int((90.0 - self._busy_phase) * 16)
+
+        tail = QColor(78, 231, 137, 118)
+        if self._visual_active:
+            tail = QColor(153, 255, 190, 118)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(tail, 2.35, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawArc(arc_rect, start_angle, -86 * 16)
+
+    def paintEvent(self, event):
+        del event
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+        rect = QRectF(self.rect()).adjusted(1.25, 1.25, -1.25, -1.25)
+        border, fill, symbol = self._colors()
+
+        painter.setPen(QPen(border, 1.15))
+        painter.setBrush(fill)
+        painter.drawEllipse(rect)
+
+        highlight = QRectF(
+            rect.left() + 3,
+            rect.top() + 3,
+            max(0.0, rect.width() - 6),
+            max(0.0, rect.height() * 0.42),
+        )
+        if highlight.width() > 0 and highlight.height() > 0:
+            gloss = QColor(255, 255, 255, 22 if self._visual_active else 14)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(gloss)
+            painter.drawEllipse(highlight)
+
+        hole_color = QColor(self.palette().window().color())
+        hole_color.setAlpha(230)
+
+        if self._icon_kind == "gear":
+            self._draw_gear_symbol(painter, rect, symbol, hole_color)
+        elif self._icon_kind == "gamepad":
+            self._draw_gamepad_symbol(painter, rect, symbol)
+        else:
+            self._draw_text_symbol(painter, rect, symbol)
+
+        if self._busy:
+            self._draw_busy_indicator(painter, rect)
+
+        painter.end()
+
 class SiteManagerTutorButton(QToolButton):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2238,10 +4998,6 @@ class SiteManagerTutorButton(QToolButton):
         self.setFixedSize(30, 30)
         self.setAutoRaise(True)
         self.setStyleSheet("QToolButton { border: none; background: transparent; }")
-
-        icon_path = os.path.join(os.path.dirname(__file__), "flags", "info.ico")
-        self._icon = QIcon(icon_path) if os.path.exists(icon_path) else self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation)
-        self._icon_size = 20
 
         self._pulse = 0.0
         self._pulse_anim = QPropertyAnimation(self, b"pulse", self)
@@ -2302,14 +5058,23 @@ class SiteManagerTutorButton(QToolButton):
             painter.setBrush(inner_glow)
             painter.drawEllipse(QRectF(rect).adjusted(6, 6, -6, -6))
 
-        icon_pm = self._icon.pixmap(self._icon_size, self._icon_size)
-        icon_rect = QRectF(
-            rect.center().x() - self._icon_size / 2,
-            rect.center().y() - self._icon_size / 2,
-            self._icon_size,
-            self._icon_size,
-        )
-        painter.drawPixmap(icon_rect.toRect(), icon_pm)
+        badge_rect = QRectF(rect).adjusted(5, 5, -5, -5)
+        badge_color = QColor("#279f55" if self.isDown() else "#2db45f")
+        painter.setPen(QPen(QColor(255, 255, 255, 52), 1.0))
+        painter.setBrush(badge_color)
+        painter.drawEllipse(badge_rect)
+
+        highlight = QRectF(badge_rect).adjusted(3, 2, -3, -10)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 36))
+        painter.drawEllipse(highlight)
+
+        font = painter.font()
+        font.setBold(True)
+        font.setPointSizeF(13.5)
+        painter.setFont(font)
+        painter.setPen(QColor(255, 255, 255, 238))
+        painter.drawText(badge_rect.toRect(), Qt.AlignmentFlag.AlignCenter, "i")
         painter.end()
 
 class SiteManagerTutorialDialog(QDialog):
@@ -2405,33 +5170,38 @@ class SiteManagerTutorialDialog(QDialog):
                 <html><body style="font-family:Segoe UI; font-size:10.5pt; color:#efefef;">
                 <div style="background:rgba(45,180,95,0.10); border:1px solid rgba(45,180,95,0.28); border-radius:12px; padding:12px; margin-bottom:10px;">
                     <b>Что делает это окно</b><br>
-                    Здесь можно быстро добавлять сайты в список обхода или, наоборот, исключать их из обработки.
+                    Здесь можно быстро добавлять в обход и домены, и IP, либо исключать их из обработки.
                 </div>
                 <div style="margin-bottom:10px;">
-                    <b>1. Вкладки сверху</b><br>
-                    <span style="color:#bfbfbf;">Добавление</span> — домены будут добавлены в пользовательский список обхода.<br>
-                    <span style="color:#bfbfbf;">Исключения</span> — домены будут исключены из обработки.
+                    <b>1. Верхний переключатель</b><br>
+                    <span style="color:#bfbfbf;">Домены</span> — работа со списками доменов и сайтов.<br>
+                    <span style="color:#bfbfbf;">IP</span> — работа со списками IP-адресов и подсетей.
                 </div>
                 <div style="margin-bottom:10px;">
-                    <b>2. Кнопки сверху</b><br>
+                    <b>2. Переключатель ниже</b><br>
+                    <span style="color:#bfbfbf;">Добавление</span> — запись попадёт в пользовательский список обхода текущего режима.<br>
+                    <span style="color:#bfbfbf;">Исключения</span> — запись попадёт в список исключений текущего режима.
+                </div>
+                <div style="margin-bottom:10px;">
+                    <b>3. Кнопки сверху</b><br>
                     Открыть папку — открывает каталог с пользовательскими списками.<br>
-                    Добавить список — импортирует домены в список добавления.<br>
-                    Исключить список — импортирует домены в список исключений.
+                    Добавить список — импортирует текущий тип данных в список добавления.<br>
+                    Исключить список — импортирует текущий тип данных в список исключений.
                 </div>
                 <div style="margin-bottom:10px;">
-                    <b>3. Кнопки рядом с вкладками</b><br>
-                    Кнопка с плюсом добавляет один сайт вручную в текущую вкладку.<br>
+                    <b>4. Кнопки рядом с вкладками</b><br>
+                    Кнопка с плюсом добавляет один домен или IP вручную в текущий режим.<br>
                     Поле поиска ниже фильтрует уже загруженный список.
                 </div>
                 <div style="margin-bottom:10px;">
-                    <b>4. Работа со списком</b><br>
-                    Нажатие по строке отмечает домен галочкой.<br>
+                    <b>5. Работа со списком</b><br>
+                    Нажатие по строке отмечает запись галочкой.<br>
                     Корзина удаляет отмеченные записи.<br>
-                    Стрелка справа от домена открывает сайт в браузере по умолчанию.
+                    Стрелка справа открывает домен или одиночный IP в браузере по умолчанию.
                 </div>
                 <div style="background:rgba(255,255,255,0.04); border-radius:10px; padding:10px;">
                     <b>Подсказка</b><br>
-                    Если сомневаетесь, добавляйте сайт через вкладку <b>Добавление</b>. Исключения нужны, когда сайт нужно убрать из обработки.
+                    Если у вас сайт — используйте режим <b>Домены</b>. Если у вас IP или подсеть — переключитесь на <b>IP</b>.
                 </div>
                 </body></html>
             """
@@ -2439,33 +5209,38 @@ class SiteManagerTutorialDialog(QDialog):
             <html><body style="font-family:Segoe UI; font-size:10.5pt; color:#efefef;">
             <div style="background:rgba(45,180,95,0.10); border:1px solid rgba(45,180,95,0.28); border-radius:12px; padding:12px; margin-bottom:10px;">
                 <b>What this window does</b><br>
-                Use it to add domains to the bypass list or exclude them from processing.
+                Use it to add both domains and IPs to the bypass lists or exclude them from processing.
             </div>
             <div style="margin-bottom:10px;">
-                <b>1. Top tabs</b><br>
-                <span style="color:#bfbfbf;">Additions</span> adds domains to the user bypass list.<br>
-                <span style="color:#bfbfbf;">Excludes</span> keeps domains out of processing.
+                <b>1. Top switch</b><br>
+                <span style="color:#bfbfbf;">Domains</span> works with domain and site lists.<br>
+                <span style="color:#bfbfbf;">IP</span> works with IP address and subnet lists.
             </div>
             <div style="margin-bottom:10px;">
-                <b>2. Top buttons</b><br>
+                <b>2. Switch below</b><br>
+                <span style="color:#bfbfbf;">Additions</span> sends the current value type into the user bypass list.<br>
+                <span style="color:#bfbfbf;">Excludes</span> sends the current value type into the exclude list.
+            </div>
+            <div style="margin-bottom:10px;">
+                <b>3. Top buttons</b><br>
                 Open folder opens the folder with user lists.<br>
-                Add list imports domains into additions.<br>
-                Exclude list imports domains into excludes.
+                Add list imports the current value type into additions.<br>
+                Exclude list imports the current value type into excludes.
             </div>
             <div style="margin-bottom:10px;">
-                <b>3. Buttons near tabs</b><br>
-                The plus button adds a single site into the current tab.<br>
+                <b>4. Buttons near tabs</b><br>
+                The plus button adds a single domain or IP into the current mode.<br>
                 The search field below filters the currently loaded list.
             </div>
             <div style="margin-bottom:10px;">
-                <b>4. Working with the list</b><br>
+                <b>5. Working with the list</b><br>
                 Clicking a row toggles its checkmark.<br>
                 The trash button removes checked items.<br>
-                The arrow on the right opens a site in the default browser.
+                The arrow on the right opens a domain or a single IP in the default browser.
             </div>
             <div style="background:rgba(255,255,255,0.04); border-radius:10px; padding:10px;">
                 <b>Tip</b><br>
-                If you are unsure, start with <b>Additions</b>. Use <b>Excludes</b> only when you want a site removed from processing.
+                Use <b>Domains</b> for websites and <b>IP</b> for direct addresses or subnets.
             </div>
             </body></html>
         """
@@ -2557,12 +5332,13 @@ class SiteManagerDialog(QDialog):
         self.settings = settings
         self.lang = getattr(parent, "lang", "ru") if parent else "ru"
         self.current_file = None
-        self.lazy_loaded = [False, False]
+        self.lazy_loaded = {path: False for path in USER_LIST_FILE_MAP.values()}
         self._mode_activated = False
+        self._add_button_acknowledged = False
         self._tutorial_dialog = None
 
         base_w = parent.width() if parent else 300
-        self.setWindowTitle("Менеджер сайтов" if self.lang == "ru" else "Site manager")
+        self.setWindowTitle("Менеджер сайтов и ip" if self.lang == "ru" else "Site manager")
         self.setMinimumSize(base_w, 380)
         self.resize(base_w, 420)
         self.setFixedWidth(base_w)
@@ -2585,7 +5361,7 @@ class SiteManagerDialog(QDialog):
                 border: 1px solid rgba(120,120,120,90);
                 border-radius: 8px;
                 background: transparent;
-                padding: 6px 8px 5px 8px;
+                padding: 4px 6px;
                 text-align: center;
                 font-size: 12px;
             }
@@ -2600,7 +5376,7 @@ class SiteManagerDialog(QDialog):
         self.open_folder_btn.setText("Открыть\nпапку" if self.lang == "ru" else "Open\nfolder")
         self.open_folder_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
         self.open_folder_btn.setIconSize(QSize(18, 18))
-        self.open_folder_btn.setFixedHeight(68)
+        self.open_folder_btn.setFixedHeight(72)
         self.open_folder_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.open_folder_btn.setStyleSheet(tool_btn_style)
         self.open_folder_btn.clicked.connect(self.open_user_folder)
@@ -2615,8 +5391,8 @@ class SiteManagerDialog(QDialog):
         self.import_add_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.import_add_btn.setText("Добавить\nсписок" if self.lang == "ru" else "Add\nlist")
         self.import_add_btn.setIcon(self._build_folder_action_icon("#2db45f", True))
-        self.import_add_btn.setIconSize(QSize(18, 18))
-        self.import_add_btn.setFixedHeight(68)
+        self.import_add_btn.setIconSize(QSize(24, 24))
+        self.import_add_btn.setFixedHeight(72)
         self.import_add_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.import_add_btn.setStyleSheet(tool_btn_style)
         self.import_add_btn.clicked.connect(self.import_add_file)
@@ -2631,8 +5407,8 @@ class SiteManagerDialog(QDialog):
         self.import_exclude_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.import_exclude_btn.setText("Исключить\nсписок" if self.lang == "ru" else "Exclude\nlist")
         self.import_exclude_btn.setIcon(self._build_folder_action_icon("#d46060", False))
-        self.import_exclude_btn.setIconSize(QSize(18, 18))
-        self.import_exclude_btn.setFixedHeight(68)
+        self.import_exclude_btn.setIconSize(QSize(24, 24))
+        self.import_exclude_btn.setFixedHeight(72)
         self.import_exclude_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.import_exclude_btn.setStyleSheet(tool_btn_style)
         self.import_exclude_btn.clicked.connect(self.import_exclude_file)
@@ -2642,17 +5418,7 @@ class SiteManagerDialog(QDialog):
         top_row.addWidget(self.import_exclude_btn, 1)
         root.addLayout(top_row)
 
-        tabs_row = QHBoxLayout()
-        tabs_row.setSpacing(6)
-
-        self.tabs = QTabWidget()
-        self.tabs.setTabBar(self.AttentionTabBar(self.tabs))
-        self.tabs.setDocumentMode(True)
-        self.tabs.setTabPosition(QTabWidget.TabPosition.North)
-        self.tabs.tabBar().setExpanding(True)
-        self.tabs.tabBar().setUsesScrollButtons(False)
-        self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
-        self.tabs.setStyleSheet("""
+        mode_tabs_style = """
             QTabWidget::pane {
                 border: none;
                 background: transparent;
@@ -2676,7 +5442,37 @@ class SiteManagerDialog(QDialog):
             QTabBar::tab:hover {
                 background: rgba(45,180,95,0.12);
             }
-        """)
+        """
+
+        self.value_tabs = QTabWidget()
+        self.value_tabs.setDocumentMode(True)
+        self.value_tabs.setTabPosition(QTabWidget.TabPosition.North)
+        self.value_tabs.tabBar().setExpanding(True)
+        self.value_tabs.tabBar().setUsesScrollButtons(False)
+        self.value_tabs.setElideMode(Qt.TextElideMode.ElideRight)
+        self.value_tabs.setStyleSheet(mode_tabs_style)
+        self.value_tabs.addTab(QWidget(), "Домены" if self.lang == "ru" else "Domains")
+        self.value_tabs.addTab(QWidget(), "IP")
+        self.value_tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.value_tabs.setFixedHeight(self.value_tabs.tabBar().sizeHint().height() + 4)
+        value_tab_bar = self.value_tabs.tabBar()
+        value_tab_bar.setProperty("modeActivated", True)
+        value_tab_bar.style().unpolish(value_tab_bar)
+        value_tab_bar.style().polish(value_tab_bar)
+        value_tab_bar.update()
+        root.addWidget(self.value_tabs)
+
+        tabs_row = QHBoxLayout()
+        tabs_row.setSpacing(6)
+
+        self.tabs = QTabWidget()
+        self.tabs.setTabBar(self.AttentionTabBar(self.tabs))
+        self.tabs.setDocumentMode(True)
+        self.tabs.setTabPosition(QTabWidget.TabPosition.North)
+        self.tabs.tabBar().setExpanding(True)
+        self.tabs.tabBar().setUsesScrollButtons(False)
+        self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
+        self.tabs.setStyleSheet(mode_tabs_style)
         self.tabs.addTab(QWidget(), "Добавление" if self.lang == "ru" else "Additions")
         self.tabs.addTab(QWidget(), "Исключения" if self.lang == "ru" else "Excludes")
         self.tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -2687,19 +5483,11 @@ class SiteManagerDialog(QDialog):
         self.add_btn.setAutoRaise(True)
         self.add_btn.setFixedSize(34, 30)
         self.add_btn.setToolTip("Добавить сайт" if self.lang == "ru" else "Add site")
-        self.add_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder))
-        self.add_btn.setIconSize(QSize(16, 16))
-        self.add_btn.setStyleSheet("""
-            QToolButton {
-                border: none;
-                border-radius: 6px;
-                background: transparent;
-                color: #2db45f;
-            }
-            QToolButton:hover { background: rgba(45,180,95,0.10); }
-            QToolButton:pressed { background: rgba(45,180,95,0.20); }
-        """)
+        self.add_btn.setIcon(self._build_circle_action_icon("#2db45f", True, 22))
+        self.add_btn.setIconSize(QSize(22, 22))
         self.add_btn.clicked.connect(self.add_site)
+        self._init_add_button_attention()
+        self._apply_add_button_style()
 
         tabs_row.addWidget(self.tabs, 1)
         tabs_row.addWidget(self.add_btn, 0, Qt.AlignmentFlag.AlignTop)
@@ -2767,6 +5555,7 @@ class SiteManagerDialog(QDialog):
 
         root.addLayout(info_row)
 
+        self.value_tabs.currentChanged.connect(self.on_mode_changed)
         self.tabs.currentChanged.connect(self.on_mode_changed)
         self.tabs.tabBarClicked.connect(self._on_tab_clicked)
 
@@ -2792,7 +5581,7 @@ class SiteManagerDialog(QDialog):
                 padding: 6px 30px 6px 8px;
                 border-radius: 6px;
             }
-            QListWidget::item:selected { background: transparent; }
+            QListWidget::item:selected { background: rgba(45,180,95,0.16); }
             QListWidget::item:hover { background: rgba(120,120,120,0.08); }
         """)
         self.sites_list.itemChanged.connect(self.update_delete_buttons)
@@ -2800,6 +5589,7 @@ class SiteManagerDialog(QDialog):
         list_wrap_layout.addWidget(self.sites_list)
 
         root.addWidget(list_wrap, 1)
+        self._refresh_mode_controls()
         self._update_list_info()
         self.update_delete_buttons()
         self._init_tab_attention()
@@ -2823,82 +5613,327 @@ class SiteManagerDialog(QDialog):
             elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
                 item = self.sites_list.itemAt(event.pos())
                 if item is not None:
+                    if bool(item.data(PLACEHOLDER_ITEM_ROLE)):
+                        return True
                     item_rect = self.sites_list.visualItemRect(item)
                     if self._visit_icon_rect(item_rect).contains(event.position()):
                         self.open_site_in_browser(item)
                         return True
-                    item.setCheckState(
-                        Qt.CheckState.Unchecked
-                        if item.checkState() == Qt.CheckState.Checked else
-                        Qt.CheckState.Checked
-                    )
-                    return True
         return super().eventFilter(obj, event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         QTimer.singleShot(0, self.update_delete_buttons)
 
-    def _build_folder_action_icon(self, badge_color: str, positive: bool) -> QIcon:
-        base_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
-        base_pm = base_icon.pixmap(18, 18)
-        if base_pm.isNull():
-            base_pm = QPixmap(18, 18)
-            base_pm.fill(Qt.GlobalColor.transparent)
+    def _build_folder_action_icon(self, badge_color: str, positive: bool, size: int = 24) -> QIcon:
+        logical_size = max(18, int(size))
+        dpr = 1.0
+        try:
+            dpr = max(1.0, float(self.devicePixelRatioF()))
+        except Exception:
+            pass
 
-        pm = QPixmap(base_pm)
+        pm = QPixmap(int(round(logical_size * dpr)), int(round(logical_size * dpr)))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+
         painter = QPainter(pm)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-        circle_rect = QRectF(pm.width() - 9.5, pm.height() - 9.5, 8.0, 8.0)
+        scale = logical_size / 24.0
+        tab_rect = QRectF(4.0 * scale, 5.0 * scale, 7.5 * scale, 4.2 * scale)
+        back_rect = QRectF(2.8 * scale, 7.5 * scale, 17.6 * scale, 11.2 * scale)
+        front_rect = QRectF(2.4 * scale, 8.8 * scale, 18.4 * scale, 10.2 * scale)
+
         painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#c9962c"))
+        painter.drawRoundedRect(tab_rect, 1.6 * scale, 1.6 * scale)
+        painter.setBrush(QColor("#e5b64a"))
+        painter.drawRoundedRect(back_rect, 2.2 * scale, 2.2 * scale)
+        painter.setBrush(QColor("#f1cf6a"))
+        painter.drawRoundedRect(front_rect, 2.3 * scale, 2.3 * scale)
+
+        gloss = QColor(255, 255, 255, 55)
+        painter.setBrush(gloss)
+        painter.drawRoundedRect(
+            QRectF(front_rect.left() + 1.8 * scale, front_rect.top() + 1.5 * scale, front_rect.width() - 5.4 * scale, 2.0 * scale),
+            1.0 * scale,
+            1.0 * scale,
+        )
+
+        badge_size = 9.8 * scale
+        circle_rect = QRectF(
+            logical_size - badge_size - 1.6 * scale,
+            logical_size - badge_size - 1.6 * scale,
+            badge_size,
+            badge_size,
+        )
+        painter.setBrush(QColor(20, 20, 20, 190))
+        painter.drawEllipse(circle_rect.adjusted(-0.8 * scale, -0.8 * scale, 0.8 * scale, 0.8 * scale))
         painter.setBrush(QColor(badge_color))
         painter.drawEllipse(circle_rect)
 
-        line_pen = QPen(QColor("white"))
-        line_pen.setWidth(2)
-        line_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        line_pen = QPen(QColor("white"), max(1.6, 2.0 * scale), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         painter.setPen(line_pen)
 
         cx = circle_rect.center().x()
         cy = circle_rect.center().y()
-        painter.drawLine(QPoint(int(cx - 2), int(cy)), QPoint(int(cx + 2), int(cy)))
+        arm = 2.6 * scale
+        painter.drawLine(QPoint(int(round(cx - arm)), int(round(cy))), QPoint(int(round(cx + arm)), int(round(cy))))
         if positive:
-            painter.drawLine(QPoint(int(cx), int(cy - 2)), QPoint(int(cx), int(cy + 2)))
+            painter.drawLine(QPoint(int(round(cx)), int(round(cy - arm))), QPoint(int(round(cx)), int(round(cy + arm))))
 
         painter.end()
         return QIcon(pm)
 
-    def _selected_file_path(self) -> str:
+    def _build_web_action_icon(self, badge_color: str, positive: bool, size: int = 22) -> QIcon:
+        logical_size = max(18, int(size))
+        dpr = 1.0
+        try:
+            dpr = max(1.0, float(self.devicePixelRatioF()))
+        except Exception:
+            pass
+
+        pm = QPixmap(int(round(logical_size * dpr)), int(round(logical_size * dpr)))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        scale = logical_size / 22.0
+        globe_rect = QRectF(2.2 * scale, 2.2 * scale, 15.8 * scale, 15.8 * scale)
+        globe = QColor("#74d6ff")
+        globe_dark = QColor("#3aa8d8")
+        line = QColor("#e9fbff")
+
+        painter.setPen(QPen(globe_dark, max(1.15, 1.35 * scale), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.setBrush(QColor(116, 214, 255, 42))
+        painter.drawEllipse(globe_rect)
+
+        painter.setPen(QPen(line, max(0.85, 1.05 * scale), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        cx = globe_rect.center().x()
+        cy = globe_rect.center().y()
+        painter.drawLine(QPoint(int(round(globe_rect.left() + 1.9 * scale)), int(round(cy))), QPoint(int(round(globe_rect.right() - 1.9 * scale)), int(round(cy))))
+        painter.drawArc(globe_rect.adjusted(4.6 * scale, 0.7 * scale, -4.6 * scale, -0.7 * scale), 90 * 16, 180 * 16)
+        painter.drawArc(globe_rect.adjusted(4.6 * scale, 0.7 * scale, -4.6 * scale, -0.7 * scale), -90 * 16, 180 * 16)
+        painter.drawArc(globe_rect.adjusted(1.0 * scale, 4.8 * scale, -1.0 * scale, -4.8 * scale), 0, 180 * 16)
+        painter.drawArc(globe_rect.adjusted(1.0 * scale, 4.8 * scale, -1.0 * scale, -4.8 * scale), 180 * 16, 180 * 16)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        badge_size = 8.8 * scale
+        badge_rect = QRectF(
+            logical_size - badge_size - 1.0 * scale,
+            logical_size - badge_size - 1.0 * scale,
+            badge_size,
+            badge_size,
+        )
+        painter.setBrush(QColor(20, 20, 20, 185))
+        painter.drawEllipse(badge_rect.adjusted(-0.75 * scale, -0.75 * scale, 0.75 * scale, 0.75 * scale))
+        painter.setBrush(QColor(badge_color))
+        painter.drawEllipse(badge_rect)
+
+        symbol_pen = QPen(QColor("white"), max(1.55, 1.85 * scale), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        painter.setPen(symbol_pen)
+        bx = badge_rect.center().x()
+        by = badge_rect.center().y()
+        arm = 2.35 * scale
+        painter.drawLine(QPoint(int(round(bx - arm)), int(round(by))), QPoint(int(round(bx + arm)), int(round(by))))
+        if positive:
+            painter.drawLine(QPoint(int(round(bx)), int(round(by - arm))), QPoint(int(round(bx)), int(round(by + arm))))
+
+        painter.end()
+        return QIcon(pm)
+
+    def _build_circle_action_icon(self, circle_color: str, positive: bool, size: int = 22) -> QIcon:
+        logical_size = max(18, int(size))
+        dpr = 1.0
+        try:
+            dpr = max(1.0, float(self.devicePixelRatioF()))
+        except Exception:
+            pass
+
+        pm = QPixmap(int(round(logical_size * dpr)), int(round(logical_size * dpr)))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        scale = logical_size / 22.0
+        shadow_rect = QRectF(2.4 * scale, 2.4 * scale, 17.2 * scale, 17.2 * scale)
+        circle_rect = QRectF(2.8 * scale, 2.0 * scale, 16.8 * scale, 16.8 * scale)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 95))
+        painter.drawEllipse(shadow_rect)
+
+        painter.setBrush(QColor(circle_color))
+        painter.drawEllipse(circle_rect)
+
+        painter.setBrush(QColor(255, 255, 255, 34))
+        painter.drawEllipse(circle_rect.adjusted(3.0 * scale, 2.0 * scale, -6.2 * scale, -8.8 * scale))
+
+        symbol_pen = QPen(QColor("white"), max(2.0, 2.35 * scale), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        painter.setPen(symbol_pen)
+
+        cx = circle_rect.center().x()
+        cy = circle_rect.center().y()
+        arm = 4.2 * scale
+        painter.drawLine(QPoint(int(round(cx - arm)), int(round(cy))), QPoint(int(round(cx + arm)), int(round(cy))))
+        if positive:
+            painter.drawLine(QPoint(int(round(cx)), int(round(cy - arm))), QPoint(int(round(cx)), int(round(cy + arm))))
+
+        painter.end()
+        return QIcon(pm)
+
+    def _current_value_kind(self) -> str:
+        return "ip" if self.value_tabs.currentIndex() == 1 else "domain"
+
+    def _current_action_kind(self) -> str | None:
         index = self.tabs.currentIndex()
-        if index == 0:
-            return USER_GENERAL_FILE
-        if index == 1:
-            return USER_EXCLUDE_FILE
-        return None
+        if index < 0:
+            return None
+        return "add" if index == 0 else "exclude"
+
+    def _placeholder_lines_for_current_file(self) -> list[str]:
+        if not self.current_file:
+            return []
+        return list(EMPTY_USER_LIST_PLACEHOLDERS.get(self.current_file, []))
+
+    def _add_button_attention_color(self) -> tuple[int, int, int]:
+        action = self._current_action_kind() or "add"
+        return (212, 96, 96) if action == "exclude" else (45, 180, 95)
+
+    def _apply_add_button_style(self, attention_alpha: int = 0) -> None:
+        if not hasattr(self, "add_btn"):
+            return
+
+        r, g, b = self._add_button_attention_color()
+        hover_alpha = 10 if attention_alpha <= 0 else max(18, min(110, attention_alpha // 2))
+        press_alpha = 20 if attention_alpha <= 0 else max(28, min(150, int(attention_alpha * 0.7)))
+        border_alpha = 0 if attention_alpha <= 0 else max(60, min(210, attention_alpha))
+
+        self.add_btn.setStyleSheet(f"""
+            QToolButton {{
+                border: 1px solid rgba({r},{g},{b},{border_alpha});
+                border-radius: 6px;
+                background: transparent;
+                color: rgb({r},{g},{b});
+            }}
+            QToolButton:hover {{ background: rgba({r},{g},{b},{hover_alpha}); }}
+            QToolButton:pressed {{ background: rgba({r},{g},{b},{press_alpha}); }}
+        """)
+
+    def _init_add_button_attention(self) -> None:
+        self._add_btn_attention_anim = QVariantAnimation(self)
+        self._add_btn_attention_anim.setDuration(900)
+        self._add_btn_attention_anim.setStartValue(30)
+        self._add_btn_attention_anim.setKeyValueAt(0.5, 210)
+        self._add_btn_attention_anim.setEndValue(30)
+        self._add_btn_attention_anim.setLoopCount(-1)
+        self._add_btn_attention_anim.valueChanged.connect(
+            lambda value: self._apply_add_button_style(int(value))
+            if (not self._add_button_acknowledged and self._mode_activated)
+            else None
+        )
+
+    def _start_add_button_attention(self) -> None:
+        if self._add_button_acknowledged:
+            self._apply_add_button_style()
+            return
+        if hasattr(self, "_add_btn_attention_anim"):
+            if self._add_btn_attention_anim.state() == QPropertyAnimation.State.Running:
+                return
+            self._add_btn_attention_anim.start()
+            self._apply_add_button_style(int(self._add_btn_attention_anim.startValue()))
+
+    def _stop_add_button_attention(self) -> None:
+        self._add_button_acknowledged = True
+        if hasattr(self, "_add_btn_attention_anim"):
+            self._add_btn_attention_anim.stop()
+        self._apply_add_button_style()
+
+    def _refresh_mode_controls(self) -> None:
+        is_ip = self._current_value_kind() == "ip"
+        action = self._current_action_kind() or "add"
+
+        if self.lang == "ru":
+            add_btn_tip = "Добавить IP" if is_ip else "Добавить сайт"
+            if action == "exclude":
+                add_btn_tip = "Исключить IP" if is_ip else "Исключить сайт"
+
+            self.import_add_btn.setToolTip(
+                "Добавить IP в user/ipset-all-user.txt"
+                if is_ip else
+                "Добавить домены в user/list-general-user.txt"
+            )
+            self.import_exclude_btn.setToolTip(
+                "Добавить IP в user/ipset-exclude-user.txt"
+                if is_ip else
+                "Добавить домены в user/list-exclude-user.txt"
+            )
+        else:
+            add_btn_tip = "Add IP" if is_ip else "Add site"
+            if action == "exclude":
+                add_btn_tip = "Exclude IP" if is_ip else "Exclude site"
+
+            self.import_add_btn.setToolTip(
+                "Add IPs to user/ipset-all-user.txt"
+                if is_ip else
+                "Add domains to user/list-general-user.txt"
+            )
+            self.import_exclude_btn.setToolTip(
+                "Add IPs to user/ipset-exclude-user.txt"
+                if is_ip else
+                "Add domains to user/list-exclude-user.txt"
+            )
+
+        self.add_btn.setToolTip(add_btn_tip)
+        self.add_btn.setIcon(self._build_circle_action_icon("#d46060" if action == "exclude" else "#2db45f", action != "exclude", 22))
+        self._apply_add_button_style()
+
+    def _selected_file_path(self) -> str:
+        action = self._current_action_kind()
+        if action is None:
+            return None
+        return USER_LIST_FILE_MAP.get((self._current_value_kind(), action))
 
     def _update_list_info(self) -> None:
         selected_path = self._selected_file_path()
+        is_ip = self._current_value_kind() == "ip"
         if selected_path is None:
             self.list_info_lbl.setText(
-                "Выберите вкладку выше, чтобы показать список."
+                "Выберите режим Добавление или Исключения, чтобы показать список."
                 if self.lang == "ru" else
-                "Choose a tab above to show the list."
+                "Choose Additions or Excludes to show the list."
             )
-        elif selected_path == USER_GENERAL_FILE:
+        elif selected_path in (USER_GENERAL_FILE, USER_IP_ALL_FILE):
             self.list_info_lbl.setText(
-                "Добавляется к основному списку обхода."
+                "Добавляется к основному списку обхода доменов."
+                if self.lang == "ru" and not is_ip else
+                "Добавляется к основному IP-списку core."
                 if self.lang == "ru" else
                 "Appended to the main bypass list."
+                if not is_ip else
+                "Merged into the main core IP list."
             )
         else:
             self.list_info_lbl.setText(
-                "Добавляется к списку исключений."
+                "Добавляется к списку исключений доменов."
+                if self.lang == "ru" and not is_ip else
+                "Добавляется к списку исключений IP."
                 if self.lang == "ru" else
                 "Appended to the exclude list."
+                if not is_ip else
+                "Appended to the IP exclude list."
             )
 
     def on_mode_changed(self, _=0):
+        self._refresh_mode_controls()
         if not hasattr(self, "sites_list"):
             return
         index = self.tabs.currentIndex()
@@ -2910,32 +5945,43 @@ class SiteManagerDialog(QDialog):
             return
 
         if not self._mode_activated:
-            self._mode_activated = True
-            self._stop_tab_attention()
-            self._sync_tabbar_mode_state()
+            self._activate_mode_selection()
 
         self.current_file = self._selected_file_path()
         self.reload_current_file()
-        if 0 <= index < len(self.lazy_loaded):
-            self.lazy_loaded[index] = True
+        if self.current_file:
+            self.lazy_loaded[self.current_file] = True
 
     def reload_current_file(self):
         self.current_file = self._selected_file_path()
         self.sites_list.clear()
+        self._refresh_mode_controls()
         self._update_list_info()
         if not self.current_file:
             self.update_delete_buttons()
             return
 
-        for site in _read_lines_utf8(self.current_file):
+        lines = _read_lines_utf8(self.current_file)
+        placeholder_mode = False
+        if not lines:
+            lines = self._placeholder_lines_for_current_file()
+            placeholder_mode = bool(lines)
+
+        for site in lines:
             item = QListWidgetItem(site)
             item.setData(Qt.ItemDataRole.UserRole, site)
-            item.setFlags(
-                item.flags() |
-                Qt.ItemFlag.ItemIsUserCheckable |
-                Qt.ItemFlag.ItemIsEnabled
-            )
-            item.setCheckState(Qt.CheckState.Unchecked)
+            item.setData(PLACEHOLDER_ITEM_ROLE, placeholder_mode)
+            if placeholder_mode:
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                item.setForeground(QColor(170, 170, 170))
+                item.setToolTip("Пример записи" if self.lang == "ru" else "Example entry")
+            else:
+                item.setFlags(
+                    item.flags() |
+                    Qt.ItemFlag.ItemIsUserCheckable |
+                    Qt.ItemFlag.ItemIsEnabled
+                )
+                item.setCheckState(Qt.CheckState.Unchecked)
             self.sites_list.addItem(item)
 
         self.filter_list(self.search_input.text())
@@ -2948,13 +5994,19 @@ class SiteManagerDialog(QDialog):
             QMessageBox.warning(self, "Ошибка" if self.lang == "ru" else "Error", str(e))
 
     def import_add_file(self) -> None:
-        self.import_domains_from_file(USER_GENERAL_FILE)
+        self.import_values_from_file(USER_LIST_FILE_MAP[(self._current_value_kind(), "add")])
 
     def import_exclude_file(self) -> None:
-        self.import_domains_from_file(USER_EXCLUDE_FILE)
+        self.import_values_from_file(USER_LIST_FILE_MAP[(self._current_value_kind(), "exclude")])
 
-    def import_domains_from_file(self, target_file: str) -> None:
-        title = "Импорт доменов" if self.lang == "ru" else "Import domains"
+    def import_values_from_file(self, target_file: str) -> None:
+        is_ip = _entity_kind_for_target_file(target_file) == "ip"
+        title = (
+            "Импорт IP" if is_ip and self.lang == "ru" else
+            "Импорт доменов" if self.lang == "ru" else
+            "Import IPs" if is_ip else
+            "Import domains"
+        )
         file_filter = (
             "Поддерживаемые файлы (*.txt *.lst *.list *.json *.csv);;"
             "Текстовые файлы (*.txt *.lst *.list);;"
@@ -2973,32 +6025,35 @@ class SiteManagerDialog(QDialog):
         raw_text = _read_text(source_path)
         candidates = _extract_domain_candidates_from_file(source_path, raw_text)
 
-        imported_domains = []
+        imported_values = []
         for value in candidates:
-            site = _normalize_domain_candidate(value)
-            if not _is_valid_domain_like(site):
+            normalized = _normalize_value_for_target_file(target_file, value)
+            if not _is_valid_value_for_target_file(target_file, normalized):
                 continue
-            imported_domains.append(site)
+            imported_values.append(normalized)
 
-        if not imported_domains:
+        if not imported_values:
             QMessageBox.warning(
                 self,
                 "Ошибка" if self.lang == "ru" else "Error",
+                "В файле не найдено валидных IP или подсетей."
+                if is_ip and self.lang == "ru" else
                 "В файле не найдено валидных доменов."
                 if self.lang == "ru" else
+                "No valid IPs or subnets were found in the file."
+                if is_ip else
                 "No valid domains were found in the file."
             )
             return
 
         existing = _read_lines_utf8(target_file)
         before = {x.strip().casefold() for x in existing if x.strip()}
-        merged = _merge_unique(existing, imported_domains)
+        merged = _merge_unique(existing, imported_values)
         after = {x.strip().casefold() for x in merged if x.strip()}
         added_count = len(after - before)
         _write_lines_utf8(target_file, merged)
 
-        target_index = 0 if target_file == USER_GENERAL_FILE else 1
-        self.lazy_loaded[target_index] = True
+        self.lazy_loaded[target_file] = True
         if target_file == self._selected_file_path():
             self.reload_current_file()
         if self.parent() and hasattr(self.parent(), "refresh_runtime_lists_after_user_change"):
@@ -3008,17 +6063,38 @@ class SiteManagerDialog(QDialog):
             self,
             "Импорт завершён" if self.lang == "ru" else "Import completed",
             (
+                f"Добавлено IP: {added_count}"
+                if is_ip and self.lang == "ru" else
                 f"Добавлено доменов: {added_count}"
                 if self.lang == "ru" else
+                f"IPs added: {added_count}"
+                if is_ip else
                 f"Domains added: {added_count}"
             )
         )
 
     def add_site(self):
+        self._stop_add_button_attention()
         if self.tabs.currentIndex() < 0:
             self.tabs.setCurrentIndex(0)
-        title = "Добавить сайт" if self.lang == "ru" else "Add site"
-        label = "Введите домен или сайт:" if self.lang == "ru" else "Enter domain or site:"
+        is_ip = self._current_value_kind() == "ip"
+        action = self._current_action_kind() or "add"
+        title = (
+            "Добавить IP" if is_ip and action == "add" and self.lang == "ru" else
+            "Исключить IP" if is_ip and self.lang == "ru" else
+            "Добавить сайт" if action == "add" and self.lang == "ru" else
+            "Исключить сайт" if self.lang == "ru" else
+            "Add IP" if is_ip and action == "add" else
+            "Exclude IP" if is_ip else
+            "Add site" if action == "add" else
+            "Exclude site"
+        )
+        label = (
+            "Введите IP или подсеть:" if is_ip and self.lang == "ru" else
+            "Введите домен или сайт:" if self.lang == "ru" else
+            "Enter IP or subnet:" if is_ip else
+            "Enter domain or site:"
+        )
 
         dlg = QInputDialog(self)
         dlg.setWindowTitle(title)
@@ -3035,20 +6111,26 @@ class SiteManagerDialog(QDialog):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        site = _normalize_domain_candidate(dlg.textValue())
+        value = _normalize_value_for_target_file(self.current_file, dlg.textValue())
 
-        if not _is_valid_domain_like(site):
+        if not _is_valid_value_for_target_file(self.current_file, value):
             QMessageBox.warning(
                 self,
                 "Ошибка" if self.lang == "ru" else "Error",
-                "Некорректный домен." if self.lang == "ru" else "Invalid domain."
+                "Некорректный IP или подсеть."
+                if is_ip and self.lang == "ru" else
+                "Некорректный домен."
+                if self.lang == "ru" else
+                "Invalid IP or subnet."
+                if is_ip else
+                "Invalid domain."
             )
             return
 
         lines = _read_lines_utf8(self.current_file)
-        lines = _merge_unique(lines, [site])
+        lines = _merge_unique(lines, [value])
         _write_lines_utf8(self.current_file, lines)
-        self.lazy_loaded[self.tabs.currentIndex()] = True
+        self.lazy_loaded[self.current_file] = True
 
         if self.parent() and hasattr(self.parent(), "refresh_runtime_lists_after_user_change"):
             self.parent().refresh_runtime_lists_after_user_change()
@@ -3088,23 +6170,41 @@ class SiteManagerDialog(QDialog):
         return QRectF(x, y, size, size)
 
     def open_site_in_browser(self, item: QListWidgetItem) -> None:
+        if bool(item.data(PLACEHOLDER_ITEM_ROLE)):
+            return
         site = str(item.data(Qt.ItemDataRole.UserRole) or item.text()).strip()
         if not site:
             return
-        url = site if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", site) else f"https://{site}"
+        if _is_valid_ip_or_network_like(site):
+            if not _is_single_ip_address_like(site):
+                return
+            host = _normalize_ip_candidate(site)
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            url = site if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", site) else f"http://{host}"
+        else:
+            url = site if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", site) else f"https://{site}"
         QDesktopServices.openUrl(QUrl(url))
 
     def _on_tab_clicked(self, index: int) -> None:
+        if index < 0:
+            return
         if not self._mode_activated and self.tabs.currentIndex() == index:
-            self._mode_activated = True
-            self._stop_tab_attention()
-            self._sync_tabbar_mode_state()
-            self.current_file = USER_GENERAL_FILE if index == 0 else USER_EXCLUDE_FILE
+            self._activate_mode_selection()
+            self.current_file = self._selected_file_path()
             self.reload_current_file()
-            if 0 <= index < len(self.lazy_loaded):
-                self.lazy_loaded[index] = True
+            if self.current_file:
+                self.lazy_loaded[self.current_file] = True
             return
         self.tabs.setCurrentIndex(index)
+
+    def _activate_mode_selection(self) -> None:
+        if self._mode_activated:
+            return
+        self._mode_activated = True
+        self._stop_tab_attention()
+        self._sync_tabbar_mode_state()
+        self._start_add_button_attention()
 
     def _init_tab_attention(self) -> None:
         self.tabs.blockSignals(True)
@@ -3235,11 +6335,26 @@ class SiteManagerDialog(QDialog):
     def _checked_items(self):
         return [
             item for item in self.sites_list.findItems("", Qt.MatchFlag.MatchContains)
-            if item.checkState() == Qt.CheckState.Checked
+            if (not bool(item.data(PLACEHOLDER_ITEM_ROLE)))
+            and item.checkState() == Qt.CheckState.Checked
         ]
 
+    def _selected_items(self):
+        return []
+
+    def _marked_items(self):
+        ordered = []
+        seen = set()
+        for item in self._checked_items():
+            key = id(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append(item)
+        return ordered
+
     def delete_selected_multiple(self):
-        items = self._checked_items()
+        items = self._marked_items()
         if not items:
             return
         if not self._confirm_delete(len(items)):
@@ -3248,7 +6363,7 @@ class SiteManagerDialog(QDialog):
         selected = {str((it.data(Qt.ItemDataRole.UserRole) or it.text())).strip().casefold() for it in items}
         lines = [x for x in _read_lines_utf8(self.current_file) if x.strip().casefold() not in selected]
         _write_lines_utf8(self.current_file, lines)
-        self.lazy_loaded[self.tabs.currentIndex()] = True
+        self.lazy_loaded[self.current_file] = True
 
         if self.parent() and hasattr(self.parent(), "refresh_runtime_lists_after_user_change"):
             self.parent().refresh_runtime_lists_after_user_change()
@@ -3256,10 +6371,362 @@ class SiteManagerDialog(QDialog):
         self.reload_current_file()
 
     def update_delete_buttons(self):
-        if self._checked_items():
+        if self._marked_items():
             self.delete_btn.show()
         else:
             self.delete_btn.hide()
+
+
+class GameModeSettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lang = getattr(parent, "lang", "ru") if parent else "ru"
+        self.parent_window = parent
+        self.lang = lang
+        options = _get_game_mode_options(getattr(parent, "settings", None))
+        base_w = parent.width() if parent else 300
+
+        self.setWindowTitle("Настройки игрового режима" if lang == "ru" else "Game mode settings")
+        self.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.setModal(False)
+        self.setStyleSheet("""
+            QDialog {
+                background: #171717;
+            }
+            QLabel {
+                color: #f1f1f1;
+            }
+            QPushButton {
+                min-height: 30px;
+                padding: 0 14px;
+                border-radius: 8px;
+                background: #2db45f;
+                color: white;
+                font-weight: 600;
+            }
+            QPushButton:hover { background: #36c96b; }
+            QPushButton:pressed { background: #25934d; }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        caption = QLabel(
+            "Настройте, что добавлять к игровому режиму."
+            if lang == "ru" else
+            "Choose what should be added to game mode."
+        )
+        caption.setWordWrap(True)
+        layout.addWidget(caption)
+
+        self.main_bypass_switch = ToggleSwitch(self)
+        self.main_bypass_switch.setChecked(bool(options["main_bypass_enabled"]))
+        layout.addLayout(
+            self._build_switch_row(
+                "Основной обход" if lang == "ru" else "Main bypass",
+                self.main_bypass_switch,
+            )
+        )
+
+        self.user_lists_switch = ToggleSwitch(self)
+        self.user_lists_switch.setChecked(bool(options["user_lists_enabled"]))
+        layout.addLayout(
+            self._build_switch_row(
+                "Пользовательские домены и ip"
+                if lang == "ru" else
+                "User domains and IP",
+                self.user_lists_switch,
+            )
+        )
+
+        self.discord_switch = ToggleSwitch(self)
+        self.discord_switch.setChecked(bool(options["discord_enabled"]))
+        layout.addLayout(
+            self._build_switch_row(
+                "Discord отдельно" if lang == "ru" else "Discord separately",
+                self.discord_switch,
+            )
+        )
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+        bottom_row.setSpacing(10)
+
+        self.help_hint_lbl = QLabel(
+            "Зачем это нужно?"
+            if lang == "ru" else
+            "Why is this needed?"
+        )
+        self.help_hint_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.help_hint_lbl.setMouseTracking(True)
+        self.help_hint_lbl.setStyleSheet("""
+            QLabel {
+                color: #8ee6ad;
+                font-weight: 600;
+                padding: 4px 0;
+                text-decoration: underline;
+            }
+            QLabel:hover { color: #b7f6c9; }
+        """)
+        self.help_hint_lbl.installEventFilter(self)
+        bottom_row.addWidget(self.help_hint_lbl, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        bottom_row.addStretch()
+
+        close_btn = QPushButton("Закрыть" if lang == "ru" else "Close")
+        close_btn.clicked.connect(self.close)
+        bottom_row.addWidget(close_btn)
+
+        layout.addStretch()
+        layout.addLayout(bottom_row)
+
+        self._help_popup_anim = None
+        self._build_help_popup()
+
+        self.main_bypass_switch.toggled.connect(self.apply_changes)
+        self.user_lists_switch.toggled.connect(self.apply_changes)
+        self.discord_switch.toggled.connect(self.apply_changes)
+
+        self.setFixedWidth(base_w)
+        self.adjustSize()
+        self.setFixedSize(base_w, self.sizeHint().height())
+
+    def _help_popup_text(self) -> str:
+        if self.lang == "ru":
+            return (
+                "Данные настройки призваны уменьшить влияние на сеть, пока вы играете. "
+                "Если вам не нужен обычный обход (YouTube, Twitch и т.д.) во время игры, "
+                "а нужны только Game Filters, то лишнее можно отключить, чтобы не влиять на пинг "
+                "и не мониторить все сетевые пакеты. Вы также можете отдельно включить только "
+                "Discord обход в дополнение к игровому режиму, чтобы общаться во время игры. "
+                "Либо другие ваши пользовательские домены/ip."
+            )
+        return (
+            "These settings reduce network impact while you play. If you do not need the regular "
+            "bypass for YouTube, Twitch, and similar sites during a game, and only need Game Filters, "
+            "you can disable it to avoid affecting ping or monitoring all network packets. You can also "
+            "enable only Discord bypass in addition to game mode so you can talk while playing, or keep "
+            "your own custom domains/IP enabled."
+        )
+
+    def _build_help_popup(self) -> None:
+        popup_flags = Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+        try:
+            popup_flags |= Qt.WindowType.WindowDoesNotAcceptFocus
+        except AttributeError:
+            pass
+
+        popup = QFrame(self, popup_flags)
+        popup.setObjectName("gameModeHelpPopup")
+        popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        popup.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        popup.setStyleSheet("""
+            QFrame#gameModeHelpPopup {
+                background: #242424;
+                border: 1px solid rgba(142, 230, 173, 0.58);
+                border-radius: 10px;
+            }
+            QFrame#gameModeHelpPopup QLabel {
+                color: #f3f3f3;
+            }
+        """)
+
+        popup_layout = QVBoxLayout(popup)
+        popup_layout.setContentsMargins(14, 12, 14, 12)
+        popup_layout.setSpacing(0)
+
+        text_lbl = QLabel(self._help_popup_text(), popup)
+        font = text_lbl.font()
+        font.setPixelSize(12)
+        text_lbl.setFont(font)
+        text_lbl.setWordWrap(True)
+        text_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        popup_layout.addWidget(text_lbl)
+
+        popup.hide()
+        self.help_popup = popup
+        self.help_popup_text_lbl = text_lbl
+        self._help_popup_target_visible = False
+
+    def _stop_help_popup_anim(self) -> None:
+        if self._help_popup_anim is None:
+            return
+        anim = self._help_popup_anim
+        self._help_popup_anim = None
+        anim.stop()
+        anim.deleteLater()
+
+    def _finish_help_popup_anim(self) -> None:
+        anim = self._help_popup_anim
+        self._help_popup_anim = None
+        if anim is not None:
+            anim.deleteLater()
+
+        if self._help_popup_target_visible:
+            self.help_popup.setWindowOpacity(1.0)
+        else:
+            self.help_popup.hide()
+            self.help_popup.setWindowOpacity(0.0)
+
+    def _help_popup_screen_geometry(self):
+        screen = QGuiApplication.screenAt(self.mapToGlobal(self.rect().center()))
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        return screen.availableGeometry() if screen is not None else None
+
+    def _help_popup_positions(self) -> tuple[QPoint, QPoint]:
+        screen_rect = self._help_popup_screen_geometry()
+        popup_w = max(320, self.width() + 100)
+        if screen_rect is not None:
+            popup_w = min(popup_w, max(260, screen_rect.width() - 32))
+
+        margins = self.help_popup.layout().contentsMargins()
+        inner_w = max(220, int(popup_w) - margins.left() - margins.right())
+        self.help_popup_text_lbl.setFixedWidth(inner_w)
+        text_h = self.help_popup_text_lbl.heightForWidth(inner_w)
+        if text_h <= 0:
+            text_h = self.help_popup_text_lbl.sizeHint().height()
+        popup_h = int(text_h + margins.top() + margins.bottom())
+        self.help_popup.setMinimumSize(0, 0)
+        self.help_popup.setMaximumSize(16777215, 16777215)
+        self.help_popup.setFixedSize(int(popup_w), max(80, popup_h))
+
+        label_pos = self.help_hint_lbl.mapToGlobal(QPoint(0, 0))
+        target_x = label_pos.x()
+        target_y = label_pos.y() + self.help_hint_lbl.height() + 8
+
+        if screen_rect is not None:
+            if target_x + popup_w > screen_rect.right() - 8:
+                target_x = screen_rect.right() - int(popup_w) - 8
+            target_x = max(screen_rect.left() + 8, target_x)
+
+            if target_y + popup_h > screen_rect.bottom() - 8:
+                target_y = label_pos.y() - popup_h - 8
+            target_y = max(screen_rect.top() + 8, target_y)
+
+        target = QPoint(int(target_x), int(target_y))
+        start = QPoint(target.x(), target.y() + 10)
+        return start, target
+
+    def _show_help_popup(self) -> None:
+        if not hasattr(self, "help_popup"):
+            return
+
+        start_pos, target_pos = self._help_popup_positions()
+
+        if self._help_popup_target_visible and self.help_popup.isVisible():
+            self._stop_help_popup_anim()
+            self.help_popup.move(target_pos)
+            self.help_popup.setWindowOpacity(1.0)
+            return
+
+        self._help_popup_target_visible = True
+        visible = self.help_popup.isVisible()
+        current_opacity = float(self.help_popup.windowOpacity()) if visible else 0.0
+
+        self._stop_help_popup_anim()
+
+        if visible:
+            start_pos = self.help_popup.pos()
+        else:
+            self.help_popup.move(start_pos)
+            self.help_popup.setWindowOpacity(0.0)
+
+        self.help_popup.show()
+        self.help_popup.raise_()
+
+        pos_anim = QPropertyAnimation(self.help_popup, b"pos", self)
+        pos_anim.setDuration(180)
+        pos_anim.setStartValue(start_pos)
+        pos_anim.setEndValue(target_pos)
+        pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        op_anim = QPropertyAnimation(self.help_popup, b"windowOpacity", self)
+        op_anim.setDuration(160)
+        op_anim.setStartValue(current_opacity)
+        op_anim.setEndValue(1.0)
+        op_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        grp = QParallelAnimationGroup(self)
+        grp.addAnimation(pos_anim)
+        grp.addAnimation(op_anim)
+        grp.finished.connect(self._finish_help_popup_anim)
+        self._help_popup_anim = grp
+        grp.start()
+
+    def _hide_help_popup(self, immediate: bool = False) -> None:
+        if not hasattr(self, "help_popup"):
+            return
+
+        if not self._help_popup_target_visible and not self.help_popup.isVisible():
+            return
+
+        self._help_popup_target_visible = False
+        self._stop_help_popup_anim()
+
+        if immediate or not self.help_popup.isVisible():
+            self.help_popup.hide()
+            self.help_popup.setWindowOpacity(0.0)
+            return
+
+        start_pos = self.help_popup.pos()
+        end_pos = QPoint(start_pos.x(), start_pos.y() + 10)
+
+        pos_anim = QPropertyAnimation(self.help_popup, b"pos", self)
+        pos_anim.setDuration(150)
+        pos_anim.setStartValue(start_pos)
+        pos_anim.setEndValue(end_pos)
+        pos_anim.setEasingCurve(QEasingCurve.Type.InCubic)
+
+        op_anim = QPropertyAnimation(self.help_popup, b"windowOpacity", self)
+        op_anim.setDuration(150)
+        op_anim.setStartValue(float(self.help_popup.windowOpacity()))
+        op_anim.setEndValue(0.0)
+        op_anim.setEasingCurve(QEasingCurve.Type.InCubic)
+
+        grp = QParallelAnimationGroup(self)
+        grp.addAnimation(pos_anim)
+        grp.addAnimation(op_anim)
+        grp.finished.connect(self._finish_help_popup_anim)
+        self._help_popup_anim = grp
+        grp.start()
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "help_hint_lbl", None):
+            if event.type() == QEvent.Type.Enter:
+                self._show_help_popup()
+            elif event.type() == QEvent.Type.Leave:
+                self._hide_help_popup()
+        return super().eventFilter(obj, event)
+
+    def closeEvent(self, event):
+        self._hide_help_popup(immediate=True)
+        super().closeEvent(event)
+
+    def _build_switch_row(self, text: str, switch: ToggleSwitch) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 2, 0, 2)
+        row.setSpacing(10)
+
+        label = ClickableLabel(text)
+        label.setWordWrap(True)
+        label.clicked.connect(switch.toggle)
+        row.addWidget(label, 1)
+        row.addWidget(switch, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return row
+
+    def apply_changes(self) -> None:
+        if self.parent_window and hasattr(self.parent_window, "apply_game_mode_preferences"):
+            self.parent_window.apply_game_mode_preferences(
+                main_bypass_enabled=self.main_bypass_switch.isChecked(),
+                user_lists_enabled=self.user_lists_switch.isChecked(),
+                discord_enabled=self.discord_switch.isChecked(),
+                restart_if_running=True,
+            )
 
 class MainWindow(QWidget):
     def __init__(self, settings):
@@ -3291,6 +6758,23 @@ class MainWindow(QWidget):
         self._pending_autostart_profile = " "
         self._site_manager_dlg = None
         self._instruction_dialog = None
+        self._game_settings_dlg = None
+        self.game_mode_enabled = _is_game_mode_enabled(self.settings)
+        self.dns_malw_link_active = False
+        self._dns_malw_link_busy = False
+        self._dns_malw_link_worker = None
+        self._dns_malw_link_show_errors = False
+        self._dns_malw_link_poll_timer = None
+        self._dns_malw_link_poll_attempts = 0
+        self._dns_malw_link_pending_action = ""
+        self._dns_malw_link_poll_anchor = 0
+        self._pending_toggle_state = None
+        self._pending_toggle_profile = " "
+        self._game_mode_restart_timer = QTimer(self)
+        self._game_mode_restart_timer.setSingleShot(True)
+        self._game_mode_restart_timer.setInterval(180)
+        self._game_mode_restart_timer.timeout.connect(self._start_game_mode_restart_worker)
+        self._game_mode_restart_worker = None
 
         self.tray = None
         self.tray_menu = None
@@ -3301,10 +6785,13 @@ class MainWindow(QWidget):
         self.action_sites_open = None
         self.action_sites_add = None
         self.action_sites_exclude = None
+        self.action_sites_add_ip = None
+        self.action_sites_exclude_ip = None
         self.preset_menu = None
         self.exit_action = None
 
         _ensure_user_lists_initialized()
+        _apply_game_mode_state_to_core(self.settings)
         _rebuild_runtime_lists(self.settings)
 
         self.init_ui()
@@ -3332,6 +6819,7 @@ class MainWindow(QWidget):
             self._pending_autostart_profile = autostart_profile
 
         QTimer.singleShot(0, self.start_lists_sync)
+        QTimer.singleShot(150, self.refresh_dns_malw_link_indicator)
 
         self._in_init = False
 
@@ -3386,12 +6874,18 @@ class MainWindow(QWidget):
         self.action_sites_open = QAction(self.t('Open'), self)
         self.action_sites_open.triggered.connect(self.open_site_manager_from_tray)
         self.sites_menu.addAction(self.action_sites_open)
-        self.action_sites_add = QAction(self.t('Add'), self)
+        self.action_sites_add = QAction(self.t('Add Domain'), self)
         self.action_sites_add.triggered.connect(lambda: self.open_site_domain_input_from_tray(USER_GENERAL_FILE))
         self.sites_menu.addAction(self.action_sites_add)
-        self.action_sites_exclude = QAction(self.t('Exclude'), self)
+        self.action_sites_exclude = QAction(self.t('Exclude Domain'), self)
         self.action_sites_exclude.triggered.connect(lambda: self.open_site_domain_input_from_tray(USER_EXCLUDE_FILE))
         self.sites_menu.addAction(self.action_sites_exclude)
+        self.action_sites_add_ip = QAction(self.t('Add IP'), self)
+        self.action_sites_add_ip.triggered.connect(lambda: self.open_site_domain_input_from_tray(USER_IP_ALL_FILE))
+        self.sites_menu.addAction(self.action_sites_add_ip)
+        self.action_sites_exclude_ip = QAction(self.t('Exclude IP'), self)
+        self.action_sites_exclude_ip.triggered.connect(lambda: self.open_site_domain_input_from_tray(USER_IP_EXCLUDE_FILE))
+        self.sites_menu.addAction(self.action_sites_exclude_ip)
         self.tray_menu.addMenu(self.sites_menu)
 
         self.tray_menu.addSeparator()
@@ -3416,21 +6910,22 @@ class MainWindow(QWidget):
         self.action_stop.setText(self.t('Disable bypass'))
         self.sites_menu.setTitle(self.t('Sites'))
         self.action_sites_open.setText(self.t('Open'))
-        self.action_sites_add.setText(self.t('Add'))
-        self.action_sites_exclude.setText(self.t('Exclude'))
+        self.action_sites_add.setText(self.t('Add Domain'))
+        self.action_sites_exclude.setText(self.t('Exclude Domain'))
+        self.action_sites_add_ip.setText(self.t('Add IP'))
+        self.action_sites_exclude_ip.setText(self.t('Exclude IP'))
         self.preset_menu.setTitle(self.t('Select profile'))
         self.exit_action.setText(self.t('Exit'))
-        self.tray_btn.setToolTip(self.t('Minimize to tray'))
 
     def update_tray_status(self):
         if self.tray is None or self.action_start is None or self.action_stop is None:
             return
 
         running = self.toggle_btn.isChecked()
-        busy = bool(getattr(self, "_lists_check_in_progress", False))
+        pending_start = getattr(self, "_pending_toggle_state", None) is True
 
-        self.action_start.setEnabled((not running) and (not busy))
-        self.action_stop.setEnabled(running)
+        self.action_start.setEnabled((not running) and (not pending_start))
+        self.action_stop.setEnabled(running and (not pending_start))
 
         try:
             self.tray.setIcon(QIcon(self._tray_icon_path(running)))
@@ -3444,21 +6939,21 @@ class MainWindow(QWidget):
         self._lists_check_in_progress = bool(busy)
 
         try:
-            self.toggle_btn.setEnabled(not busy)
+            self.game_mode_btn.update()
+            self.game_settings_btn.update()
         except Exception:
             pass
 
         try:
-            self.auto_btn.setEnabled(not busy)
+            self.cb.setEnabled(not bool(getattr(self, "_pending_toggle_state", None)))
         except Exception:
             pass
 
-        try:
-            self.cb.setEnabled(not busy)
-        except Exception:
-            pass
-
-        if busy:
+        if getattr(self, "_pending_toggle_state", None) is True:
+            self.status_lbl.setText(
+                "Подготовка к запуску обхода..." if self.lang == "ru" else "Preparing bypass..."
+            )
+        elif busy:
             self.status_lbl.setText(
                 "Проверка списков..." if self.lang == "ru" else "Checking lists..."
             )
@@ -3491,7 +6986,65 @@ class MainWindow(QWidget):
 
         QMessageBox.warning(self, title, text)
 
+    def _startup_blockers_active(self) -> bool:
+        return bool(
+            getattr(self, "_lists_check_in_progress", False)
+            or getattr(self, "_dns_malw_link_busy", False)
+        )
+
+    def _set_pending_start_ui(self, active: bool) -> None:
+        try:
+            self.toggle_btn.blockSignals(True)
+            self.toggle_btn.setChecked(False)
+            self.toggle_btn.blockSignals(False)
+            self.toggle_btn.setEnabled(not active)
+        except Exception:
+            pass
+
+        try:
+            self.cb.setEnabled(not active)
+        except Exception:
+            pass
+
+        if active:
+            self.status_lbl.setText(
+                "Подготовка к запуску обхода..." if self.lang == "ru" else "Preparing bypass..."
+            )
+        else:
+            self.retranslate_ui()
+        self.update_tray_status()
+
+    def _queue_toggle_start(self, profile: str) -> None:
+        self._pending_toggle_state = True
+        self._pending_toggle_profile = profile
+        self._set_pending_start_ui(True)
+
+    def _resume_pending_toggle_if_ready(self) -> None:
+        if getattr(self, "_pending_toggle_state", None) is not True:
+            return
+        if self._startup_blockers_active():
+            self._set_pending_start_ui(True)
+            return
+
+        profile = self._pending_toggle_profile
+        self._pending_toggle_state = None
+        self._pending_toggle_profile = " "
+        self._set_pending_start_ui(False)
+
+        if profile in self.presets:
+            self.cb.setCurrentText(profile)
+
+        self.toggle_btn.blockSignals(True)
+        self.toggle_btn.setChecked(True)
+        self.toggle_btn.blockSignals(False)
+        QTimer.singleShot(0, lambda: self.on_toggle(True))
+
     def _run_pending_autostart_if_needed(self):
+        if getattr(self, "_pending_toggle_state", None) is True:
+            self._pending_autostart = False
+            self._pending_autostart_profile = " "
+            return
+
         if not self._pending_autostart:
             return
 
@@ -3529,12 +7082,15 @@ class MainWindow(QWidget):
         _ensure_user_lists_initialized()
         _rebuild_runtime_lists(self.settings)
 
-        if result.get("offline"):
+        if result.get("offline") and getattr(self, "_pending_toggle_state", None) is not True:
             self._show_lists_sync_network_notice()
         elif result.get("error"):
             print("Lists sync error:", result.get("error", ""))
+        elif result.get("ai_dns_error"):
+            print("Ai DNS sync error:", result.get("ai_dns_error", ""))
 
         self._run_pending_autostart_if_needed()
+        self._resume_pending_toggle_if_ready()
 
     def is_admin(self) -> bool:
         try:
@@ -3582,6 +7138,17 @@ class MainWindow(QWidget):
 
     def on_auto_pick_profile(self):
         title = "Автоподбор профиля" if self.lang == "ru" else "Auto profile selection"
+
+        if getattr(self, "_lists_check_in_progress", False):
+            QMessageBox.information(
+                self,
+                title,
+                "Дождитесь завершения проверки списков, затем запустите автоподбор."
+                if self.lang == "ru" else
+                "Wait for the list check to finish, then start auto selection."
+            )
+            return
+
         text = "Вы хотите выполнить автоматический подбор профиля?" if self.lang == "ru" else "Do you want to auto-select the best profile?"
 
         msg = QMessageBox(self)
@@ -3589,7 +7156,7 @@ class MainWindow(QWidget):
         msg.setIcon(QMessageBox.Icon.Question)
         msg.setText(text)
         btn_yes = msg.addButton("Да" if self.lang == "ru" else "Yes", QMessageBox.ButtonRole.YesRole)
-        btn_no = msg.addButton("Нет" if self.lang == "ru" else "No", QMessageBox.ButtonRole.NoRole)
+        msg.addButton("Нет" if self.lang == "ru" else "No", QMessageBox.ButtonRole.NoRole)
         msg.exec()
 
         if msg.clickedButton() != btn_yes:
@@ -3610,10 +7177,10 @@ class MainWindow(QWidget):
                 self,
                 title,
                 "Автоподбор требует запуск приложения от администратора.\n"
-                "Закройте программу и запустите EXE через ПКМ → Запуск от имени администратора."
+                "Закройте программу и запустите EXE через ПКМ -> Запуск от имени администратора."
                 if self.lang == "ru" else
                 "Auto selection requires running the app as Administrator.\n"
-                "Close the app and run the EXE: Right click → Run as Administrator."
+                "Close the app and run the EXE: Right click -> Run as Administrator."
             )
             return
 
@@ -3624,8 +7191,6 @@ class MainWindow(QWidget):
                 self._eta_timer.stop()
         except Exception:
             pass
-
-        title = "Автоподбор профиля" if self.lang == "ru" else "Auto profile selection"
 
         self._auto_progress = AutoProgressDialog(
             title=title,
@@ -3641,14 +7206,6 @@ class MainWindow(QWidget):
         self._elapsed = QElapsedTimer()
         self._elapsed.start()
 
-        def fmt_ms(ms: int) -> str:
-            if ms < 0:
-                ms = 0
-            s = ms // 1000
-            m = s // 60
-            s = s % 60
-            return f"{m:02d}:{s:02d}"
-
         def update_eta_tick():
             dlg = getattr(self, "_auto_progress", None)
             if dlg is None or (not dlg.isVisible()):
@@ -3657,7 +7214,6 @@ class MainWindow(QWidget):
             total = int(getattr(self, "_auto_total", 0))
             done = int(getattr(self, "_auto_done", 0))
 
-            # если тест уже закончился - не трогаем
             if total <= 0:
                 dlg.set_eta_text("≈ —")
                 return
@@ -3667,13 +7223,11 @@ class MainWindow(QWidget):
                 return
 
             elapsed_ms = int(self._elapsed.elapsed()) if hasattr(self, "_elapsed") else 0
-
             if done <= 0:
                 dlg.set_eta_text("≈ —")
                 return
 
             raw_ms_per = max(200, elapsed_ms // done)
-
             if self._eta_ms_per_profile is None:
                 self._eta_ms_per_profile = raw_ms_per
             else:
@@ -3682,7 +7236,6 @@ class MainWindow(QWidget):
 
             left_profiles = total - done
             left_ms = left_profiles * int(self._eta_ms_per_profile)
-
             if left_ms < 1000:
                 left_ms = 1000
 
@@ -3692,7 +7245,6 @@ class MainWindow(QWidget):
             dlg.set_eta_text(f"≈ {m:02d}:{s:02d}")
 
         self._update_eta_tick = update_eta_tick
-
         self._eta_timer.timeout.connect(update_eta_tick)
         self._eta_timer.start()
         update_eta_tick()
@@ -3709,6 +7261,31 @@ class MainWindow(QWidget):
 
         self._auto_progress.show()
         self._auto_worker.start()
+
+    def _profile_name_for_bat(self, config_name: str) -> str:
+        wanted = os.path.basename(str(config_name or "")).strip().casefold()
+        if not wanted:
+            return ""
+        for profile, filename in self.presets.items():
+            if os.path.basename(str(filename)).casefold() == wanted:
+                return profile
+        stem = os.path.splitext(os.path.basename(str(config_name or "")))[0]
+        return stem if stem in self.presets else ""
+
+    def _profiles_from_ranked_configs(self, ranked: list[dict]) -> tuple[list[str], list[str]]:
+        good = []
+        bad = []
+        for item in ranked or []:
+            profile = self._profile_name_for_bat(str(item.get("config") or ""))
+            if not profile:
+                continue
+            ok_count = int(item.get("ok", 0) or 0)
+            if ok_count > 0:
+                if profile not in good:
+                    good.append(profile)
+            elif profile not in bad:
+                bad.append(profile)
+        return good, bad
 
     def _on_auto_test_progress(self, done: int, total: int, prof: str):
         self._auto_done = int(done)
@@ -4224,15 +7801,14 @@ class MainWindow(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(self.t('Instruction'))
 
-        if self.lang == 'ru':
-            dialog.setFixedSize(430, 470)
-        else:
-            dialog.setFixedSize(430, 390)
+        dialog.setFixedSize(450, 500 if self.lang == 'ru' else 470)
 
         dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowType.WindowMaximizeButtonHint)
         dialog.setModal(False)
 
         layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
 
         lists_dir = USER_DIR
         lists_url = lists_dir.replace("\\", "/")
@@ -4240,12 +7816,72 @@ class MainWindow(QWidget):
 
         browser = QTextBrowser(dialog)
         browser.setHtml(
-            f"<html><body style='font-family:Segoe UI; font-size:10.5pt'>{instruction_html}</body></html>"
+            "<html><body style='font-family:Segoe UI; font-size:10.5pt; line-height:1.34;'>"
+            f"{instruction_html}"
+            "</body></html>"
         )
         browser.setOpenExternalLinks(False)
+        browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         browser.anchorClicked.connect(self._handle_instruction_link)
-        browser.setStyleSheet("border: none; background: transparent;")
+        browser.setStyleSheet("""
+            QTextBrowser {
+                border: 1px solid rgba(120,120,120,70);
+                border-radius: 8px;
+                padding: 8px 10px;
+                background: rgba(255,255,255,0.025);
+            }
+            QScrollBar:vertical {
+                background: rgba(255,255,255,0.04);
+                width: 11px;
+                margin: 3px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background: #2db45f;
+                min-height: 34px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover { background: #47d078; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+                border: none;
+                background: transparent;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+        """)
         layout.addWidget(browser)
+
+        scroll_hint = QLabel(
+            "↓ Листайте вниз, там есть ещё пункты"
+            if self.lang == "ru" else
+            "↓ Scroll down for more"
+        )
+        scroll_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        scroll_hint.setStyleSheet("""
+            QLabel {
+                color: rgba(45,180,95,0.98);
+                font-weight: 700;
+                padding: 5px 8px;
+                border: 1px solid rgba(45,180,95,0.35);
+                border-radius: 8px;
+                background: rgba(45,180,95,0.08);
+            }
+        """)
+        layout.addWidget(scroll_hint)
+
+        def _update_instruction_scroll_hint():
+            try:
+                sb = browser.verticalScrollBar()
+                scroll_hint.setVisible(sb.maximum() > 0 and sb.value() < sb.maximum() - 4)
+            except Exception:
+                pass
+
+        browser.verticalScrollBar().valueChanged.connect(lambda _=0: _update_instruction_scroll_hint())
+        QTimer.singleShot(0, _update_instruction_scroll_hint)
+        QTimer.singleShot(250, _update_instruction_scroll_hint)
 
         self._instruction_dialog = dialog
         dialog.finished.connect(lambda _=0: setattr(self, "_instruction_dialog", None))
@@ -4383,59 +8019,30 @@ class MainWindow(QWidget):
         self.toggle_btn.setFixedSize(110, 110)
         self.toggle_btn.clicked.connect(self.on_toggle)
 
-        hl = QHBoxLayout()
-        hl.addStretch()
-        hl.addWidget(self.toggle_btn)
-        hl.addStretch()
-        layout.addLayout(hl)
-
-        self.auto_btn = QPushButton("A")
+        self.auto_btn = SmallCircleButton("A", "text", self)
         self.auto_btn.setFixedSize(28, 28)
-        self.auto_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.auto_btn.setToolTip("Автоматический подбор профиля")
-        self.auto_btn.setStyleSheet("""
-            QPushButton {
-                border: 2px solid green;
-                color: green;
-                border-radius: 14px;
-                background: transparent;
-                font-weight: 800;
-            }
-            QPushButton:hover { background: rgba(0,128,0,0.10); }
-            QPushButton:pressed { background: rgba(0,128,0,0.20); }
-        """)
+        self.auto_btn.setToolTip("Автоматический подбор профиля" if self.lang == "ru" else "Automatic profile selection")
         self.auto_btn.clicked.connect(self.on_auto_pick_profile)
 
-        self.auto_info_btn = QToolButton()
-        self.auto_info_btn.setFixedSize(36, 36)
-        self.auto_info_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.ai_mode_btn = SmallCircleButton("Ai", "text", self)
+        self.ai_mode_btn.setCheckable(True)
+        self.ai_mode_btn.setFixedSize(28, 28)
+        self.ai_mode_btn.clicked.connect(self.on_ai_mode_clicked)
+
+        self.auto_info_btn = SmallCircleButton("i", "text")
         self.auto_info_btn.setToolTip("Результаты последнего автоподбора")
-        info_icon_path = os.path.join(os.path.dirname(__file__), 'flags', 'info.ico')
-        info_icon = QIcon(info_icon_path) if os.path.exists(info_icon_path) else self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation)
-        self.auto_info_btn.setIcon(info_icon)
-        self.auto_info_btn.setIconSize(QSize(21, 21))
-        self.auto_info_btn.setAutoRaise(True)
         self.auto_info_btn.setFixedSize(24, 24)
-        self.auto_info_btn.setStyleSheet("""
-            QToolButton {
-                border: none;
-                background: transparent;
-                padding: 0px;
-                margin: 0px;
-            }
-            QToolButton:hover { background: transparent; }
-            QToolButton:pressed { background: transparent; }
-        """)
         self.auto_info_btn.clicked.connect(self.show_autotest_info)
         self.auto_info_btn.hide()
 
-        self.tray_btn = QPushButton()
-        self.tray_btn.setIcon(QIcon(os.path.join(os.path.dirname(__file__), 'flags', 'tray.ico')))
-        self.tray_btn.setIconSize(QSize(24, 24))
-        self.tray_btn.setToolTip(self.t('Minimize to tray'))
-        self.tray_btn.setFixedSize(28, 28)
-        self.tray_btn.setStyleSheet("border: none;")
-        self.tray_btn.clicked.connect(self.hide)
+        self.game_settings_btn = SmallCircleButton("", "gear")
+        self.game_settings_btn.setFixedSize(24, 24)
+        self.game_settings_btn.clicked.connect(self.open_game_mode_settings)
+
+        self.game_mode_btn = SmallCircleButton("G", "text")
+        self.game_mode_btn.setCheckable(True)
+        self.game_mode_btn.setFixedSize(32, 32)
+        self.game_mode_btn.clicked.connect(self.on_game_mode_clicked)
 
         top_row = QHBoxLayout()
         left_row = QHBoxLayout()
@@ -4447,7 +8054,18 @@ class MainWindow(QWidget):
 
         top_row.addLayout(left_row)
         top_row.addStretch()
-        top_row.addWidget(self.tray_btn)
+        game_row = QHBoxLayout()
+        game_row.setSpacing(4)
+        game_row.setAlignment(Qt.AlignmentFlag.AlignBottom)
+        game_row.addWidget(self.game_settings_btn, 0, Qt.AlignmentFlag.AlignBottom)
+        game_row.addWidget(self.game_mode_btn, 0, Qt.AlignmentFlag.AlignBottom)
+        top_row.addLayout(game_row)
+
+        hl = QHBoxLayout()
+        hl.addStretch()
+        hl.addWidget(self.toggle_btn)
+        hl.addStretch()
+        layout.addLayout(hl)
         layout.addLayout(top_row)
 
         self.cb = QComboBox()
@@ -4487,6 +8105,11 @@ class MainWindow(QWidget):
         self.blink_timer = QTimer(self)
         self.blink_timer.timeout.connect(self.update_blink)
         self.blink_timer.start(800)
+        self._position_ai_mode_button()
+        self.ai_mode_btn.raise_()
+        self._update_small_circle_buttons_ui()
+        self._update_ai_mode_ui()
+        self._update_game_mode_ui()
 
     def retranslate_ui(self):
         self.setWindowTitle('Zapret GUI')
@@ -4497,6 +8120,467 @@ class MainWindow(QWidget):
         self.settings_btn.setText(self.t('Settings'))
         self.instruction_btn.setText(self.t('Instruction'))
         self.site_manager_btn.setText("Менеджер сайтов" if self.lang == "ru" else "Site manager")
+        self._position_ai_mode_button()
+        self._update_small_circle_buttons_ui()
+        self._update_ai_mode_ui()
+        self._update_game_mode_ui()
+
+    def _position_ai_mode_button(self) -> None:
+        if not hasattr(self, "ai_mode_btn"):
+            return
+        x = 12
+        y = 12
+        if hasattr(self, "status_lbl"):
+            try:
+                y = max(8, int(self.status_lbl.y() + (self.status_lbl.height() - self.ai_mode_btn.height()) / 2))
+            except Exception:
+                y = 12
+        self.ai_mode_btn.move(x, y)
+        self.ai_mode_btn.raise_()
+
+    def _apply_small_circle_button_state(self, button, active: bool, text: str | None = None, icon_kind: str | None = None) -> None:
+        if button is None:
+            return
+        if text is not None:
+            button.setText(text)
+        if icon_kind is not None and hasattr(button, "setIconKind"):
+            button.setIconKind(icon_kind)
+        if hasattr(button, "setVisualActive"):
+            button.setVisualActive(active)
+        button.update()
+
+    def _update_small_circle_buttons_ui(self) -> None:
+        if hasattr(self, "auto_btn"):
+            self._apply_small_circle_button_state(self.auto_btn, True, "A", "text")
+            self.auto_btn.setToolTip("Автоматический подбор профиля" if self.lang == "ru" else "Automatic profile selection")
+
+        if hasattr(self, "auto_info_btn"):
+            self._apply_small_circle_button_state(self.auto_info_btn, True, "i", "text")
+
+        if hasattr(self, "game_settings_btn"):
+            self._apply_small_circle_button_state(self.game_settings_btn, True, "", "gear")
+
+    def _update_ai_mode_ui(self) -> None:
+        if not hasattr(self, "ai_mode_btn"):
+            return
+
+        active = bool(self.dns_malw_link_active)
+        busy = bool(self._dns_malw_link_busy)
+        self.ai_mode_btn.setText("Ai")
+        self.ai_mode_btn.blockSignals(True)
+        self.ai_mode_btn.setChecked(active)
+        self.ai_mode_btn.blockSignals(False)
+        self.ai_mode_btn.setEnabled(not busy)
+        if hasattr(self.ai_mode_btn, "setBusy"):
+            self.ai_mode_btn.setBusy(busy)
+        self._apply_small_circle_button_state(self.ai_mode_btn, active, "Ai", "text")
+
+        if busy:
+            tooltip = (
+                "Ai DNS: выполняется настройка dns.malw.link"
+                if self.lang == "ru" else
+                "Ai DNS: configuring dns.malw.link"
+            )
+        elif active:
+            tooltip = (
+                "Ai DNS активен. Нажмите, чтобы восстановить предыдущие DNS-настройки."
+                if self.lang == "ru" else
+                "Ai DNS is active. Click to restore the previous DNS settings."
+            )
+        else:
+            tooltip = (
+                "Ai DNS: открывает доступ к недоступным нейросетям"
+                if self.lang == "ru" else
+                "Ai DNS: open access to restricted neural networks"
+            )
+        self.ai_mode_btn.setToolTip(tooltip)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_ai_mode_button()
+
+    def refresh_dns_malw_link_indicator(self) -> None:
+        try:
+            self.settings.sync()
+            managed = _is_dns_malw_link_enabled_by_app(self.settings)
+            status = _get_dns_malw_link_status()
+            self.dns_malw_link_active = bool(managed and status.get("ok") and status.get("active"))
+        except Exception:
+            self.dns_malw_link_active = False
+        self._update_ai_mode_ui()
+
+    def _set_dns_malw_link_busy(self, busy: bool) -> None:
+        self._dns_malw_link_busy = bool(busy)
+        self._update_ai_mode_ui()
+
+    def _start_dns_malw_link_worker(self, action: str, show_errors: bool = False) -> None:
+        if self._dns_malw_link_worker is not None and self._dns_malw_link_worker.isRunning():
+            return
+        self._dns_malw_link_pending_action = action
+        self._dns_malw_link_show_errors = bool(show_errors)
+        self._set_dns_malw_link_busy(True)
+
+        worker = DnsMalwLinkWorker(action, self)
+        self._dns_malw_link_worker = worker
+        worker.finished_dns.connect(self._on_dns_malw_link_worker_finished)
+        worker.start()
+
+    def _on_dns_malw_link_worker_finished(self, action: str, result: dict) -> None:
+        try:
+            self._dns_malw_link_worker = None
+        except Exception:
+            pass
+        self._finish_dns_malw_link_action(action, result, show_errors=self._dns_malw_link_show_errors)
+        self._resume_pending_toggle_if_ready()
+
+    def _finish_dns_malw_link_action(self, action: str, result: dict, show_errors: bool = False) -> None:
+        self._dns_malw_link_pending_action = ""
+        self._set_dns_malw_link_busy(False)
+        self.refresh_dns_malw_link_indicator()
+
+        if result.get("ok"):
+            self._resume_pending_toggle_if_ready()
+            return
+
+        if not show_errors:
+            error = str(result.get("error") or "").strip()
+            if error:
+                print("Ai DNS error:", error)
+            self._resume_pending_toggle_if_ready()
+            return
+
+        error = str(result.get("error") or "").strip()
+        if error == "no-snapshot":
+            text = (
+                "Не удалось отключить Ai DNS: нет сохранённых исходных DNS-настроек для восстановления."
+                if self.lang == "ru" else
+                "Couldn't disable Ai DNS: there is no saved DNS snapshot to restore."
+            )
+        elif error == "not-admin":
+            text = (
+                "Для этой операции нужны права администратора."
+                if self.lang == "ru" else
+                "Administrator rights are required for this action."
+            )
+        elif error == "timeout":
+            text = (
+                "Не удалось дождаться завершения настройки Ai DNS."
+                if self.lang == "ru" else
+                "Timed out while waiting for Ai DNS configuration to finish."
+            )
+        elif error == "status-check-failed":
+            text = (
+                "Настройка была запущена, но активное состояние Ai DNS не подтвердилось."
+                if self.lang == "ru" else
+                "The configuration was started, but Ai DNS did not become active."
+            )
+        elif action == "enable":
+            text = (
+                "Не удалось включить Ai DNS."
+                if self.lang == "ru" else
+                "Failed to enable Ai DNS."
+            )
+        else:
+            text = (
+                "Не удалось отключить Ai DNS."
+                if self.lang == "ru" else
+                "Failed to disable Ai DNS."
+            )
+        if error:
+            text = f"{text}\n\n{error}"
+        QMessageBox.warning(self, "Ai DNS", text)
+        self._resume_pending_toggle_if_ready()
+
+    def _start_dns_malw_link_poll(self, expected_active: bool) -> None:
+        if self._dns_malw_link_poll_timer is None:
+            self._dns_malw_link_poll_timer = QTimer(self)
+            self._dns_malw_link_poll_timer.setInterval(900)
+            self._dns_malw_link_poll_timer.timeout.connect(self._poll_dns_malw_link_status)
+        self._dns_malw_link_expected_active = bool(expected_active)
+        self._dns_malw_link_poll_attempts = 14
+        self._dns_malw_link_poll_anchor = _safe_int_setting(self.settings, DNS_MALW_LAST_ATTEMPT_KEY, 0)
+        self._dns_malw_link_poll_timer.start()
+
+    def _poll_dns_malw_link_status(self) -> None:
+        self.refresh_dns_malw_link_indicator()
+        last_attempt = _safe_int_setting(self.settings, DNS_MALW_LAST_ATTEMPT_KEY, 0)
+        last_status = str(self.settings.value(DNS_MALW_LAST_STATUS_KEY, "") or "").strip().lower()
+        last_error = str(self.settings.value(DNS_MALW_LAST_ERROR_KEY, "") or "").strip()
+        self._dns_malw_link_poll_attempts -= 1
+        if last_attempt > self._dns_malw_link_poll_anchor:
+            if self._dns_malw_link_poll_timer is not None:
+                self._dns_malw_link_poll_timer.stop()
+            self._set_dns_malw_link_busy(False)
+            if last_status == "ok" and self.dns_malw_link_active == getattr(self, "_dns_malw_link_expected_active", False):
+                self._finish_dns_malw_link_action(
+                    self._dns_malw_link_pending_action or ("enable" if self._dns_malw_link_expected_active else "disable"),
+                    {"ok": True},
+                    show_errors=self._dns_malw_link_show_errors,
+                )
+                return
+            self._finish_dns_malw_link_action(
+                self._dns_malw_link_pending_action or ("enable" if self._dns_malw_link_expected_active else "disable"),
+                {"ok": False, "error": last_error or "status-check-failed"} if last_status != "ok" or not self.dns_malw_link_active == getattr(self, "_dns_malw_link_expected_active", False) else {"ok": True},
+                show_errors=self._dns_malw_link_show_errors,
+            )
+            return
+        if (
+            self.dns_malw_link_active == getattr(self, "_dns_malw_link_expected_active", False)
+            or self._dns_malw_link_poll_attempts <= 0
+        ):
+            if self._dns_malw_link_poll_timer is not None:
+                self._dns_malw_link_poll_timer.stop()
+            self._set_dns_malw_link_busy(False)
+            if self._dns_malw_link_poll_attempts <= 0:
+                self._finish_dns_malw_link_action(
+                    self._dns_malw_link_pending_action or ("enable" if self._dns_malw_link_expected_active else "disable"),
+                    {"ok": False, "error": last_error or "timeout"},
+                    show_errors=self._dns_malw_link_show_errors,
+                )
+            else:
+                self._finish_dns_malw_link_action(
+                    self._dns_malw_link_pending_action or ("enable" if self._dns_malw_link_expected_active else "disable"),
+                    {"ok": True},
+                    show_errors=self._dns_malw_link_show_errors,
+                )
+
+    def on_ai_mode_clicked(self, checked: bool) -> None:
+        if getattr(self, "_dns_malw_link_busy", False):
+            return
+
+        action = "disable" if self.dns_malw_link_active else "enable"
+        self._dns_malw_link_pending_action = action
+        self._dns_malw_link_show_errors = False
+        self._set_dns_malw_link_busy(True)
+
+        if self.is_admin():
+            self._start_dns_malw_link_worker(action, show_errors=False)
+            return
+
+        launched = _run_self_as_admin_for_dns_action(action)
+        if not launched:
+            self._set_dns_malw_link_busy(False)
+            self._update_ai_mode_ui()
+            self._resume_pending_toggle_if_ready()
+            return
+
+        self._start_dns_malw_link_poll(expected_active=(action == "enable"))
+
+    def _update_game_mode_ui(self) -> None:
+        if not hasattr(self, "game_mode_btn"):
+            return
+
+        self.game_mode_btn.blockSignals(True)
+        self.game_mode_btn.setChecked(bool(self.game_mode_enabled))
+        self.game_mode_btn.blockSignals(False)
+        self._apply_small_circle_button_state(self.game_mode_btn, bool(self.game_mode_enabled), "G", "text")
+        self.game_mode_btn.setToolTip(
+            "Игровой режим"
+            if self.lang == "ru" else
+            "Game mode"
+        )
+        if hasattr(self, "game_settings_btn"):
+            self.game_settings_btn.setToolTip(self.t('Game Mode Settings'))
+            self._apply_small_circle_button_state(self.game_settings_btn, True, "", "gear")
+
+    def _schedule_game_mode_restart_after_change(self) -> None:
+        if not hasattr(self, "toggle_btn") or not self.toggle_btn.isChecked():
+            return
+        try:
+            self.status_lbl.setText(
+                "Применение игрового режима..."
+                if self.lang == "ru" else
+                "Applying game mode..."
+            )
+        except Exception:
+            pass
+        self._game_mode_restart_timer.start()
+
+    def _start_game_mode_restart_worker(self) -> None:
+        if self._game_mode_restart_worker is not None:
+            if self._game_mode_restart_worker.isRunning():
+                return
+            self._game_mode_restart_worker = None
+
+        worker = GameModeRestartWorker(self)
+        self._game_mode_restart_worker = worker
+        worker.finished_restart.connect(self._on_game_mode_restart_stopped)
+        worker.start()
+
+    def _on_game_mode_restart_stopped(self, error: str) -> None:
+        try:
+            self._game_mode_restart_worker = None
+        except Exception:
+            pass
+
+        if error:
+            QMessageBox.warning(
+                self,
+                "Игровой режим" if self.lang == "ru" else "Game mode",
+                error,
+            )
+            self.retranslate_ui()
+            return
+
+        if not hasattr(self, "toggle_btn") or not self.toggle_btn.isChecked():
+            self.retranslate_ui()
+            return
+
+        profile = self.cb.currentText()
+        script_name = self.presets.get(profile)
+        if not script_name:
+            self.retranslate_ui()
+            return
+
+        script = os.path.join(self.core_dir, script_name)
+        if not os.path.exists(script):
+            QMessageBox.warning(
+                self,
+                "Ошибка" if self.lang == "ru" else "Error",
+                f"Не найден файл:\n{script}" if self.lang == "ru" else f"File not found:\n{script}",
+            )
+            self.retranslate_ui()
+            return
+
+        try:
+            self.process = self._launch_profile_process(script)
+            self.status_lbl.setText(self.t("On: {}", profile))
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "Ошибка" if self.lang == "ru" else "Error",
+                str(e),
+            )
+            self.toggle_btn.blockSignals(True)
+            self.toggle_btn.setChecked(False)
+            self.toggle_btn.blockSignals(False)
+            self.process = None
+            self.status_lbl.setText(self.t("Off"))
+        self.update_tray_status()
+
+    def apply_game_mode_preferences(
+        self,
+        main_bypass_enabled: bool,
+        user_lists_enabled: bool,
+        discord_enabled: bool,
+        restart_if_running: bool = True,
+    ) -> None:
+        new_options = {
+            "main_bypass_enabled": bool(main_bypass_enabled),
+            "user_lists_enabled": bool(user_lists_enabled),
+            "discord_enabled": bool(discord_enabled),
+        }
+        if _get_game_mode_options(self.settings) == new_options:
+            return
+
+        _set_game_mode_options(
+            main_bypass_enabled=new_options["main_bypass_enabled"],
+            user_lists_enabled=new_options["user_lists_enabled"],
+            discord_enabled=new_options["discord_enabled"],
+            settings=self.settings,
+        )
+        _rebuild_runtime_lists(self.settings)
+
+        if restart_if_running and self.game_mode_enabled and hasattr(self, "toggle_btn") and self.toggle_btn.isChecked():
+            self._schedule_game_mode_restart_after_change()
+
+    def _launch_profile_process(self, script: str):
+        env = os.environ.copy()
+        env["ZAPRETGUI_NOUPDATE"] = "1"
+        env["NO_UPDATE_CHECK"] = "1"
+
+        si = None
+        try:
+            if hasattr(subprocess, "STARTUPINFO"):
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                si.wShowWindow = 0
+        except Exception:
+            si = None
+
+        flags = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+
+        if self.game_mode_enabled:
+            try:
+                commandline = _build_game_mode_winws_command(script, self.core_dir, self.settings)
+                if not commandline:
+                    raise RuntimeError("Empty winws command line")
+                return subprocess.Popen(
+                    commandline,
+                    cwd=os.path.join(self.core_dir, "bin"),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                    startupinfo=si,
+                    creationflags=flags,
+                    close_fds=True,
+                )
+            except Exception as e:
+                print("Game mode launcher fallback:", e)
+
+        inp_path = _ensure_no_update_input()
+        fin = None
+        try:
+            try:
+                fin = open(inp_path, "r", encoding="ascii")
+            except Exception:
+                fin = None
+
+            return subprocess.Popen(
+                ["cmd.exe", "/d", "/c", script],
+                cwd=self.core_dir,
+                stdin=fin if fin else subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                startupinfo=si,
+                creationflags=flags,
+                close_fds=True,
+            )
+        finally:
+            try:
+                if fin:
+                    fin.close()
+            except Exception:
+                pass
+
+    def set_game_mode_enabled(self, enabled: bool, restart_if_running: bool = True) -> None:
+        enabled = bool(enabled)
+        if self.game_mode_enabled == enabled:
+            self._update_game_mode_ui()
+            return
+
+        self.game_mode_enabled = enabled
+        _set_game_mode_enabled(enabled, self.settings)
+        _apply_game_mode_state_to_core(self.settings)
+        _rebuild_runtime_lists(self.settings)
+        self._update_game_mode_ui()
+
+        if restart_if_running and hasattr(self, "toggle_btn") and self.toggle_btn.isChecked():
+            self._schedule_game_mode_restart_after_change()
+
+    def on_game_mode_clicked(self, checked: bool) -> None:
+        self.set_game_mode_enabled(checked, restart_if_running=True)
+
+    def open_game_mode_settings(self) -> None:
+        if self._game_settings_dlg is not None and self._game_settings_dlg.isVisible():
+            self._game_settings_dlg.raise_()
+            self._game_settings_dlg.activateWindow()
+            return
+
+        dlg = GameModeSettingsDialog(self)
+        dlg.setWindowModality(Qt.WindowModality.NonModal)
+        self._game_settings_dlg = dlg
+        dlg.finished.connect(lambda _=0: setattr(self, "_game_settings_dlg", None))
+        dlg.move(self._bottom_dialog_start_pos(dlg))
+        dlg.show()
+        self._animate_bottom_dialog_open(dlg, gap=8)
+        dlg.raise_()
+        dlg.activateWindow()
 
     def update_blink(self):
         return
@@ -4555,12 +8639,18 @@ class MainWindow(QWidget):
             return False
 
     def on_toggle(self, checked):
-        if checked and getattr(self, "_lists_check_in_progress", False):
-            self.toggle_btn.setChecked(False)
-            self.update_tray_status()
+        if (not checked) and getattr(self, "_pending_toggle_state", None) is True:
+            self._pending_toggle_state = None
+            self._pending_toggle_profile = " "
+            self._set_pending_start_ui(False)
             return
 
         profile = self.cb.currentText()
+
+        if checked and self._startup_blockers_active():
+            self._queue_toggle_start(profile)
+            return
+
         self.settings.setValue("last_profile", profile)
 
         script = os.path.join(self.core_dir, self.presets[profile])
@@ -4572,54 +8662,23 @@ class MainWindow(QWidget):
 
         if checked:
             _ensure_user_lists_initialized()
+            _apply_game_mode_state_to_core(self.settings)
             _rebuild_runtime_lists(self.settings)
             _force_stop_blockers()
-
-            inp_path = _ensure_no_update_input()
-
-            env = os.environ.copy()
-            env["ZAPRETGUI_NOUPDATE"] = "1"
-            env["NO_UPDATE_CHECK"] = "1"
-
-            fin = None
             try:
-                fin = open(inp_path, "r", encoding="ascii")
-            except Exception:
-                fin = None
-
-            si = None
-            try:
-                if hasattr(subprocess, "STARTUPINFO"):
-                    si = subprocess.STARTUPINFO()
-                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    si.wShowWindow = 0
-            except Exception:
-                si = None
-
-            flags = (
-                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            )
-
-            try:
-                self.process = subprocess.Popen(
-                    ["cmd.exe", "/d", "/c", script],
-                    cwd=self.core_dir,
-                    stdin=fin if fin else subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=env,
-                    startupinfo=si,
-                    creationflags=flags,
-                    close_fds=True
-                )
+                self.process = self._launch_profile_process(script)
                 self.status_lbl.setText(self.t("On: {}", profile))
-            finally:
-                try:
-                    if fin:
-                        fin.close()
-                except Exception:
-                    pass
+            except Exception as e:
+                QMessageBox.warning(
+                    self,
+                    "Ошибка" if self.lang == "ru" else "Error",
+                    str(e)
+                )
+                self.toggle_btn.setChecked(False)
+                self.process = None
+                self.status_lbl.setText(self.t("Off"))
+                self.update_tray_status()
+                return
 
         else:
             _run_hidden(["taskkill", "/IM", "winws.exe", "/F"])
@@ -4684,14 +8743,22 @@ class MainWindow(QWidget):
         self.open_site_manager_centered()
 
     def open_site_domain_input_from_tray(self, target_file: str) -> None:
+        is_ip = _entity_kind_for_target_file(target_file) == "ip"
+        is_add = target_file in (USER_GENERAL_FILE, USER_IP_ALL_FILE)
         title = (
-            "Добавить сайт" if target_file == USER_GENERAL_FILE and self.lang == "ru" else
+            "Добавить IP" if is_ip and is_add and self.lang == "ru" else
+            "Исключить IP" if is_ip and self.lang == "ru" else
+            "Добавить сайт" if is_add and self.lang == "ru" else
             "Исключить сайт" if self.lang == "ru" else
-            "Add site" if target_file == USER_GENERAL_FILE else
+            "Add IP" if is_ip and is_add else
+            "Exclude IP" if is_ip else
+            "Add site" if is_add else
             "Exclude site"
         )
         label = (
+            "Введите IP или подсеть:" if is_ip and self.lang == "ru" else
             "Введите домен или сайт:" if self.lang == "ru" else
+            "Enter IP or subnet:" if is_ip else
             "Enter domain or site:"
         )
 
@@ -4713,24 +8780,29 @@ class MainWindow(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        site = _normalize_domain_candidate(dlg.textValue())
-        if not _is_valid_domain_like(site):
+        value = _normalize_value_for_target_file(target_file, dlg.textValue())
+        if not _is_valid_value_for_target_file(target_file, value):
             QMessageBox.warning(
                 self,
                 "Ошибка" if self.lang == "ru" else "Error",
-                "Некорректный домен." if self.lang == "ru" else "Invalid domain."
+                "Некорректный IP или подсеть."
+                if is_ip and self.lang == "ru" else
+                "Некорректный домен."
+                if self.lang == "ru" else
+                "Invalid IP or subnet."
+                if is_ip else
+                "Invalid domain."
             )
             return
 
         lines = _read_lines_utf8(target_file)
-        lines = _merge_unique(lines, [site])
+        lines = _merge_unique(lines, [value])
         _write_lines_utf8(target_file, lines)
         _rebuild_runtime_lists(self.settings)
 
         if self._site_manager_dlg is not None and self._site_manager_dlg.isVisible():
-            target_index = 0 if target_file == USER_GENERAL_FILE else 1
-            self._site_manager_dlg.lazy_loaded[target_index] = True
-            if self._site_manager_dlg.tabs.currentIndex() == target_index:
+            self._site_manager_dlg.lazy_loaded[target_file] = True
+            if self._site_manager_dlg.current_file == target_file:
                 self._site_manager_dlg.reload_current_file()
 
     def set_autostart(self, enable: bool):
@@ -4806,6 +8878,20 @@ class MainWindow(QWidget):
         event.accept()
 
 def main():
+    dns_cli_action = None
+    for arg in sys.argv[1:]:
+        if arg.startswith("--dns-malw-link-action="):
+            dns_cli_action = arg.split("=", 1)[1].strip().lower()
+            break
+
+    if dns_cli_action in {"enable", "disable"}:
+        settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
+        if dns_cli_action == "enable":
+            _enable_dns_malw_link(settings)
+        else:
+            _disable_dns_malw_link(settings)
+        return
+
     if sys.platform.startswith("win"):
         try:
             DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
