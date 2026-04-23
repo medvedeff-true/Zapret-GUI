@@ -11,7 +11,7 @@
 
 </div>
 
-![Анимация](https://github.com/user-attachments/assets/6de56a16-5ca8-4d79-a579-10d9ca5f4ca4)
+<img width="1485" height="662" alt="Анимация228" src="https://github.com/user-attachments/assets/a5b87d18-90e4-4694-86e0-ee8dcda82af6" />
 
 <img width="616" height="568" alt="press-release2" src="https://github.com/user-attachments/assets/03ed73f7-685c-4046-bc54-a480f6c5e81b" />
 
@@ -173,7 +173,7 @@ Built on Python + PyQt6. One-click launch, multi-language support, no installati
 
 </div>
 
-![Анимация](https://github.com/user-attachments/assets/6de56a16-5ca8-4d79-a579-10d9ca5f4ca4)
+<img width="1485" height="662" alt="Анимация228" src="https://github.com/user-attachments/assets/a5b87d18-90e4-4694-86e0-ee8dcda82af6" />
 
 <img width="616" height="568" alt="press-release2" src="https://github.com/user-attachments/assets/03ed73f7-685c-4046-bc54-a480f6c5e81b" />
 
