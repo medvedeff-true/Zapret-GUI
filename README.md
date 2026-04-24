@@ -131,7 +131,7 @@ TON - UQA5vNFPw88m1y7yO2VuIO_CVvOu1845wHZ3msuuGGlb2rUn
 ---
 
 ## 🖥️Системные требования
-- OS: Windows 10 (x64) и выше (На 7/8 смотреть [Issue](https://github.com/medvedeff-true/Zapret-GUI/issues/10))
+- OS: Windows 10 (x64) и выше
 - CPU: 2 ядра (любые современные Intel/AMD)
 - RAM: 2 GB
 - Место на диске: ~150 MB
