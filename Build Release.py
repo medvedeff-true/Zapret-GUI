@@ -4,14 +4,19 @@ import shutil
 import subprocess
 import importlib
 import re
+import hashlib
+import zipfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
 SCRIPT_NAME = "EzUnBlock.py"
 BASE_NAME = "ZapretGUI"
+EXE_NAME = f"{BASE_NAME}.exe"
+RELEASE_ZIP_TEMPLATE = f"{BASE_NAME}-{{version}}.zip"
 
 SCRIPT_PATH = ROOT / SCRIPT_NAME
+TELEGRAM_PROXY_PATH = ROOT / "telegram_proxy.py"
 ICON_PATH = ROOT / "flags" / "Z.ico"
 VERSION_FILE = ROOT / "version.txt"
 FLAGS_DIR = ROOT / "flags"
@@ -29,6 +34,8 @@ required_modules = {
     "PyQt6": "PyQt6",
     "requests": "requests",
     "psutil": "psutil",
+    "cryptography": "cryptography",
+    "websockets": "websockets",
 }
 
 missing_modules = []
@@ -91,6 +98,7 @@ def validate_versions() -> None:
     expected_tuple = version_tuple(app_version)
 
     file_version = read_version_resource_string("FileVersion")
+    original_filename = read_version_resource_string("OriginalFilename")
     product_version = read_version_resource_string("ProductVersion")
     file_tuple = read_version_resource_tuple("filevers")
     product_tuple = read_version_resource_tuple("prodvers")
@@ -100,6 +108,8 @@ def validate_versions() -> None:
         mismatches.append(f"FileVersion={file_version}, expected {app_version}")
     if product_version != app_version:
         mismatches.append(f"ProductVersion={product_version}, expected {app_version}")
+    if original_filename != EXE_NAME:
+        mismatches.append(f"OriginalFilename={original_filename}, expected {EXE_NAME}")
     if file_tuple != expected_tuple:
         mismatches.append(f"filevers={file_tuple}, expected {expected_tuple}")
     if product_tuple != expected_tuple:
@@ -112,14 +122,21 @@ def validate_versions() -> None:
 def validate_resources() -> None:
     required_paths = [
         (SCRIPT_PATH, "main script"),
+        (TELEGRAM_PROXY_PATH, "Telegram proxy module"),
         (VERSION_FILE, "version resource"),
         (FLAGS_DIR, "flags folder"),
         (CORE_DIR, "core folder"),
         (ICON_PATH, "application icon"),
+        (FLAGS_DIR / "settings.png", "settings icon"),
+        (FLAGS_DIR / "info.ico", "info icon"),
         (FLAGS_DIR / "toggle-off.ico", "toggle-off icon"),
         (FLAGS_DIR / "toggle-on.ico", "toggle-on icon"),
         (FLAGS_DIR / "tray-off.ico", "tray-off icon"),
         (FLAGS_DIR / "tray-on.ico", "tray-on icon"),
+        (FLAGS_DIR / "tg.png", "Telegram mode icon"),
+        (FLAGS_DIR / "joy.png", "game mode icon"),
+        (FLAGS_DIR / "z-green.png", "green logo image"),
+        (FLAGS_DIR / "z-red.png", "red logo image"),
         (FLAGS_DIR / "ru.png", "Russian flag icon"),
         (FLAGS_DIR / "en.png", "English flag icon"),
         (CORE_DIR / "service.bat", "core service script"),
@@ -133,6 +150,8 @@ def validate_resources() -> None:
         (CORE_DIR / "lists" / "list-discord.txt", "Discord domain list"),
         (CORE_DIR / "lists" / "ipset-all.txt", "main IP list"),
         (CORE_DIR / "lists" / "ipset-exclude.txt", "exclude IP list"),
+        (CORE_DIR / "lists" / "telegram-domains.txt", "Telegram domain runtime list"),
+        (CORE_DIR / "lists" / "telegram-ipset.txt", "Telegram IP runtime list"),
         (CORE_DIR / "utils" / "targets.txt", "auto-test targets"),
         (CORE_DIR / "utils" / "check_updates.enabled", "core update flag"),
     ]
@@ -154,7 +173,7 @@ def validate_resources() -> None:
 def run_preflight() -> None:
     validate_resources()
     validate_versions()
-    print(f"Preflight OK: {BASE_NAME} {read_app_version()}")
+    print(f"Preflight OK: {BASE_NAME} {read_app_version()}", flush=True)
 
 
 run_preflight()
@@ -165,7 +184,7 @@ if any(arg.lower() in {"--preflight", "--check", "--no-build"} for arg in sys.ar
 
 def running_release_processes() -> list[str]:
     rows = []
-    target_name = f"{BASE_NAME}.exe".casefold()
+    target_name = EXE_NAME.casefold()
     for proc in psutil.process_iter(["pid", "name", "exe"]):
         try:
             name = str(proc.info.get("name") or "")
@@ -194,6 +213,38 @@ def remove_tree(path: Path) -> None:
             f"Close the running {BASE_NAME}.exe window/tray process and run the build again."
             f"{details}"
         ) from None
+
+
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_release_zip(exe_path: Path, version: str) -> Path:
+    zip_path = DIST_DIR / RELEASE_ZIP_TEMPLATE.format(version=version)
+    if zip_path.exists():
+        zip_path.unlink()
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        z.write(exe_path, arcname=EXE_NAME)
+
+    if not zip_path.exists() or zip_path.stat().st_size <= 1024:
+        raise RuntimeError(f"Release zip was not created correctly: {zip_path}")
+
+    with zipfile.ZipFile(zip_path, "r") as z:
+        names = z.namelist()
+        bad = z.testzip()
+    if bad:
+        raise RuntimeError(f"Release zip is damaged, first bad file: {bad}")
+    if EXE_NAME not in names:
+        raise RuntimeError(f"Release zip must contain {EXE_NAME} at archive root")
+
+    sha_path = zip_path.with_suffix(zip_path.suffix + ".sha256")
+    sha_path.write_text(f"{file_sha256(zip_path)}  {zip_path.name}\n", encoding="ascii")
+    return zip_path
 
 
 # Clean previous build
@@ -229,6 +280,10 @@ cmd = [
     "--hidden-import=PyQt6.sip",
     "--hidden-import=psutil",
     "--hidden-import=requests",
+    "--hidden-import=cryptography",
+    "--hidden-import=telegram_proxy",
+    "--hidden-import=websockets",
+    "--hidden-import=websockets.asyncio.client",
     "--hidden-import=urllib3",
     "--hidden-import=idna",
     "--hidden-import=charset_normalizer",
@@ -236,11 +291,16 @@ cmd = [
     str(SCRIPT_PATH),
 ]
 
-print("Building exe...")
+print("Building exe...", flush=True)
 subprocess.run(cmd, check=True, cwd=str(ROOT))
-print("Build completed!")
+print("Build completed!", flush=True)
 
-src_exe = DIST_DIR / f"{BASE_NAME}.exe"
+src_exe = DIST_DIR / EXE_NAME
 assert src_exe.exists(), f"Build result not found: {src_exe}"
 
-print(f"\nReady: {src_exe}")
+app_version = read_app_version()
+release_zip = write_release_zip(src_exe, app_version)
+
+print(f"\nReady exe: {src_exe}", flush=True)
+print(f"Ready release zip: {release_zip}", flush=True)
+print(f"Release zip SHA256: {file_sha256(release_zip)}", flush=True)

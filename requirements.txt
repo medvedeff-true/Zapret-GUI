@@ -1,3 +1,5 @@
 PyQt6>=6.6
 requests>=2.31
 psutil>=5.9
+cryptography>=42
+websockets>=12
