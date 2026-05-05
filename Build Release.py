@@ -17,6 +17,7 @@ RELEASE_ZIP_TEMPLATE = f"{BASE_NAME}-{{version}}.zip"
 
 SCRIPT_PATH = ROOT / SCRIPT_NAME
 TELEGRAM_PROXY_PATH = ROOT / "telegram_proxy.py"
+TG_WS_PROXY_VENDOR_DIR = ROOT / "tg_ws_proxy_vendor"
 ICON_PATH = ROOT / "flags" / "Z.ico"
 VERSION_FILE = ROOT / "version.txt"
 FLAGS_DIR = ROOT / "flags"
@@ -33,9 +34,12 @@ required_modules = {
     "PyInstaller": "pyinstaller",
     "PyQt6": "PyQt6",
     "requests": "requests",
+    "certifi": "certifi",
+    "charset_normalizer": "charset-normalizer",
+    "idna": "idna",
+    "urllib3": "urllib3",
     "psutil": "psutil",
     "cryptography": "cryptography",
-    "websockets": "websockets",
 }
 
 missing_modules = []
@@ -123,6 +127,17 @@ def validate_resources() -> None:
     required_paths = [
         (SCRIPT_PATH, "main script"),
         (TELEGRAM_PROXY_PATH, "Telegram proxy module"),
+        (TG_WS_PROXY_VENDOR_DIR, "vendored TG WS proxy package"),
+        (TG_WS_PROXY_VENDOR_DIR / "__init__.py", "vendored TG WS proxy package init"),
+        (TG_WS_PROXY_VENDOR_DIR / "proxy" / "__init__.py", "vendored TG WS proxy module init"),
+        (TG_WS_PROXY_VENDOR_DIR / "proxy" / "tg_ws_proxy.py", "vendored TG WS proxy runtime"),
+        (TG_WS_PROXY_VENDOR_DIR / "proxy" / "bridge.py", "vendored TG WS proxy bridge"),
+        (TG_WS_PROXY_VENDOR_DIR / "proxy" / "config.py", "vendored TG WS proxy config"),
+        (TG_WS_PROXY_VENDOR_DIR / "proxy" / "stats.py", "vendored TG WS proxy stats"),
+        (TG_WS_PROXY_VENDOR_DIR / "proxy" / "balancer.py", "vendored TG WS proxy balancer"),
+        (TG_WS_PROXY_VENDOR_DIR / "proxy" / "utils.py", "vendored TG WS proxy utils"),
+        (TG_WS_PROXY_VENDOR_DIR / "proxy" / "raw_websocket.py", "vendored TG WS proxy websocket"),
+        (TG_WS_PROXY_VENDOR_DIR / "proxy" / "fake_tls.py", "vendored TG WS proxy fake TLS"),
         (VERSION_FILE, "version resource"),
         (FLAGS_DIR, "flags folder"),
         (CORE_DIR, "core folder"),
@@ -131,8 +146,10 @@ def validate_resources() -> None:
         (FLAGS_DIR / "info.ico", "info icon"),
         (FLAGS_DIR / "toggle-off.ico", "toggle-off icon"),
         (FLAGS_DIR / "toggle-on.ico", "toggle-on icon"),
+        (FLAGS_DIR / "toggle.ico", "legacy toggle icon"),
         (FLAGS_DIR / "tray-off.ico", "tray-off icon"),
         (FLAGS_DIR / "tray-on.ico", "tray-on icon"),
+        (FLAGS_DIR / "tray.ico", "legacy tray icon"),
         (FLAGS_DIR / "tg.png", "Telegram mode icon"),
         (FLAGS_DIR / "joy.png", "game mode icon"),
         (FLAGS_DIR / "z-green.png", "green logo image"),
@@ -167,6 +184,16 @@ def validate_resources() -> None:
     if missing_optional:
         print("Warning: optional bundled gaming list seeds are missing:")
         for path in missing_optional:
+            print(f"  - {path}")
+
+    referenced_optional_scripts = [
+        CORE_DIR / "fast" / "install_service.bat",
+        CORE_DIR / "fast" / "install_discord_service.bat",
+    ]
+    missing_referenced = [path for path in referenced_optional_scripts if not path.exists()]
+    if missing_referenced:
+        print("Warning: settings UI references optional service installer scripts that are missing:")
+        for path in missing_referenced:
             print(f"  - {path}")
 
 
@@ -277,13 +304,20 @@ cmd = [
     add_data(CORE_DIR, "core"),
     "--version-file", str(VERSION_FILE),
     "--collect-data=certifi",
+    "--collect-submodules=tg_ws_proxy_vendor",
     "--hidden-import=PyQt6.sip",
     "--hidden-import=psutil",
     "--hidden-import=requests",
     "--hidden-import=cryptography",
     "--hidden-import=telegram_proxy",
-    "--hidden-import=websockets",
-    "--hidden-import=websockets.asyncio.client",
+    "--hidden-import=tg_ws_proxy_vendor.proxy.tg_ws_proxy",
+    "--hidden-import=tg_ws_proxy_vendor.proxy.bridge",
+    "--hidden-import=tg_ws_proxy_vendor.proxy.config",
+    "--hidden-import=tg_ws_proxy_vendor.proxy.stats",
+    "--hidden-import=tg_ws_proxy_vendor.proxy.balancer",
+    "--hidden-import=tg_ws_proxy_vendor.proxy.utils",
+    "--hidden-import=tg_ws_proxy_vendor.proxy.raw_websocket",
+    "--hidden-import=tg_ws_proxy_vendor.proxy.fake_tls",
     "--hidden-import=urllib3",
     "--hidden-import=idna",
     "--hidden-import=charset_normalizer",
