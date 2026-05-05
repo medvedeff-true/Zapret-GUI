@@ -35,6 +35,21 @@ import hashlib
 from urllib.parse import urlsplit
 from telegram_proxy import TelegramProxyController
 
+
+def _app_dir_from_cli_or_default() -> str:
+    default_dir = os.path.join(os.path.expanduser('~'), 'ZapretGUI')
+    prefix = "--app-dir="
+    try:
+        for arg in sys.argv[1:]:
+            if not str(arg).startswith(prefix):
+                continue
+            candidate = os.path.abspath(os.path.expandvars(str(arg)[len(prefix):].strip().strip('"')))
+            if candidate:
+                return candidate
+    except Exception:
+        pass
+    return default_dir
+
 def _run_hidden(args, cwd=None, timeout=None):
     try:
         si = subprocess.STARTUPINFO()
@@ -55,6 +70,152 @@ def _run_hidden(args, cwd=None, timeout=None):
         )
     except Exception:
         return None
+
+
+def _telegram_desktop_process_is_running() -> bool:
+    try:
+        import psutil
+        for proc in psutil.process_iter(["name", "exe"]):
+            try:
+                name = os.path.basename(str(proc.info.get("name") or proc.info.get("exe") or "")).casefold()
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+            if name == "telegram.exe":
+                return True
+    except Exception:
+        pass
+
+    try:
+        completed = _run_hidden(["tasklist", "/FI", "IMAGENAME eq Telegram.exe", "/NH"], timeout=4)
+        output = ((completed.stdout if completed is not None else "") or "").casefold()
+        return "telegram.exe" in output
+    except Exception:
+        return False
+
+
+def _telegram_desktop_has_local_proxy_connection(port: int) -> bool:
+    try:
+        target_port = int(port or 0)
+    except Exception:
+        target_port = 0
+    if target_port <= 0:
+        return False
+
+    try:
+        import psutil
+        established = {getattr(psutil, "CONN_ESTABLISHED", "ESTABLISHED"), "ESTABLISHED"}
+        for proc in psutil.process_iter(["name", "exe"]):
+            try:
+                name = os.path.basename(str(proc.info.get("name") or proc.info.get("exe") or "")).casefold()
+                if name != "telegram.exe":
+                    continue
+                conns = proc.net_connections(kind="inet")
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+            except Exception:
+                continue
+
+            for conn in conns:
+                try:
+                    raddr = conn.raddr
+                    if not raddr:
+                        continue
+                    host = str(getattr(raddr, "ip", raddr[0]) or "").strip().lower()
+                    rport = int(getattr(raddr, "port", raddr[1]) or 0)
+                    if (
+                        rport == target_port
+                        and host in {"127.0.0.1", "::1"}
+                        and str(conn.status) in established
+                    ):
+                        return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return False
+
+
+def _telegram_executable_from_command(command: str) -> str:
+    command = (command or "").strip()
+    if not command:
+        return ""
+    if command.startswith('"'):
+        match = re.match(r'"([^"]+)"', command)
+        candidate = match.group(1).strip() if match else ""
+    else:
+        candidate = command.split(maxsplit=1)[0].strip()
+    candidate = os.path.expandvars(candidate.strip('"'))
+    if candidate and os.path.exists(candidate):
+        return candidate
+    return ""
+
+
+def _find_telegram_desktop_executable() -> str:
+    if sys.platform.startswith("win"):
+        try:
+            import winreg
+            for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                for key_path in (
+                    r"Software\Classes\tg\shell\open\command",
+                    r"SOFTWARE\Classes\tg\shell\open\command",
+                ):
+                    try:
+                        with winreg.OpenKey(root, key_path) as key:
+                            command, _ = winreg.QueryValueEx(key, "")
+                        exe = _telegram_executable_from_command(str(command or ""))
+                        if exe and os.path.basename(exe).casefold() == "telegram.exe":
+                            return exe
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    candidates = []
+    appdata = os.environ.get("APPDATA", "")
+    localappdata = os.environ.get("LOCALAPPDATA", "")
+    program_files = [os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")]
+    if appdata:
+        candidates.append(os.path.join(appdata, "Telegram Desktop", "Telegram.exe"))
+    if localappdata:
+        candidates.extend((
+            os.path.join(localappdata, "Programs", "Telegram Desktop", "Telegram.exe"),
+            os.path.join(localappdata, "Telegram Desktop", "Telegram.exe"),
+        ))
+    for root in program_files:
+        if root:
+            candidates.append(os.path.join(root, "Telegram Desktop", "Telegram.exe"))
+
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return ""
+
+
+def _launch_telegram_desktop_app() -> bool:
+    if _telegram_desktop_process_is_running():
+        return True
+
+    exe = _find_telegram_desktop_executable()
+    if not exe:
+        return False
+
+    try:
+        subprocess.Popen(
+            [exe],
+            cwd=os.path.dirname(exe),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            close_fds=True,
+        )
+        return True
+    except Exception:
+        try:
+            os.startfile(exe)
+            return True
+        except Exception:
+            return False
 
 def extract_files_from_meipass():
     if not hasattr(sys, "_MEIPASS"):
@@ -125,8 +286,8 @@ def _safe_copy_tree(src_root: str, dst_root: str, overwrite: bool = False) -> No
             _safe_copy_file(s, d, overwrite=overwrite)
 
 
-APP_VERSION = "2.1.0"
-APP_DIR = os.path.join(os.path.expanduser('~'), 'ZapretGUI')
+APP_VERSION = "2.1.1"
+APP_DIR = _app_dir_from_cli_or_default()
 os.makedirs(APP_DIR, exist_ok=True)
 
 USER_DIR = os.path.join(APP_DIR, "user")
@@ -134,7 +295,7 @@ os.makedirs(USER_DIR, exist_ok=True)
 USER_STRATEGY_BACKUP_DIR = os.path.join(USER_DIR, "strategy-backups")
 
 FLOWSEAL_REPO = "Flowseal/zapret-discord-youtube"
-FLOWSEAL_DEFAULT_VER = "1.9.7b"
+FLOWSEAL_DEFAULT_VER = "1.9.8b"
 FLOWSEAL_VER_KEY = "flowseal_release"
 FLOWSEAL_VERSION_URL = "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/.service/version.txt"
 
@@ -152,6 +313,11 @@ GAMING_LISTS_API_URL = f"https://api.github.com/repos/{GAMING_LISTS_REPO}/conten
 GUI_REPO = "medvedeff-true/Zapret-GUI"
 GUI_RELEASES_URL = f"https://github.com/{GUI_REPO}/releases"
 GUI_SKIPPED_UPDATE_KEY = "gui_update/skipped_version"
+GUI_UPDATE_STARTUP_LAST_CHECK_KEY = "gui_update/startup_last_check"
+GUI_UPDATE_STARTUP_MIN_INTERVAL_SECONDS = 6 * 60 * 60
+TG_WS_PROXY_REPO = "Flowseal/tg-ws-proxy"
+TG_WS_PROXY_RELEASES_URL = f"https://github.com/{TG_WS_PROXY_REPO}/releases"
+TG_WS_PROXY_VENDOR_VERSION = "1.6.4"
 GAME_MODE_KEY = "game_mode_enabled"
 GAME_MODE_MAIN_BYPASS_KEY = "game_mode/main_bypass_enabled"
 GAME_MODE_USER_LISTS_KEY = "game_mode/user_lists_enabled"
@@ -160,12 +326,21 @@ GAME_LIST_DOMAIN_SHA_KEY = "gaming_lists/domain_remote_sha"
 GAME_LIST_DOMAIN_HASH_KEY = "gaming_lists/domain_local_sha256"
 GAME_LIST_IP_SHA_KEY = "gaming_lists/ip_remote_sha"
 GAME_LIST_IP_HASH_KEY = "gaming_lists/ip_local_sha256"
+LISTS_SYNC_LAST_ATTEMPT_KEY = "lists_sync/last_attempt"
+LISTS_SYNC_LAST_SUCCESS_KEY = "lists_sync/last_success"
+LISTS_SYNC_MIN_INTERVAL_SECONDS = 6 * 60 * 60
 GAME_FILTER_FLAG_MODE = "all"
 TELEGRAM_MODE_ENABLED_KEY = "telegram_mode/enabled"
 TELEGRAM_MODE_PROXY_ENABLED_KEY = "telegram_mode/proxy_enabled"
 TELEGRAM_MODE_PROXY_PORT_KEY = "telegram_mode/proxy_port"
+TELEGRAM_MODE_PROXY_SECRET_KEY = "telegram_mode/proxy_secret"
 TELEGRAM_MODE_LAST_ERROR_KEY = "telegram_mode/last_error"
-TELEGRAM_MODE_FIRST_PROXY_HINT_SHOWN_KEY = "telegram_mode/first_proxy_hint_shown"
+TELEGRAM_MODE_HOSTS_ENABLED_KEY = "telegram_mode/hosts_enabled_by_app"
+TELEGRAM_MODE_HOSTS_LAST_ATTEMPT_KEY = "telegram_mode/hosts_last_attempt"
+TELEGRAM_MODE_HOSTS_LAST_STATUS_KEY = "telegram_mode/hosts_last_status"
+TELEGRAM_MODE_HOSTS_LAST_ERROR_KEY = "telegram_mode/hosts_last_error"
+FLOWSEAL_TELEGRAM_HOSTS_BEGIN = "# ZapretGUI Flowseal Telegram Web hosts begin"
+FLOWSEAL_TELEGRAM_HOSTS_END = "# ZapretGUI Flowseal Telegram Web hosts end"
 
 SETTINGS_FILE = os.path.join(APP_DIR, 'settings.ini')
 VERSION_FILE = os.path.join(APP_DIR, '.app_version')
@@ -245,21 +420,57 @@ TELEGRAM_WEB_DOMAINS = (
     "t.me",
     "telegram.me",
     "telegram.dog",
+    "telegram.space",
+    "telesco.pe",
+    "tg.dev",
+    "api.telegram.org",
+    "td.telegram.org",
     "kws1.web.telegram.org",
     "kws2.web.telegram.org",
     "kws3.web.telegram.org",
     "kws4.web.telegram.org",
     "kws5.web.telegram.org",
+    "zws2.web.telegram.org",
+    "zws4.web.telegram.org",
     "pluto.web.telegram.org",
     "venus.web.telegram.org",
     "aurora.web.telegram.org",
     "vesta.web.telegram.org",
     "flora.web.telegram.org",
+    "kws2-1.web.telegram.org",
+    "kws4-1.web.telegram.org",
+    "zws2-1.web.telegram.org",
+    "zws4-1.web.telegram.org",
     "pluto-1.web.telegram.org",
     "venus-1.web.telegram.org",
     "aurora-1.web.telegram.org",
     "vesta-1.web.telegram.org",
     "flora-1.web.telegram.org",
+)
+
+FLOWSEAL_TELEGRAM_WEB_HOSTS = (
+    ("149.154.167.220", "zws4.web.telegram.org"),
+    ("149.154.167.220", "vesta.web.telegram.org"),
+    ("149.154.167.220", "vesta-1.web.telegram.org"),
+    ("149.154.167.220", "venus-1.web.telegram.org"),
+    ("149.154.167.220", "telegram.me"),
+    ("149.154.167.220", "telegram.dog"),
+    ("149.154.167.220", "telegram.space"),
+    ("149.154.167.220", "telesco.pe"),
+    ("149.154.167.220", "tg.dev"),
+    ("149.154.167.220", "telegram.org"),
+    ("149.154.167.220", "t.me"),
+    ("149.154.167.220", "api.telegram.org"),
+    ("149.154.167.220", "td.telegram.org"),
+    ("149.154.167.220", "venus.web.telegram.org"),
+    ("149.154.167.220", "web.telegram.org"),
+    ("149.154.167.220", "kws2-1.web.telegram.org"),
+    ("149.154.167.220", "kws2.web.telegram.org"),
+    ("149.154.167.220", "kws4-1.web.telegram.org"),
+    ("149.154.167.220", "kws4.web.telegram.org"),
+    ("149.154.167.220", "zws2-1.web.telegram.org"),
+    ("149.154.167.220", "zws2.web.telegram.org"),
+    ("149.154.167.220", "zws4-1.web.telegram.org"),
 )
 
 # Based on https://core.telegram.org/resources/cidr.txt. Update periodically.
@@ -297,6 +508,7 @@ DNS_MALW_LAST_UPDATED_KEY = "dns_malw_link/last_updated"
 DNS_MALW_LAST_DOH_KEY = "dns_malw_link/last_doh"
 DNS_MALW_ENABLED_BY_APP_KEY = "dns_malw_link/enabled_by_app"
 DNS_MALW_RESTORE_SNAPSHOT_KEY = "dns_malw_link/restore_snapshot"
+DNS_MALW_STARTUP_SYNC_MIN_INTERVAL_SECONDS = 6 * 60 * 60
 DNS_MALW_HOSTS_URL = "https://raw.githubusercontent.com/ImMALWARE/dns.malw.link/master/hosts"
 DNS_MALW_ADDITIONAL_URL = "https://raw.githubusercontent.com/AvenCores/Goida-AI-Unlocker/main/additional_hosts.py"
 DNS_MALW_HOSTS_PATH = r"C:\Windows\System32\drivers\etc\hosts"
@@ -772,6 +984,11 @@ class CustomTitleBar(QWidget):
                 border-color: rgba(226,84,84,0.66);
                 background: rgba(226,84,84,0.20);
             }
+            QPushButton#titleCloseButton[attention="true"] {
+                border: 1px solid rgba(255,92,92,0.95);
+                background: rgba(226,84,84,0.36);
+                color: #ffffff;
+            }
             QPushButton#titleButton:pressed, QPushButton#titleCloseButton:pressed {
                 background: rgba(255,255,255,0.12);
             }
@@ -807,6 +1024,9 @@ class StyledDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
         self.setStyleSheet(_app_dialog_stylesheet())
         self._title_bar = None
+        self._attention_flash_on = False
+        self._attention_flash_timer = None
+        self._attention_flash_steps = 0
 
     def setWindowTitle(self, title: str) -> None:
         super().setWindowTitle(title)
@@ -827,11 +1047,57 @@ class StyledDialog(QDialog):
             self._title_bar.setTitle(self.windowTitle())
         return self._title_bar
 
+    def _set_attention_flash(self, active: bool) -> None:
+        self._attention_flash_on = bool(active)
+        title_bar = getattr(self, "_title_bar", None)
+        close_btn = getattr(title_bar, "close_btn", None)
+        if close_btn is not None:
+            try:
+                close_btn.setProperty("attention", bool(active))
+                close_btn.style().unpolish(close_btn)
+                close_btn.style().polish(close_btn)
+                close_btn.update()
+            except Exception:
+                pass
+        self.update()
+
+    def flash_attention(self) -> None:
+        if self._attention_flash_timer is not None:
+            try:
+                self._attention_flash_timer.stop()
+            except Exception:
+                pass
+        self._attention_flash_steps = 0
+        self._set_attention_flash(True)
+        timer = QTimer(self)
+        timer.setInterval(120)
+        self._attention_flash_timer = timer
+
+        def _tick() -> None:
+            self._attention_flash_steps += 1
+            self._set_attention_flash(self._attention_flash_steps % 2 == 0)
+            if self._attention_flash_steps >= 7:
+                timer.stop()
+                self._set_attention_flash(False)
+                try:
+                    timer.deleteLater()
+                except Exception:
+                    pass
+                if self._attention_flash_timer is timer:
+                    self._attention_flash_timer = None
+
+        timer.timeout.connect(_tick)
+        timer.start()
+
     def paintEvent(self, event) -> None:
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         _paint_app_surface(painter, QRectF(self.rect()), accented=False)
+        if self._attention_flash_on:
+            painter.setPen(QPen(QColor(255, 82, 82, 235), 2.2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(_rounded_window_path(QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)))
         painter.end()
 
     def resizeEvent(self, event) -> None:
@@ -1120,6 +1386,19 @@ def _ensure_flowseal_source_lists() -> None:
                 pass
 
 
+def _flowseal_source_lists_are_ready() -> bool:
+    try:
+        for filename in FLOWSEAL_LIST_FILES:
+            path = _flowseal_source_path(filename)
+            if not os.path.exists(path):
+                return False
+            if os.path.getsize(path) <= 0:
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def _backup_user_list_before_migration(path: str) -> None:
     backup_path = path + USER_LIST_SEEDED_BACKUP_SUFFIX
     try:
@@ -1241,17 +1520,53 @@ def _set_telegram_mode_enabled(enabled: bool, settings: QSettings | None = None)
     qs = _load_settings_if_needed(settings)
     qs.setValue(TELEGRAM_MODE_ENABLED_KEY, bool(enabled))
     qs.setValue(TELEGRAM_MODE_PROXY_ENABLED_KEY, bool(enabled))
-    if not str(qs.value(TELEGRAM_MODE_PROXY_PORT_KEY, "") or "").strip():
-        qs.setValue(TELEGRAM_MODE_PROXY_PORT_KEY, 1080)
+    port = _safe_int_setting(qs, TELEGRAM_MODE_PROXY_PORT_KEY, 1443)
+    if port <= 0 or port > 65535 or port == 1080:
+        qs.setValue(TELEGRAM_MODE_PROXY_PORT_KEY, 1443)
+    if not _is_valid_telegram_proxy_secret(str(qs.value(TELEGRAM_MODE_PROXY_SECRET_KEY, "") or "")):
+        qs.setValue(TELEGRAM_MODE_PROXY_SECRET_KEY, os.urandom(16).hex())
     qs.sync()
 
 
 def _get_telegram_proxy_port(settings: QSettings | None = None) -> int:
     qs = _load_settings_if_needed(settings)
-    port = _safe_int_setting(qs, TELEGRAM_MODE_PROXY_PORT_KEY, 1080)
-    if port <= 0 or port > 65535:
-        port = 1080
+    port = _safe_int_setting(qs, TELEGRAM_MODE_PROXY_PORT_KEY, 1443)
+    if port <= 0 or port > 65535 or port == 1080:
+        port = 1443
     return port
+
+
+def _is_valid_telegram_proxy_secret(value: str) -> bool:
+    value = str(value or "").strip().lower()
+    if value.startswith("dd") and len(value) == 34:
+        value = value[2:]
+    if len(value) != 32:
+        return False
+    try:
+        bytes.fromhex(value)
+        return True
+    except Exception:
+        return False
+
+
+def _get_telegram_proxy_secret(settings: QSettings | None = None) -> str:
+    qs = _load_settings_if_needed(settings)
+    secret = str(qs.value(TELEGRAM_MODE_PROXY_SECRET_KEY, "") or "").strip().lower()
+    if secret.startswith("dd") and len(secret) == 34:
+        secret = secret[2:]
+    if not _is_valid_telegram_proxy_secret(secret):
+        secret = os.urandom(16).hex()
+        qs.setValue(TELEGRAM_MODE_PROXY_SECRET_KEY, secret)
+        qs.sync()
+    return secret
+
+
+def _get_telegram_proxy_link(settings: QSettings | None = None) -> str:
+    return (
+        "tg://proxy?server=127.0.0.1"
+        f"&port={int(_get_telegram_proxy_port(settings))}"
+        f"&secret=dd{_get_telegram_proxy_secret(settings)}"
+    )
 
 
 def _set_telegram_last_error(error: str, settings: QSettings | None = None) -> None:
@@ -1263,12 +1578,117 @@ def _set_telegram_last_error(error: str, settings: QSettings | None = None) -> N
         pass
 
 
+def _hosts_contains_flowseal_telegram_block(text: str) -> bool:
+    hay = (text or "").casefold()
+    return (
+        (
+            FLOWSEAL_TELEGRAM_HOSTS_BEGIN.casefold() in hay
+            and FLOWSEAL_TELEGRAM_HOSTS_END.casefold() in hay
+        )
+        or (
+            "# ZapretGUI Telegram Web hosts begin".casefold() in hay
+            and "# ZapretGUI Telegram Web hosts end".casefold() in hay
+        )
+    )
+
+
+def _is_telegram_hosts_enabled_by_app(settings: QSettings | None = None) -> bool:
+    try:
+        qs = _load_settings_if_needed(settings)
+        if bool(qs.value(TELEGRAM_MODE_HOSTS_ENABLED_KEY, False, type=bool)):
+            return True
+    except Exception:
+        pass
+
+    try:
+        return _hosts_contains_flowseal_telegram_block(_read_hosts_file(DNS_MALW_HOSTS_PATH))
+    except Exception:
+        return False
+
+
+def _set_telegram_hosts_enabled_by_app(enabled: bool, settings: QSettings | None = None) -> None:
+    try:
+        qs = _load_settings_if_needed(settings)
+        qs.setValue(TELEGRAM_MODE_HOSTS_ENABLED_KEY, bool(enabled))
+        qs.sync()
+    except Exception:
+        pass
+
+
+def _set_telegram_hosts_action_status(ok: bool, error: str = "", settings: QSettings | None = None) -> None:
+    try:
+        qs = _load_settings_if_needed(settings)
+        qs.setValue(TELEGRAM_MODE_HOSTS_LAST_ATTEMPT_KEY, int(time.time()))
+        qs.setValue(TELEGRAM_MODE_HOSTS_LAST_STATUS_KEY, "ok" if ok else "error")
+        qs.setValue(TELEGRAM_MODE_HOSTS_LAST_ERROR_KEY, str(error or "").strip())
+        qs.sync()
+    except Exception:
+        pass
+
+
 def _ensure_telegram_runtime_files() -> None:
     try:
         _write_lines_utf8(RUNTIME_TELEGRAM_DOMAIN_FILE, _read_lines_utf8(RUNTIME_TELEGRAM_DOMAIN_FILE))
         _write_lines_utf8(RUNTIME_TELEGRAM_IP_FILE, _read_lines_utf8(RUNTIME_TELEGRAM_IP_FILE))
     except Exception:
         pass
+
+
+def _strip_flowseal_telegram_hosts_block(text: str) -> str:
+    normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    patterns = (
+        re.compile(
+            rf"(?ms)^{re.escape(FLOWSEAL_TELEGRAM_HOSTS_BEGIN)}\n.*?"
+            rf"^{re.escape(FLOWSEAL_TELEGRAM_HOSTS_END)}(?:\n|$)"
+        ),
+        re.compile(
+            r"(?ms)^# ZapretGUI Telegram Web hosts begin\n.*?"
+            r"^# ZapretGUI Telegram Web hosts end(?:\n|$)"
+        ),
+    )
+    cleaned = normalized
+    for pattern in patterns:
+        cleaned = pattern.sub("", cleaned)
+    cleaned = cleaned.rstrip()
+    return cleaned + ("\n" if cleaned else "")
+
+
+def _flowseal_telegram_hosts_block() -> str:
+    lines = [
+        FLOWSEAL_TELEGRAM_HOSTS_BEGIN,
+        "# Telegram Web hosts from Flowseal/zapret-discord-youtube .service/hosts",
+    ]
+    lines.extend(f"{ip} {host}" for ip, host in FLOWSEAL_TELEGRAM_WEB_HOSTS)
+    lines.append(FLOWSEAL_TELEGRAM_HOSTS_END)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _apply_flowseal_telegram_hosts(enabled: bool, settings: QSettings | None = None) -> bool:
+    try:
+        try:
+            current_hosts = _read_hosts_file_strict(DNS_MALW_HOSTS_PATH)
+        except FileNotFoundError:
+            current_hosts = ""
+
+        updated = _strip_flowseal_telegram_hosts_block(current_hosts)
+        if enabled:
+            if updated and not updated.endswith("\n"):
+                updated += "\n"
+            updated += _flowseal_telegram_hosts_block()
+
+        if updated != current_hosts:
+            _write_hosts_file(updated, DNS_MALW_HOSTS_PATH)
+        _run_hidden(["ipconfig", "/flushdns"], timeout=8)
+        _set_telegram_hosts_enabled_by_app(bool(enabled), settings)
+        _set_telegram_hosts_action_status(True, "", settings)
+        _set_telegram_last_error("", settings)
+        return True
+    except Exception as e:
+        error = str(e)
+        _set_telegram_hosts_action_status(False, error, settings)
+        _set_telegram_last_error(error, settings)
+        print("Flowseal Telegram hosts error:", e)
+        return False
 
 
 def _write_telegram_managed_lists() -> None:
@@ -1300,12 +1720,13 @@ def _sync_telegram_runtime_lists(settings: QSettings | None = None) -> None:
         _set_telegram_last_error(str(e), settings)
 
 
-def _apply_telegram_mode_files(enabled: bool, settings: QSettings | None = None) -> None:
+def _apply_telegram_mode_files(enabled: bool, settings: QSettings | None = None) -> bool:
     if enabled:
         _write_telegram_managed_lists()
     else:
         _clear_telegram_managed_lists()
     _sync_telegram_runtime_lists(settings)
+    return _apply_flowseal_telegram_hosts(enabled, settings)
 
 
 def _dns_malw_link_common_powershell() -> str:
@@ -2383,12 +2804,29 @@ def _download_ai_hosts_bundle() -> tuple[str, str]:
         raise e
 
 
-def _sync_ai_dns_if_enabled(settings: QSettings | None = None) -> dict:
+def _sync_ai_dns_if_enabled(
+    settings: QSettings | None = None,
+    min_retry_seconds: int = 0,
+) -> dict:
     qs = _load_settings_if_needed(settings)
     result = {"ok": False, "skipped": False, "error": ""}
     if not _is_dns_malw_link_enabled_by_app(qs):
         result["skipped"] = True
         return result
+
+    if min_retry_seconds > 0:
+        try:
+            last_success = _safe_int_setting(qs, DNS_MALW_LAST_SUCCESS_KEY, 0)
+            if (
+                last_success > 0
+                and (int(time.time()) - last_success) < max(60, int(min_retry_seconds))
+                and _hosts_contains_dns_malw_managed_block(_read_hosts_file(DNS_MALW_HOSTS_PATH))
+            ):
+                result["ok"] = True
+                result["skipped"] = True
+                return result
+        except Exception:
+            pass
 
     try:
         is_admin_now = bool(ctypes.windll.shell32.IsUserAnAdmin())
@@ -2561,10 +2999,36 @@ def _run_self_as_admin_for_dns_action(action: str) -> bool:
 
         if getattr(sys, "frozen", False):
             executable = sys.executable
-            params = subprocess.list2cmdline([f"--dns-malw-link-action={action}"])
+            params = subprocess.list2cmdline([f"--app-dir={APP_DIR}", f"--dns-malw-link-action={action}"])
         else:
             executable = sys.executable
-            params = subprocess.list2cmdline([os.path.abspath(sys.argv[0]), f"--dns-malw-link-action={action}"])
+            params = subprocess.list2cmdline([os.path.abspath(sys.argv[0]), f"--app-dir={APP_DIR}", f"--dns-malw-link-action={action}"])
+
+        res = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            executable,
+            params,
+            None,
+            0,
+        )
+        return int(res) > 32
+    except Exception:
+        return False
+
+
+def _run_self_as_admin_for_telegram_hosts_action(action: str) -> bool:
+    try:
+        action = (action or "").strip().lower()
+        if action not in {"enable", "disable"}:
+            return False
+
+        if getattr(sys, "frozen", False):
+            executable = sys.executable
+            params = subprocess.list2cmdline([f"--app-dir={APP_DIR}", f"--telegram-mode-hosts-action={action}"])
+        else:
+            executable = sys.executable
+            params = subprocess.list2cmdline([os.path.abspath(sys.argv[0]), f"--app-dir={APP_DIR}", f"--telegram-mode-hosts-action={action}"])
 
         res = ctypes.windll.shell32.ShellExecuteW(
             None,
@@ -3291,11 +3755,20 @@ def _rebuild_runtime_lists(settings: QSettings | None = None) -> None:
         user_game_domains = _read_lines_utf8(USER_GAME_DOMAIN_FILE) if game_mode_enabled else []
         user_game_ip = _read_lines_utf8(USER_GAME_IP_FILE) if game_mode_enabled else []
         discord_domains = _read_lines_utf8(RUNTIME_DISCORD_FILE) if (game_mode_enabled and discord_enabled) else []
+        telegram_enabled = _is_telegram_mode_enabled(settings)
+        if telegram_enabled:
+            if not os.path.exists(USER_TELEGRAM_DOMAIN_FILE) or not os.path.exists(USER_TELEGRAM_IP_FILE):
+                _write_telegram_managed_lists()
+            telegram_domains = _read_lines_utf8(USER_TELEGRAM_DOMAIN_FILE)
+            telegram_ip = _read_lines_utf8(USER_TELEGRAM_IP_FILE)
+        else:
+            telegram_domains = []
+            telegram_ip = []
 
-        merged_general = _merge_unique(core_general, user_general, user_game_domains, discord_domains)
+        merged_general = _merge_unique(core_general, telegram_domains, user_general, user_game_domains, discord_domains)
         merged_exclude = _merge_unique(core_exclude, user_exclude)
         merged_google = _merge_unique(core_google)
-        merged_ip_all = _merge_unique(core_ip_all, user_ip_all, user_game_ip)
+        merged_ip_all = _merge_unique(core_ip_all, telegram_ip, user_ip_all, user_game_ip)
         merged_ip_exclude = _merge_unique(core_ip_exclude, user_ip_exclude)
 
         _write_lines_utf8(RUNTIME_GENERAL_FILE, merged_general)
@@ -3311,7 +3784,11 @@ def _rebuild_runtime_lists(settings: QSettings | None = None) -> None:
         pass
 
 
-def _sync_flowseal_lists(settings: QSettings | None = None) -> dict:
+def _sync_flowseal_lists(
+    settings: QSettings | None = None,
+    skip_recent: bool = False,
+    min_interval_seconds: int = LISTS_SYNC_MIN_INTERVAL_SECONDS,
+) -> dict:
     result = {
         "ok": False,
         "offline": False,
@@ -3320,13 +3797,28 @@ def _sync_flowseal_lists(settings: QSettings | None = None) -> dict:
         "gaming_error": "",
         "gaming_offline": False,
         "gaming_silent_missing": False,
+        "skipped_recent": False,
         "error": "",
     }
     session = None
+    qs = _load_settings_if_needed(settings)
     try:
         os.makedirs(USER_DIR, exist_ok=True)
         _ensure_flowseal_source_lists()
         _repair_dns_malw_hosts_for_app_network(settings)
+
+        now = int(time.time())
+        if skip_recent and _flowseal_source_lists_are_ready():
+            last_success = _safe_int_setting(qs, LISTS_SYNC_LAST_SUCCESS_KEY, 0)
+            if last_success > 0 and (now - last_success) < max(60, int(min_interval_seconds or 0)):
+                _ensure_user_lists_initialized()
+                _rebuild_runtime_lists(settings)
+                result["ok"] = True
+                result["skipped_recent"] = True
+                return result
+
+        qs.setValue(LISTS_SYNC_LAST_ATTEMPT_KEY, now)
+        qs.sync()
 
         session = _create_lists_sync_session("ZapretGUI-ListsSync")
 
@@ -3352,6 +3844,8 @@ def _sync_flowseal_lists(settings: QSettings | None = None) -> dict:
         result["gaming_error"] = gaming_result.get("error", "")
         result["gaming_offline"] = bool(gaming_result.get("offline"))
         result["gaming_silent_missing"] = bool(gaming_result.get("silent_missing"))
+        qs.setValue(LISTS_SYNC_LAST_SUCCESS_KEY, int(time.time()))
+        qs.sync()
     except requests.exceptions.RequestException as e:
         result["offline"] = True
         result["error"] = str(e)
@@ -3481,6 +3975,51 @@ def _expand_profile_placeholders(
     )
 
 
+def _build_telegram_mode_winws_segments(core_dir: str, settings: QSettings | None = None) -> list[str]:
+    if not _is_telegram_mode_enabled(settings):
+        return []
+
+    bin_dir = os.path.join(core_dir, "bin")
+    lists_dir = os.path.join(core_dir, "lists")
+    telegram_domains = os.path.join(lists_dir, "telegram-domains.txt")
+    telegram_ipset = os.path.join(lists_dir, "telegram-ipset.txt")
+    exclude_domains = os.path.join(lists_dir, "list-exclude.txt")
+    exclude_domains_user = os.path.join(lists_dir, "list-exclude-user.txt")
+    exclude_ipset = os.path.join(lists_dir, "ipset-exclude.txt")
+    exclude_ipset_user = os.path.join(lists_dir, "ipset-exclude-user.txt")
+    fake_tls = os.path.join(bin_dir, "tls_clienthello_www_google_com.bin")
+    fake_quic = os.path.join(bin_dir, "quic_initial_www_google_com.bin")
+
+    return [
+        (
+            f'--filter-tcp=80,443 --hostlist="{telegram_domains}" '
+            f'--hostlist-exclude="{exclude_domains}" --hostlist-exclude="{exclude_domains_user}" '
+            '--dpi-desync=syndata,multidisorder --dpi-desync-split-pos=1,midsld '
+            '--dpi-desync-repeats=8 --dpi-desync-fooling=ts,badseq '
+            f'--dpi-desync-fake-tls="{fake_tls}" --new'
+        ),
+        (
+            f'--filter-tcp=80,443 --ipset="{telegram_ipset}" '
+            f'--ipset-exclude="{exclude_ipset}" --ipset-exclude="{exclude_ipset_user}" '
+            '--dpi-desync=syndata,multidisorder --dpi-desync-split-pos=1,midsld '
+            '--dpi-desync-repeats=8 --dpi-desync-fooling=ts,badseq '
+            f'--dpi-desync-fake-tls="{fake_tls}" --new'
+        ),
+        (
+            f'--filter-udp=443 --hostlist="{telegram_domains}" '
+            f'--hostlist-exclude="{exclude_domains}" --hostlist-exclude="{exclude_domains_user}" '
+            '--dpi-desync=fake --dpi-desync-repeats=10 '
+            f'--dpi-desync-fake-quic="{fake_quic}" --new'
+        ),
+        (
+            f'--filter-udp=443 --ipset="{telegram_ipset}" '
+            f'--ipset-exclude="{exclude_ipset}" --ipset-exclude="{exclude_ipset_user}" '
+            '--dpi-desync=fake --dpi-desync-repeats=10 '
+            f'--dpi-desync-fake-quic="{fake_quic}" --new'
+        ),
+    ]
+
+
 def _build_game_mode_winws_command(
     script_path: str,
     core_dir: str,
@@ -3505,6 +4044,7 @@ def _build_game_mode_winws_command(
             _expand_profile_placeholders(segment, core_dir, game_filter_tcp, game_filter_udp)
         )
 
+    telegram_segments = _build_telegram_mode_winws_segments(core_dir, settings)
     expanded_preamble = _expand_profile_placeholders(
         preamble,
         core_dir,
@@ -3514,6 +4054,7 @@ def _build_game_mode_winws_command(
     command_parts = [f'"{winws_path}"']
     if expanded_preamble:
         command_parts.append(expanded_preamble)
+    command_parts.extend(seg for seg in telegram_segments if seg)
     command_parts.extend(seg for seg in expanded_segments if seg)
     return " ".join(command_parts).strip()
 
@@ -4096,6 +4637,74 @@ def _check_gui_update_available(
         result["download_url"] = download_url
         return result
 
+    except requests.exceptions.RequestException as e:
+        result["offline"] = True
+        result["status"] = "offline"
+        result["error"] = str(e)
+    except Exception as e:
+        result["status"] = "error"
+        result["error"] = str(e)
+    return result
+
+
+def _check_startup_gui_update_if_due(
+    settings: QSettings | None = None,
+    timeout: float = 6,
+    min_interval_seconds: int = GUI_UPDATE_STARTUP_MIN_INTERVAL_SECONDS,
+) -> dict:
+    qs = _load_settings_if_needed(settings)
+    now = int(time.time())
+    last_check = _safe_int_setting(qs, GUI_UPDATE_STARTUP_LAST_CHECK_KEY, 0)
+    if last_check > 0 and (now - last_check) < max(60, int(min_interval_seconds or 0)):
+        return {
+            "ok": True,
+            "status": "skipped-recent",
+            "offline": False,
+            "skipped": True,
+            "current_ver": APP_VERSION,
+            "latest_ver": APP_VERSION,
+            "download_url": "",
+            "release_url": GUI_RELEASES_URL,
+            "error": "",
+        }
+
+    try:
+        qs.setValue(GUI_UPDATE_STARTUP_LAST_CHECK_KEY, now)
+        qs.sync()
+    except Exception:
+        pass
+    return _check_gui_update_available(qs, respect_skipped=True, timeout=timeout)
+
+
+def _check_tg_ws_proxy_update_available(timeout: float = 12) -> dict:
+    result = {
+        "ok": False,
+        "status": "",
+        "error": "",
+        "offline": False,
+        "current_ver": TG_WS_PROXY_VENDOR_VERSION,
+        "latest_ver": "",
+        "release_url": TG_WS_PROXY_RELEASES_URL,
+        "manual": True,
+    }
+    try:
+        headers = {"User-Agent": "ZapretGUI-Updater", "Accept": "application/vnd.github+json"}
+        api_url = f"https://api.github.com/repos/{TG_WS_PROXY_REPO}/releases/latest"
+        response = requests.get(api_url, headers=headers, timeout=timeout)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("latest-tg-ws-proxy-release-missing")
+        latest_ver = _normalize_release_version(str(payload.get("tag_name") or ""))
+        if not latest_ver:
+            raise RuntimeError("latest-tg-ws-proxy-version-missing")
+        result["latest_ver"] = latest_ver
+        try:
+            is_newer = _version_key(latest_ver) > _version_key(TG_WS_PROXY_VENDOR_VERSION)
+        except Exception:
+            is_newer = latest_ver != TG_WS_PROXY_VENDOR_VERSION
+        result["ok"] = True
+        result["status"] = "update-available" if is_newer else "up-to-date"
     except requests.exceptions.RequestException as e:
         result["offline"] = True
         result["status"] = "offline"
@@ -5726,10 +6335,13 @@ class ListsUpdateWorker(QThread):
     def run(self):
         try:
             settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
-            result = _sync_flowseal_lists(settings)
-            ai_result = _sync_ai_dns_if_enabled(settings)
+            result = _sync_flowseal_lists(settings, skip_recent=True)
+            ai_result = _sync_ai_dns_if_enabled(
+                settings,
+                min_retry_seconds=DNS_MALW_STARTUP_SYNC_MIN_INTERVAL_SECONDS,
+            )
             result["ai_dns_error"] = str(ai_result.get("error") or "")
-            result["gui_update"] = _check_gui_update_available(settings, respect_skipped=True, timeout=10)
+            result["gui_update"] = _check_startup_gui_update_if_due(settings)
         except Exception as e:
             result = {
                 "ok": False,
@@ -5739,6 +6351,7 @@ class ListsUpdateWorker(QThread):
                 "gaming_error": "",
                 "gaming_offline": False,
                 "gaming_silent_missing": False,
+                "skipped_recent": False,
                 "ai_dns_error": "",
                 "gui_update": {},
                 "error": str(e),
@@ -5824,51 +6437,95 @@ class TelegramModeWorker(QThread):
             "enabled": False,
             "proxy_running": False,
             "proxy_port": _get_telegram_proxy_port(settings),
+            "proxy_secret": _get_telegram_proxy_secret(settings),
+            "proxy_link": _get_telegram_proxy_link(settings),
+            "hosts_ok": True,
+            "hosts_error": "",
+            "hosts_permission_error": False,
             "error": "",
         }
+
+        def _record_hosts_result(hosts_ok: bool) -> None:
+            result["hosts_ok"] = bool(hosts_ok)
+            if hosts_ok:
+                result["hosts_error"] = ""
+                result["hosts_permission_error"] = False
+                return
+            hosts_error = str(
+                settings.value(TELEGRAM_MODE_HOSTS_LAST_ERROR_KEY, "")
+                or settings.value(TELEGRAM_MODE_LAST_ERROR_KEY, "")
+                or ""
+            ).strip()
+            result["hosts_error"] = hosts_error
+            result["hosts_permission_error"] = _is_hosts_permission_error_message(hosts_error)
+            if hosts_error:
+                result["error"] = hosts_error
+
         try:
             if self.action == "enable":
                 _set_telegram_mode_enabled(True, settings)
                 _set_telegram_last_error("", settings)
-                _apply_telegram_mode_files(True, settings)
+                _record_hosts_result(_apply_telegram_mode_files(True, settings))
+                _rebuild_runtime_lists(settings)
                 if self.proxy_controller is None:
                     raise RuntimeError("Telegram proxy controller is not available")
-                self.proxy_controller.start(result["proxy_port"])
+                self.proxy_controller.start(result["proxy_port"], result["proxy_secret"])
                 result["enabled"] = True
                 result["proxy_running"] = self.proxy_controller.is_running()
+                result["proxy_link"] = self.proxy_controller.proxy_link()
                 result["ok"] = True
             elif self.action == "disable":
                 _set_telegram_mode_enabled(False, settings)
                 if self.proxy_controller is not None:
                     self.proxy_controller.stop()
-                _apply_telegram_mode_files(False, settings)
-                _set_telegram_last_error("", settings)
+                _record_hosts_result(_apply_telegram_mode_files(False, settings))
+                _rebuild_runtime_lists(settings)
+                if result["hosts_ok"]:
+                    _set_telegram_last_error("", settings)
                 result["enabled"] = False
                 result["proxy_running"] = False
-                result["ok"] = True
+                result["ok"] = bool(result["hosts_ok"])
             elif self.action == "restore":
                 if _is_telegram_mode_enabled(settings):
-                    _apply_telegram_mode_files(True, settings)
+                    _record_hosts_result(_apply_telegram_mode_files(True, settings))
+                    _rebuild_runtime_lists(settings)
                     if self.proxy_controller is None:
                         raise RuntimeError("Telegram proxy controller is not available")
-                    self.proxy_controller.start(result["proxy_port"])
+                    self.proxy_controller.start(result["proxy_port"], result["proxy_secret"])
                     result["enabled"] = True
                     result["proxy_running"] = self.proxy_controller.is_running()
+                    result["proxy_link"] = self.proxy_controller.proxy_link()
                 else:
-                    _apply_telegram_mode_files(False, settings)
+                    _record_hosts_result(True)
+                    _rebuild_runtime_lists(settings)
                     result["enabled"] = False
                     result["proxy_running"] = False
-                _set_telegram_last_error("", settings)
+                if result["hosts_ok"]:
+                    _set_telegram_last_error("", settings)
+                result["ok"] = True
+            elif self.action == "cleanup":
+                _set_telegram_mode_enabled(False, settings)
+                if self.proxy_controller is not None:
+                    self.proxy_controller.stop()
+                _record_hosts_result(_apply_telegram_mode_files(False, settings))
+                _rebuild_runtime_lists(settings)
+                if result["hosts_ok"]:
+                    _set_telegram_last_error("", settings)
+                result["enabled"] = False
+                result["proxy_running"] = False
                 result["ok"] = True
             else:
                 raise RuntimeError("Unknown Telegram Mode action")
         except Exception as e:
             result["error"] = str(e)
+            result["hosts_permission_error"] = _is_hosts_permission_error_message(result["error"])
             result["enabled"] = _is_telegram_mode_enabled(settings)
             try:
                 result["proxy_running"] = bool(
                     self.proxy_controller is not None and self.proxy_controller.is_running()
                 )
+                if self.proxy_controller is not None and result["proxy_running"]:
+                    result["proxy_link"] = self.proxy_controller.proxy_link()
             except Exception:
                 result["proxy_running"] = False
             _set_telegram_last_error(result["error"], settings)
@@ -6353,6 +7010,7 @@ class AnimatedPowerToggleButton(QPushButton):
         return QColor(r, g, b, a)
 
     def _reset_icon_transform(self):
+        self._cur_icon_pix = self._icon_on_pix if self.isChecked() else self._icon_off_pix
         self._icon_angle = 0.0
         self._icon_scale = 1.0
         self._pending_icon = None
@@ -6398,6 +7056,20 @@ class AnimatedPowerToggleButton(QPushButton):
             self._start_icon_anim(direction=-1, pending_icon=self._icon_off_pix)
 
         self.update()
+
+    def syncVisualState(self, animated: bool = True):
+        checked = self.isChecked()
+        if animated:
+            self._on_toggled(checked)
+            return
+        try:
+            self._anim_progress.stop()
+            self._anim_icon_group.stop()
+        except Exception:
+            pass
+        self._progress = 1.0 if checked else 0.0
+        self._cur_icon_pix = self._icon_on_pix if checked else self._icon_off_pix
+        self._reset_icon_transform()
 
     def paintEvent(self, event):
         w = self.width()
@@ -9082,6 +9754,13 @@ class MainWindow(QWidget):
         self.telegram_mode_enabled = _is_telegram_mode_enabled(self.settings)
         self._telegram_mode_busy = False
         self._telegram_mode_worker = None
+        self._telegram_mode_hosts_poll_timer = None
+        self._telegram_mode_hosts_poll_attempts = 0
+        self._telegram_mode_hosts_poll_anchor = 0
+        self._telegram_mode_hosts_expected_enabled = False
+        self._telegram_mode_hosts_pending_action = ""
+        self._telegram_proxy_autoconnect_generation = 0
+        self._telegram_help_proxy_link_sent_this_session = False
         self.telegram_proxy = TelegramProxyController()
         self.dns_malw_link_active = False
         self._dns_malw_link_busy = False
@@ -9093,6 +9772,7 @@ class MainWindow(QWidget):
         self._dns_malw_link_poll_anchor = 0
         self._pending_toggle_state = None
         self._pending_toggle_profile = " "
+        self._pending_toggle_starting = False
         self._game_mode_restart_timer = QTimer(self)
         self._game_mode_restart_timer.setSingleShot(True)
         self._game_mode_restart_timer.setInterval(180)
@@ -9211,31 +9891,18 @@ class MainWindow(QWidget):
         except Exception:
             return False
 
-    def _play_settings_guard_sound(self) -> None:
-        now = time.monotonic()
-        if now - float(getattr(self, "_settings_guard_last_sound", 0.0)) < 0.65:
-            return
-        self._settings_guard_last_sound = now
-        if sys.platform.startswith("win"):
-            try:
-                import winsound
-                winsound.MessageBeep(0x00000040)  # MB_ICONASTERISK
-                return
-            except Exception:
-                pass
-        try:
-            QApplication.beep()
-        except Exception:
-            pass
-
     def _nudge_settings_dialog(self) -> None:
         dlg = getattr(self, "_settings_dlg", None)
         if dlg is None or not dlg.isVisible():
             return
-        self._play_settings_guard_sound()
         try:
             dlg.raise_()
             dlg.activateWindow()
+        except Exception:
+            pass
+        try:
+            if hasattr(dlg, "flash_attention"):
+                dlg.flash_attention()
         except Exception:
             pass
 
@@ -9454,6 +10121,7 @@ class MainWindow(QWidget):
         else:
             self.retranslate_ui()
 
+        self._schedule_overlay_mode_buttons_position()
         self.update_tray_status()
 
     def _show_lists_sync_network_notice(self):
@@ -9488,11 +10156,38 @@ class MainWindow(QWidget):
             or getattr(self, "_telegram_mode_busy", False)
         )
 
-    def _set_pending_start_ui(self, active: bool) -> None:
+    def _select_profile_for_programmatic_start(self, profile: str) -> None:
+        if profile not in self.presets:
+            return
+        try:
+            self.cb.blockSignals(True)
+            self.cb.setCurrentText(profile)
+        finally:
+            try:
+                self.cb.blockSignals(False)
+            except Exception:
+                pass
+        self.settings.setValue("last_profile", profile)
+        self.update_tray_presets()
+
+    def _set_main_toggle_checked_visual(self, checked: bool, animated: bool = True) -> None:
         try:
             self.toggle_btn.blockSignals(True)
-            self.toggle_btn.setChecked(False)
+            self.toggle_btn.setChecked(bool(checked))
             self.toggle_btn.blockSignals(False)
+            if hasattr(self.toggle_btn, "syncVisualState"):
+                self.toggle_btn.syncVisualState(animated=animated)
+        except Exception:
+            try:
+                self.toggle_btn.blockSignals(False)
+            except Exception:
+                pass
+
+    def _set_pending_start_ui(self, active: bool, animated: bool | None = None) -> None:
+        if animated is None:
+            animated = not active
+        self._set_main_toggle_checked_visual(False, animated=bool(animated))
+        try:
             self.toggle_btn.setEnabled(not active)
         except Exception:
             pass
@@ -9508,11 +10203,13 @@ class MainWindow(QWidget):
             )
         else:
             self.retranslate_ui()
+        self._schedule_overlay_mode_buttons_position()
         self.update_tray_status()
 
     def _queue_toggle_start(self, profile: str) -> None:
         self._pending_toggle_state = True
         self._pending_toggle_profile = profile
+        self._pending_toggle_starting = False
         self._set_pending_start_ui(True)
 
     def _resume_pending_toggle_if_ready(self) -> None:
@@ -9525,15 +10222,37 @@ class MainWindow(QWidget):
         profile = self._pending_toggle_profile
         self._pending_toggle_state = None
         self._pending_toggle_profile = " "
-        self._set_pending_start_ui(False)
+        self._set_pending_start_ui(False, animated=False)
 
+        self._start_main_bypass_after_button_animation(profile)
+
+    def _start_main_bypass_after_button_animation(self, profile: str) -> None:
         if profile in self.presets:
-            self.cb.setCurrentText(profile)
+            self._select_profile_for_programmatic_start(profile)
+        else:
+            profile = self.cb.currentText()
 
-        self.toggle_btn.blockSignals(True)
-        self.toggle_btn.setChecked(True)
-        self.toggle_btn.blockSignals(False)
-        QTimer.singleShot(0, lambda: self.on_toggle(True))
+        self._pending_toggle_starting = True
+        self._set_main_toggle_checked_visual(True, animated=True)
+        self.status_lbl.setText(
+            "Запуск обхода..." if self.lang == "ru" else "Starting bypass..."
+        )
+        self._schedule_overlay_mode_buttons_position()
+        self.update_tray_status()
+
+        def _start_after_animation() -> None:
+            self._pending_toggle_starting = False
+            if not hasattr(self, "toggle_btn") or not self.toggle_btn.isChecked():
+                self.update_tray_status()
+                return
+            if profile in self.presets:
+                self._select_profile_for_programmatic_start(profile)
+            if self._startup_blockers_active():
+                self._queue_toggle_start(self.cb.currentText())
+                return
+            self.on_toggle(True)
+
+        QTimer.singleShot(460, _start_after_animation)
 
     def _run_pending_autostart_if_needed(self):
         if getattr(self, "_pending_toggle_state", None) is True:
@@ -9549,9 +10268,7 @@ class MainWindow(QWidget):
         self._pending_autostart_profile = " "
 
         if profile in self.presets:
-            self.cb.setCurrentText(profile)
-            self.toggle_btn.setChecked(True)
-            QTimer.singleShot(300, lambda: self.on_toggle(True))
+            self._start_main_bypass_after_button_animation(profile)
 
     def start_lists_sync(self):
         if getattr(self, "_lists_check_in_progress", False):
@@ -9623,6 +10340,7 @@ class MainWindow(QWidget):
             )
         except Exception:
             pass
+        self._schedule_overlay_mode_buttons_position()
 
         worker = ReleaseUpdateWorker("apply-gui", latest_ver, download_url, self)
         self._gui_update_worker = worker
@@ -9638,6 +10356,7 @@ class MainWindow(QWidget):
             self.status_lbl.setText(
                 "GUI обновляется, перезапуск..." if self.lang == "ru" else "GUI is updating, restarting..."
             )
+            self._schedule_overlay_mode_buttons_position()
             QTimer.singleShot(250, self._shutdown_and_quit)
             return
 
@@ -10586,6 +11305,8 @@ class MainWindow(QWidget):
         self.status_lbl = QLabel()
         self.status_lbl.setObjectName("statusLabel")
         self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_lbl.setFixedHeight(18)
+        self.status_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout.addWidget(self.status_lbl)
 
         icon_off_path = os.path.join(os.path.dirname(__file__), 'flags', 'toggle-off.ico')
@@ -10739,6 +11460,37 @@ class MainWindow(QWidget):
         self._apply_main_window_style()
         QTimer.singleShot(0, self._position_overlay_mode_buttons)
 
+    def _status_overlay_y(self, button_height: int, fallback_y: int) -> int:
+        title_bottom = 0
+        if hasattr(self, "title_bar"):
+            try:
+                title_bottom = int(self.title_bar.y() + self.title_bar.height())
+            except Exception:
+                title_bottom = 0
+
+        status_y = fallback_y
+        status_h = 18
+        if hasattr(self, "status_lbl"):
+            try:
+                status_h = max(1, int(self.status_lbl.height() or self.status_lbl.sizeHint().height() or 18))
+                candidate_y = int(self.status_lbl.y())
+                max_reasonable_y = title_bottom + 36
+                if title_bottom <= candidate_y <= max_reasonable_y:
+                    status_y = candidate_y
+                else:
+                    status_y = title_bottom + 6
+            except Exception:
+                status_y = title_bottom + 6
+
+        y = int(status_y + (status_h - int(button_height)) / 2)
+        min_y = max(8, title_bottom + 4)
+        max_y = max(min_y, int(self.height()) - int(button_height) - 8)
+        return max(min_y, min(y, max_y))
+
+    def _schedule_overlay_mode_buttons_position(self) -> None:
+        self._position_overlay_mode_buttons()
+        QTimer.singleShot(0, self._position_overlay_mode_buttons)
+
     def _apply_main_window_style(self) -> None:
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -10839,8 +11591,14 @@ class MainWindow(QWidget):
         self._update_ai_mode_ui()
         self._update_telegram_mode_ui()
         self._update_game_mode_ui()
+        self._schedule_overlay_mode_buttons_position()
 
     def _position_overlay_mode_buttons(self) -> None:
+        try:
+            if self.layout() is not None:
+                self.layout().activate()
+        except Exception:
+            pass
         self._position_ai_mode_button()
         self._position_telegram_mode_button()
 
@@ -10848,14 +11606,7 @@ class MainWindow(QWidget):
         if not hasattr(self, "ai_mode_btn"):
             return
         x = 12
-        y = 40
-        if hasattr(self, "status_lbl"):
-            try:
-                y = max(8, int(self.status_lbl.y() + (self.status_lbl.height() - self.ai_mode_btn.height()) / 2))
-            except Exception:
-                y = 40
-        if hasattr(self, "title_bar"):
-            y = max(y, int(self.title_bar.height() + 6))
+        y = self._status_overlay_y(self.ai_mode_btn.height(), 40)
         self.ai_mode_btn.move(x, y)
         self.ai_mode_btn.raise_()
 
@@ -10863,14 +11614,7 @@ class MainWindow(QWidget):
         if not hasattr(self, "telegram_mode_btn"):
             return
         x = max(8, self.width() - self.telegram_mode_btn.width() - 12)
-        y = 38
-        if hasattr(self, "status_lbl"):
-            try:
-                y = max(8, int(self.status_lbl.y() + (self.status_lbl.height() - self.telegram_mode_btn.height()) / 2))
-            except Exception:
-                y = 38
-        if hasattr(self, "title_bar"):
-            y = max(y, int(self.title_bar.height() + 4))
+        y = self._status_overlay_y(self.telegram_mode_btn.height(), 38)
         self.telegram_mode_btn.move(x, y)
         self.telegram_mode_btn.raise_()
         if hasattr(self, "telegram_help_btn"):
@@ -10957,8 +11701,16 @@ class MainWindow(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         _update_rounded_window_mask(self)
-        self._position_ai_mode_button()
-        self._position_telegram_mode_button()
+        self._position_overlay_mode_buttons()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._schedule_overlay_mode_buttons_position()
+
+    def event(self, event):
+        if event.type() in (QEvent.Type.LayoutRequest, QEvent.Type.ShowToParent):
+            QTimer.singleShot(0, self._position_overlay_mode_buttons)
+        return super().event(event)
 
     def refresh_dns_malw_link_indicator(self) -> None:
         try:
@@ -11072,7 +11824,7 @@ class MainWindow(QWidget):
             self._dns_malw_link_poll_timer.setInterval(900)
             self._dns_malw_link_poll_timer.timeout.connect(self._poll_dns_malw_link_status)
         self._dns_malw_link_expected_active = bool(expected_active)
-        self._dns_malw_link_poll_attempts = 30
+        self._dns_malw_link_poll_attempts = 150
         self._dns_malw_link_poll_anchor = _safe_int_setting(self.settings, DNS_MALW_LAST_ATTEMPT_KEY, 0)
         self._dns_malw_link_poll_timer.start()
 
@@ -11174,9 +11926,9 @@ class MainWindow(QWidget):
             )
         elif active:
             tooltip = (
-                "Telegram Mode включён: Telegram Web + Desktop proxy"
+                "Telegram Mode включён: Web через hosts, Desktop через MTProto proxy"
                 if self.lang == "ru" else
-                "Telegram Mode enabled: Telegram Web + Desktop proxy"
+                "Telegram Mode enabled: Web via hosts, Desktop via MTProto proxy"
             )
         else:
             tooltip = (
@@ -11193,6 +11945,8 @@ class MainWindow(QWidget):
         self._update_telegram_mode_ui()
         if self.telegram_mode_enabled:
             self._start_telegram_mode_worker("restore")
+        elif _is_telegram_hosts_enabled_by_app(self.settings):
+            self._start_telegram_mode_worker("cleanup")
 
     def _start_telegram_mode_worker(self, action: str) -> None:
         if self._telegram_mode_worker is not None and self._telegram_mode_worker.isRunning():
@@ -11211,10 +11965,20 @@ class MainWindow(QWidget):
 
         self.settings.sync()
         self.telegram_mode_enabled = _is_telegram_mode_enabled(self.settings)
-        self._set_telegram_mode_busy(False)
 
         error = str(result.get("error") or "").strip()
-        if error:
+        hosts_permission_error = bool(result.get("hosts_permission_error")) or _is_hosts_permission_error_message(error)
+        launched_hosts_helper = False
+        if hosts_permission_error and action in {"enable", "disable"}:
+            launched_hosts_helper = _run_self_as_admin_for_telegram_hosts_action(action)
+            if launched_hosts_helper:
+                self._start_telegram_hosts_poll(action, expected_enabled=(action == "enable"))
+
+        if not launched_hosts_helper:
+            self._set_telegram_mode_busy(False)
+
+        should_show_error = bool(error) and action in {"enable", "disable"} and not launched_hosts_helper
+        if should_show_error:
             title = "Telegram Mode"
             text = (
                 f"Не удалось применить Telegram Mode:\n{error}"
@@ -11223,55 +11987,159 @@ class MainWindow(QWidget):
             )
             _show_centered_message(self, QMessageBox.Icon.Warning, title, text)
 
-        if result.get("ok") and action == "enable":
-            self._show_telegram_proxy_hint_if_needed(int(result.get("proxy_port") or _get_telegram_proxy_port(self.settings)))
+        if result.get("ok") and action == "enable" and result.get("proxy_running"):
+            self._handle_telegram_proxy_ready_after_enable(int(result.get("proxy_port") or _get_telegram_proxy_port(self.settings)))
 
-        if action in {"enable", "disable"} and hasattr(self, "toggle_btn") and self.toggle_btn.isChecked():
-            self._schedule_game_mode_restart_after_change(
-                "Применение Telegram Mode..."
-                if self.lang == "ru" else
-                "Applying Telegram Mode..."
+        self._update_telegram_mode_ui()
+        if not launched_hosts_helper:
+            self._resume_pending_toggle_if_ready()
+
+    def _telegram_proxy_has_client_connection(self) -> bool:
+        try:
+            stats = self.telegram_proxy.stats()
+            successful = (
+                int(stats.get("connections_ws", 0) or 0)
+                + int(stats.get("connections_tcp_fallback", 0) or 0)
+                + int(stats.get("connections_cfproxy", 0) or 0)
             )
+            if successful > 0:
+                return True
+        except Exception:
+            pass
+        return _telegram_desktop_has_local_proxy_connection(_get_telegram_proxy_port(self.settings))
 
+    def _open_telegram_proxy_link(self) -> bool:
+        try:
+            return bool(QDesktopServices.openUrl(QUrl(_get_telegram_proxy_link(self.settings))))
+        except Exception:
+            return False
+
+    def _handle_telegram_proxy_ready_after_enable(self, port: int) -> None:
+        self._schedule_telegram_proxy_autoconnect(port)
+
+    def _schedule_telegram_proxy_autoconnect(self, port: int) -> None:
+        del port
+        self._telegram_proxy_autoconnect_generation += 1
+        generation = int(self._telegram_proxy_autoconnect_generation)
+
+        def _check_existing_or_launch() -> None:
+            if generation != int(getattr(self, "_telegram_proxy_autoconnect_generation", 0)):
+                return
+            if not _is_telegram_mode_enabled(self.settings):
+                return
+            if self._telegram_proxy_has_client_connection():
+                return
+
+            telegram_was_running = _telegram_desktop_process_is_running()
+            if telegram_was_running:
+                self._wait_for_telegram_proxy_connection_before_link(
+                    generation,
+                    deadline=time.monotonic() + 10.0,
+                )
+                return
+
+            launched_plain = _launch_telegram_desktop_app()
+            if launched_plain:
+                self._wait_for_telegram_proxy_connection_before_link(
+                    generation,
+                    deadline=time.monotonic() + 14.0,
+                )
+                return
+
+            self._send_telegram_proxy_link_if_still_needed(generation)
+
+        QTimer.singleShot(1400, _check_existing_or_launch)
+
+    def _wait_for_telegram_proxy_connection_before_link(self, generation: int, deadline: float) -> None:
+        if generation != int(getattr(self, "_telegram_proxy_autoconnect_generation", 0)):
+            return
+        if not _is_telegram_mode_enabled(self.settings):
+            return
+        if self._telegram_proxy_has_client_connection():
+            return
+        if time.monotonic() < float(deadline):
+            QTimer.singleShot(
+                900,
+                lambda: self._wait_for_telegram_proxy_connection_before_link(
+                    generation,
+                    deadline,
+                ),
+            )
+            return
+        self._send_telegram_proxy_link_if_still_needed(generation)
+
+    def _send_telegram_proxy_link_if_still_needed(self, generation: int) -> None:
+        if generation != int(getattr(self, "_telegram_proxy_autoconnect_generation", 0)):
+            return
+        if not _is_telegram_mode_enabled(self.settings):
+            return
+        if self._telegram_proxy_has_client_connection():
+            return
+
+        self._open_telegram_proxy_link()
+
+    def _start_telegram_hosts_poll(self, action: str, expected_enabled: bool) -> None:
+        if self._telegram_mode_hosts_poll_timer is None:
+            self._telegram_mode_hosts_poll_timer = QTimer(self)
+            self._telegram_mode_hosts_poll_timer.setInterval(900)
+            self._telegram_mode_hosts_poll_timer.timeout.connect(self._poll_telegram_hosts_status)
+        self._telegram_mode_hosts_pending_action = (action or "").strip().lower()
+        self._telegram_mode_hosts_expected_enabled = bool(expected_enabled)
+        self._telegram_mode_hosts_poll_attempts = 30
+        self._telegram_mode_hosts_poll_anchor = _safe_int_setting(self.settings, TELEGRAM_MODE_HOSTS_LAST_ATTEMPT_KEY, 0)
+        self._set_telegram_mode_busy(True)
+        self._telegram_mode_hosts_poll_timer.start()
+
+    def _poll_telegram_hosts_status(self) -> None:
+        self.settings.sync()
+        last_attempt = _safe_int_setting(self.settings, TELEGRAM_MODE_HOSTS_LAST_ATTEMPT_KEY, 0)
+        last_status = str(self.settings.value(TELEGRAM_MODE_HOSTS_LAST_STATUS_KEY, "") or "").strip().lower()
+        last_error = str(self.settings.value(TELEGRAM_MODE_HOSTS_LAST_ERROR_KEY, "") or "").strip()
+        self._telegram_mode_hosts_poll_attempts -= 1
+
+        if last_attempt <= self._telegram_mode_hosts_poll_anchor and self._telegram_mode_hosts_poll_attempts > 0:
+            return
+
+        if self._telegram_mode_hosts_poll_timer is not None:
+            self._telegram_mode_hosts_poll_timer.stop()
+
+        action = self._telegram_mode_hosts_pending_action
+        expected_enabled = bool(self._telegram_mode_hosts_expected_enabled)
+        hosts_enabled = _is_telegram_hosts_enabled_by_app(self.settings)
+        ok = bool(last_status == "ok" and hosts_enabled == expected_enabled)
+        timed_out = self._telegram_mode_hosts_poll_attempts <= 0 and last_attempt <= self._telegram_mode_hosts_poll_anchor
+
+        if ok:
+            if action == "disable":
+                _set_telegram_last_error("", self.settings)
+            elif action == "enable" and not self.telegram_proxy.is_running():
+                _set_telegram_last_error("", self.settings)
+        else:
+            error = last_error or ("timeout" if timed_out else "status-check-failed")
+            _set_telegram_last_error(error, self.settings)
+            if action in {"enable", "disable"}:
+                text = (
+                    f"Не удалось изменить hosts для Telegram Mode:\n{error}"
+                    if self.lang == "ru" else
+                    f"Failed to update hosts for Telegram Mode:\n{error}"
+                )
+                _show_centered_message(self, QMessageBox.Icon.Warning, "Telegram Mode", text)
+
+        self.telegram_mode_enabled = _is_telegram_mode_enabled(self.settings)
+        self._telegram_mode_hosts_pending_action = ""
+        self._set_telegram_mode_busy(False)
         self._update_telegram_mode_ui()
         self._resume_pending_toggle_if_ready()
 
-    def _show_telegram_proxy_hint_if_needed(self, port: int) -> None:
-        first_hint_was_shown = bool(
-            self.settings.value(TELEGRAM_MODE_FIRST_PROXY_HINT_SHOWN_KEY, False, type=bool)
-        )
-
-        opened = False
-        try:
-            opened = QDesktopServices.openUrl(QUrl(f"tg://socks?server=127.0.0.1&port={int(port)}"))
-        except Exception:
-            opened = False
-
-        if (not first_hint_was_shown) or (not opened):
-            self.settings.setValue(TELEGRAM_MODE_FIRST_PROXY_HINT_SHOWN_KEY, True)
-            self.settings.sync()
-            _show_centered_message(
-                self,
-                QMessageBox.Icon.NoIcon,
-                "Telegram Mode",
-                (
-                    "Если Telegram Desktop не предложил добавить proxy автоматически:\n"
-                    f"Настройки -> Продвинутые -> Тип соединения -> SOCKS5\n"
-                    f"IP: 127.0.0.1    Port: {int(port)}"
-                    if self.lang == "ru" else
-                    "If Telegram Desktop did not offer to add the proxy automatically:\n"
-                    f"Settings -> Advanced -> Connection type -> SOCKS5\n"
-                    f"IP: 127.0.0.1    Port: {int(port)}"
-                ),
-            )
-
     def show_telegram_mode_help(self) -> None:
         port = _get_telegram_proxy_port(self.settings)
-        if _is_telegram_mode_enabled(self.settings):
-            try:
-                QDesktopServices.openUrl(QUrl(f"tg://socks?server=127.0.0.1&port={int(port)}"))
-            except Exception:
-                pass
+        if (
+            _is_telegram_mode_enabled(self.settings)
+            and not bool(getattr(self, "_telegram_help_proxy_link_sent_this_session", False))
+            and not self._telegram_proxy_has_client_connection()
+        ):
+            self._telegram_help_proxy_link_sent_this_session = True
+            self._open_telegram_proxy_link()
 
         try:
             if self._telegram_help_msg is not None and self._telegram_help_msg.isVisible():
@@ -11280,21 +12148,20 @@ class MainWindow(QWidget):
             pass
 
         text = (
-            "Сначала включите Telegram Mode, затем, если у вас не появилось автоматическое "
-            "добавление SOCKS5, нажмите снова на \"вопросик\".\n\n"
-            "Если по какой-то причине у вас не работает автоматическое добавление протокола, "
-            "выполните инструкцию вручную:\n\n"
-            "Telegram Desktop:\n"
-            "Настройки -> Продвинутые -> Тип соединения -> Использовать свой proxy\n"
-            f"SOCKS5: 127.0.0.1:{int(port)}"
+            "Как это работает: приложение добавит записи для Telegram Web в hosts "
+            "и запустит локальный MTProto proxy.\n\n"
+            "После включения Telegram Mode, откроется Telegram Desktop(если скачен) и через несколько секунд появится запрос на подключение, нажмите 'Подключить'.\n"
+            "Если автоматическое поделючение не появилось, попробуйте нажать на 'вопросик'. Если и это не помогло, добавьте протокол вручную.\n\n"
+            "Как добавить вручную: Настройки->Тип соединения->Использовать собственный прокси->MTProto proxy.\n"
+            f"Сервер: 127.0.0.1\nПорт: {int(port)}\n"
+            f"Secret: dd{_get_telegram_proxy_secret(self.settings)}"
             if self.lang == "ru" else
-            "First enable Telegram Mode. If SOCKS5 is not added automatically, click the "
-            "\"question mark\" again.\n\n"
-            "If automatic protocol setup does not work for some reason, follow this manual "
-            "instruction:\n\n"
-            "Telegram Desktop:\n"
-            "Settings -> Advanced -> Connection type -> Use custom proxy\n"
-            f"SOCKS5: 127.0.0.1:{int(port)}"
+            "Enable Telegram Mode: the app will add Telegram Web hosts entries "
+            "and start a local MTProto proxy. The main bypass is not started.\n\n"
+            "Telegram Web: open web.telegram.org in your browser.\n\n"
+            "Telegram Desktop: use MTProto proxy, not SOCKS5.\n"
+            f"Server: 127.0.0.1\nPort: {int(port)}\n"
+            f"Secret: dd{_get_telegram_proxy_secret(self.settings)}"
         )
 
         msg = QMessageBox(self)
@@ -11319,8 +12186,9 @@ class MainWindow(QWidget):
         _apply_telegram_mode_files(True, self.settings)
         if not self.telegram_proxy.is_running():
             port = _get_telegram_proxy_port(self.settings)
+            secret = _get_telegram_proxy_secret(self.settings)
             try:
-                self.telegram_proxy.start(port)
+                self.telegram_proxy.start(port, secret)
                 _set_telegram_last_error("", self.settings)
             except Exception as e:
                 _set_telegram_last_error(str(e), self.settings)
@@ -11365,6 +12233,7 @@ class MainWindow(QWidget):
             )
         except Exception:
             pass
+        self._schedule_overlay_mode_buttons_position()
         self._game_mode_restart_timer.start()
 
     def _start_game_mode_restart_worker(self) -> None:
@@ -11416,6 +12285,10 @@ class MainWindow(QWidget):
             return
 
         try:
+            _ensure_user_lists_initialized()
+            _apply_game_mode_state_to_core(self.settings)
+            _sync_telegram_runtime_lists(self.settings)
+            _rebuild_runtime_lists(self.settings)
             self.process = self._launch_profile_process(script)
             self.status_lbl.setText(self.t("On: {}", profile))
         except Exception as e:
@@ -11425,9 +12298,7 @@ class MainWindow(QWidget):
                 "Ошибка" if self.lang == "ru" else "Error",
                 str(e),
             )
-            self.toggle_btn.blockSignals(True)
-            self.toggle_btn.setChecked(False)
-            self.toggle_btn.blockSignals(False)
+            self._set_main_toggle_checked_visual(False, animated=True)
             self.process = None
             self.status_lbl.setText(self.t("Off"))
         self.update_tray_status()
@@ -11477,7 +12348,7 @@ class MainWindow(QWidget):
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         )
 
-        if self.game_mode_enabled:
+        if self.game_mode_enabled or _is_telegram_mode_enabled(self.settings):
             try:
                 commandline = _build_game_mode_winws_command(script, self.core_dir, self.settings)
                 if not commandline:
@@ -11494,7 +12365,7 @@ class MainWindow(QWidget):
                     close_fds=True,
                 )
             except Exception as e:
-                print("Game mode launcher fallback:", e)
+                print("Direct winws launcher fallback:", e)
 
         inp_path = _ensure_no_update_input()
         fin = None
@@ -12088,9 +12959,13 @@ def _handle_existing_instance_before_start(app: QApplication) -> bool:
 
 def main():
     dns_cli_action = None
+    telegram_hosts_cli_action = None
     for arg in sys.argv[1:]:
         if arg.startswith("--dns-malw-link-action="):
             dns_cli_action = arg.split("=", 1)[1].strip().lower()
+            break
+        if arg.startswith("--telegram-mode-hosts-action="):
+            telegram_hosts_cli_action = arg.split("=", 1)[1].strip().lower()
             break
 
     if dns_cli_action in {"enable", "disable"}:
@@ -12099,6 +12974,11 @@ def main():
             _enable_dns_malw_link(settings)
         else:
             _disable_dns_malw_link(settings)
+        return
+
+    if telegram_hosts_cli_action in {"enable", "disable"}:
+        settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
+        _apply_flowseal_telegram_hosts(telegram_hosts_cli_action == "enable", settings)
         return
 
     if sys.platform.startswith("win"):
