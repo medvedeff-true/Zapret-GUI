@@ -13,7 +13,11 @@
 
 <img width="1065" height="484" alt="Анимация228" src="https://github.com/user-attachments/assets/966f47d1-259d-426d-a7d7-460e1f0ee627" />
 
-<img width="616" height="568" alt="press-release2" src="https://github.com/user-attachments/assets/03ed73f7-685c-4046-bc54-a480f6c5e81b" />
+<div align="center">
+   
+<img width="358" height="390" alt="tray" src="https://github.com/user-attachments/assets/be193b84-adb9-4fad-860b-9a34edf20205" />
+
+</div>
 
 ---
 
@@ -203,14 +207,41 @@ Built on Python + PyQt6. One-click launch, multi-language support, no installati
 
 <img width="1065" height="484" alt="Анимация228" src="https://github.com/user-attachments/assets/966f47d1-259d-426d-a7d7-460e1f0ee627" />
 
-<img width="616" height="568" alt="press-release2" src="https://github.com/user-attachments/assets/03ed73f7-685c-4046-bc54-a480f6c5e81b" />
+<div align="center">
+   
+<img width="358" height="390" alt="tray" src="https://github.com/user-attachments/assets/be193b84-adb9-4fad-860b-9a34edf20205" />
+
+</div>
 
 ---
 
 <details>
 <summary><strong>🛠 Latest Updates</strong></summary>
 
-<img width="1828" height="823" alt="image" src="https://github.com/user-attachments/assets/5ebf584f-9378-47c6-b53e-cac47e2b20bd" />
+# 2.1.1
+
+## ✨ Whats new
+
+### Add special function for unblock Telegram with mtproto proxy.
+
+<img width="69" height="44" alt="{A8A7F8AB-0144-4001-BA1E-DE7431F9D748}" src="https://github.com/user-attachments/assets/404ea57a-e504-4105-988f-317dfb00a94c" />
+
+<img width="1146" height="640" alt="telegram" src="https://github.com/user-attachments/assets/10efe408-a8b4-43d8-ab05-6a9cf06235f3" />
+
+Special thanks [Flowseal](https://github.com/Flowseal/tg-ws-proxy)
+
+---
+
+### New design of app
+
+<img width="1065" height="484" alt="Анимация228" src="https://github.com/user-attachments/assets/cf0dad01-7aa3-4087-8768-f48d6ae19ba8" />
+
+
+---
+
+⚠️If there are problems with the startup, delete the entire **ZapretGUI** folder along the way **C:\Users\user ** and restart the program. And add antivirus exceptions. ZapretGUI.exe and the entire **ZapretGUI** folder along the way**C:\Users\user**
+
+# 2.0
 
 # Added:
 
@@ -251,12 +282,6 @@ I collected domains and IPs of blocked gaming services from Issues across variou
 - Fixed `hosts` access errors when using AI DNS.
 - Fixed icon issues on displays with scaling enabled.
 
-## VirusTotal:
-https://www.virustotal.com/gui/file/4a9bace5a429d2878c8cf8331c8f819dd91db512f3fa1694dc8137ca7b9b58ee?nocache=1
-More details in [Issue](https://github.com/medvedeff-true/Zapret-GUI/issues/5)
-
-## ⚠️ Everything was tested quickly. If you run into any issues, please leave feedback via [Issues](https://github.com/medvedeff-true/Zapret-GUI/issues)
-
 </details>
 
 ---
@@ -268,6 +293,7 @@ More details in [Issue](https://github.com/medvedeff-true/Zapret-GUI/issues/5)
 - 🎮 Gaming mode with configurable TCP/UDP filters and bypass options for gaming services
 - 📡 IP Manager for convenient IP and subnet management
 - 🤖 AI DNS for accessing AI services without a VPN
+- 💥 Unblock Telegram Desktop and Web
 - 🔄 Automatic updates for gaming blocklists
 - 🧠 Auto-start bypass when selecting/switching a profile
 - 🗂 Improved support for user-managed lists
