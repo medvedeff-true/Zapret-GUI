@@ -11,7 +11,7 @@
 
 </div>
 
-<img width="1485" height="662" alt="Анимация228" src="https://github.com/user-attachments/assets/a5b87d18-90e4-4694-86e0-ee8dcda82af6" />
+<img width="1065" height="484" alt="Анимация228" src="https://github.com/user-attachments/assets/966f47d1-259d-426d-a7d7-460e1f0ee627" />
 
 <img width="616" height="568" alt="press-release2" src="https://github.com/user-attachments/assets/03ed73f7-685c-4046-bc54-a480f6c5e81b" />
 
@@ -20,7 +20,34 @@
 <details>
 <summary><strong>🛠 Последние обновления <img width="19" height="20" alt="277031mbmmfoabln" src="https://github.com/user-attachments/assets/6161bda3-fa90-40be-8e71-c077bf96af9d" /> тык чтобы развернуть</strong></summary>
 
-<img width="1828" height="823" alt="image" src="https://github.com/user-attachments/assets/5ebf584f-9378-47c6-b53e-cac47e2b20bd" />
+# 2.1.1
+
+## ✨ Что нового
+
+### Добавлен отдельный режим для Telegram.
+
+<img width="69" height="44" alt="{A8A7F8AB-0144-4001-BA1E-DE7431F9D748}" src="https://github.com/user-attachments/assets/404ea57a-e504-4105-988f-317dfb00a94c" />
+
+Теперь Telegram Desktop можно разблокировать вместе с web версией.  
+Для этого нажмите на кнопку в виде логотипа Telegram.
+
+<img width="1146" height="640" alt="telegram" src="https://github.com/user-attachments/assets/10efe408-a8b4-43d8-ab05-6a9cf06235f3" />
+
+За метод спасибо [Flowseal](https://github.com/Flowseal/tg-ws-proxy)
+
+---
+
+### Добавлен новый дизайн для всего приложения
+
+<img width="1065" height="484" alt="Анимация228" src="https://github.com/user-attachments/assets/cf0dad01-7aa3-4087-8768-f48d6ae19ba8" />
+
+Обновлена визуальная составляющая всех окон.
+
+---
+
+⚠️Если возникают проблемы с запуском, удалите полностью папку **ZapretGUI** по пути **C:\Users\user** и перезапустите программу. И внесите в исключения антивируса ZapretGUI.exe и всю папку **ZapretGUI** по пути **C:\Users\user**
+
+# 2.0
 
 # Добавлено:
 
@@ -61,12 +88,6 @@
 - Исправлены ошибки доступа к hosts при Ai DNS.
 - Исправлены проблемы с иконками на экранах с масштабированием.
 
-## VirusTotal:
-https://www.virustotal.com/gui/file/4a9bace5a429d2878c8cf8331c8f819dd91db512f3fa1694dc8137ca7b9b58ee?nocache=1
-Подробнее в [Issue ](https://github.com/medvedeff-true/Zapret-GUI/issues/5)
-
-## ⚠️ Всё протестировано на скорую руку. При появлении проблем, просьба держать обратную связь через [Issues](https://github.com/medvedeff-true/Zapret-GUI/issues)
-
 </details>
 
 ---
@@ -76,14 +97,15 @@ https://www.virustotal.com/gui/file/4a9bace5a429d2878c8cf8331c8f819dd91db512f3fa
 - ✅ Запуск и остановка в один клик
 - 🌐 Предустановленные профили (Flowseal Core) для разных методов обхода
 - 🎮 Игровой режим с настройкой TCP/UDP-фильтров и обхода игровых сервисов
-- 📡 Менеджер IP для удобного управления IP и подсетями
+- 📡 Менеджер доменов и IP для удобного управления заблокированными сайтами и подсетями
 - 🤖 AI DNS для доступа к нейросетям без VPN
+- 💥 Разблокировка Telegram Desktop и Web
 - 🔄 Автоматическое обновление игровых списков
 - 🧠 Автоматический запуск обхода при выборе/переключении профиля
 - 🗂 Улучшенная работа с пользовательскими списками
-- 🛠 Полноценная работа в трее: сворачивание обычной кнопкой окна, управление профилями и состоянием из трея
-- 🔄 Сброс соединений winws и остановка служб прямо из GUI (через `uninstall.bat`)
-- 🔁 Проверка обновлений и обновление Core (Flowseal) прямо из настроек + отображение версий GUI/Core
+- 🛠 Полноценная работа в трее: сворачивание обычной кнопкой окна, управление профилями, функциями и состоянием из трея
+- 🔄 Сброс соединений winws и остановка служб прямо из GUI
+- 🔁 Проверка обновлений и обновление Core (Flowseal) / Gui прямо из настроек + отображение версий GUI/Core
 - 🌍 Выбор языка: русский и английский
 - 🖥 Автозапуск и запуск в свернутом виде
 
@@ -113,6 +135,12 @@ https://www.virustotal.com/gui/file/4a9bace5a429d2878c8cf8331c8f819dd91db512f3fa
 7. Если нужно полностью оборвать соединения winws/остановить службы — нажмите **Сбросить соединения winws** (откроется консоль, дойдёт до `Success`, подождёт 5 секунд и закроется)
 
 > Всё подробно описано в инструкции внутри программы. Если что-то непонятно — откройте инструкцию и следуйте шагам.
+
+### Краткая обучалка как добавить свой сайт в обход:
+<img width="1146" height="640" alt="add" src="https://github.com/user-attachments/assets/f194234c-0467-44f5-bd68-b3186505f194" />
+
+### Краткий показ как включить обход Telegram
+<img width="1146" height="640" alt="telegram" src="https://github.com/user-attachments/assets/810c3ea4-2dbf-41bc-93db-40d24fb25bdb" />
 
 ---
 
@@ -173,7 +201,7 @@ Built on Python + PyQt6. One-click launch, multi-language support, no installati
 
 </div>
 
-<img width="1485" height="662" alt="Анимация228" src="https://github.com/user-attachments/assets/a5b87d18-90e4-4694-86e0-ee8dcda82af6" />
+<img width="1065" height="484" alt="Анимация228" src="https://github.com/user-attachments/assets/966f47d1-259d-426d-a7d7-460e1f0ee627" />
 
 <img width="616" height="568" alt="press-release2" src="https://github.com/user-attachments/assets/03ed73f7-685c-4046-bc54-a480f6c5e81b" />
 
