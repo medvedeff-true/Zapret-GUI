@@ -11,6 +11,9 @@
 
 </div>
 
+> [!Caution]
+> #### У меня нет youtube каналов, я не заливаю ZapretGUI на форумы или файлообменники. Программа распространятеся **только на [GitHub](https://github.com/medvedeff-true/Zapret-GUI/releases) и в моём [Boosty](https://boosty.to/medvedeff)**. Не качайте ZapretGUI с других сайтов, это могут быть вирусные сборки.
+
 <img width="1065" height="484" alt="Анимация228" src="https://github.com/user-attachments/assets/966f47d1-259d-426d-a7d7-460e1f0ee627" />
 
 <div align="center">
