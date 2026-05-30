@@ -122,7 +122,7 @@
 
 Установка не требуется. Просто:
 
-1. Скачайте последний релиз `Zapret_GUI.zip` из раздела [Releases](https://github.com/medvedeff-true/Zapret-GUI/releases/tag/v1.7.0) и разархивируйте в любое удобное место
+1. Скачайте последний релиз `Zapret_GUI.zip` из раздела [Releases](https://github.com/medvedeff-true/Zapret-GUI/releases) и разархивируйте в любое удобное место
 2. Запустите файл `Zapret_GUI.exe` (при необходимости — от имени администратора)
 
 > ⚠️ Если Windows выдаёт предупреждение, нажмите **Подробнее → Всё равно запустить**
@@ -312,7 +312,7 @@ I collected domains and IPs of blocked gaming services from Issues across variou
 
 No installation required. Just:
 
-1. Download the latest `Zapret_GUI.zip` file from [Releases](https://github.com/medvedeff-true/Zapret-GUI/releases/tag/v1.7.0) and extract
+1. Download the latest `Zapret_GUI.zip` file from [Releases](https://github.com/medvedeff-true/Zapret-GUI/releases) and extract
 2. Run `Zapret_GUI.exe` (optionally as administrator)
 
 > ⚠️ If Windows warns you, click **More info → Run anyway**
