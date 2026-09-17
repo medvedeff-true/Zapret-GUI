@@ -1,0 +1,107 @@
+{
+  "schema": 1,
+  "version": "cygwin-curl-2026.07-minimal",
+  "source": "https://github.com/bol-van/zapret-win-bundle",
+  "files": [
+    {
+      "path": "cygwin/bin/bash.exe",
+      "size": 854035,
+      "sha256": "df601377e3c85f60df06a5a1b3be87ec2b1892580be86bd39d51e42c03bee2b1"
+    },
+    {
+      "path": "cygwin/bin/cyggcc_s-seh-1.dll",
+      "size": 75283,
+      "sha256": "084a133ed4ece1eb8569c3ce5922b718773e1e714a37a24f8f47ad29da48b47b"
+    },
+    {
+      "path": "cygwin/bin/cygiconv-2.dll",
+      "size": 1088019,
+      "sha256": "30ac96022752ed5ddc302726e984a9eadee2de2220d4b4b15c983c9221e08fa7"
+    },
+    {
+      "path": "cygwin/bin/cygintl-8.dll",
+      "size": 107027,
+      "sha256": "10970f1d13efd676b309022d1e39f856e5c0afd1b074e3bc3e5bfbd822a61019"
+    },
+    {
+      "path": "cygwin/bin/cygncursesw-10.dll",
+      "size": 344595,
+      "sha256": "0e9f315a4baecfcf4dd28b9414fb11823c2c67bb0fa0fd3edf24979cfbbb8e9c"
+    },
+    {
+      "path": "cygwin/bin/cygreadline7.dll",
+      "size": 262675,
+      "sha256": "3ba36ba4cef36a518bb6c948fcf5c08d3af288fe5486566d5a74eac92e0e3147"
+    },
+    {
+      "path": "cygwin/bin/cygwin1.dll",
+      "size": 2954293,
+      "sha256": "103104a52e5293ce418944725df19e2bf81ad9269b9a120d71d39028e821499b"
+    },
+    {
+      "path": "cygwin/bin/cygz.dll",
+      "size": 89619,
+      "sha256": "140e12f972a08f81e9eccecf0548b68fde84534b8fd52b8b6c7d982f516bee0b"
+    },
+    {
+      "path": "cygwin/bin/cygzstd-1.dll",
+      "size": 665107,
+      "sha256": "541ef8a939c58c50f9ace309b362f49fb9b485cd7d2a4adbf8314ca0ec114942"
+    },
+    {
+      "path": "cygwin/etc/pki/tls/certs/ca-bundle.crt",
+      "size": 641160,
+      "sha256": "80f6d0f0568b65fcea54c3085a26276d664d1e7f78f38300e28e1f22770034da"
+    },
+    {
+      "path": "cygwin/etc/pki/tls/openssl.cnf",
+      "size": 11229,
+      "sha256": "24b1b1d2c08d740c1c60097a6cfff0b0af26f05fd66275ab75c12d6adbf8b36c"
+    },
+    {
+      "path": "cygwin/usr/local/bin/curl.exe",
+      "size": 261632,
+      "sha256": "84222d19a6ee80f5b8fbd915315f162ef28cd647b9d8535d8206025a4a14e655"
+    },
+    {
+      "path": "cygwin/usr/local/bin/curl-kyber.exe",
+      "size": 7211008,
+      "sha256": "2169993de033c293b364eba3c7d569a0484e367706d0ecd757956a326e260a6a"
+    },
+    {
+      "path": "cygwin/usr/local/bin/cygcrypto-3.dll",
+      "size": 5220864,
+      "sha256": "5d81da0c45a5b26c637a877fa4d623d84736ec6e0092061984c8681f4fa9905d"
+    },
+    {
+      "path": "cygwin/usr/local/bin/cygcurl-4.dll",
+      "size": 698880,
+      "sha256": "a17a234ec2d8415caf662adeab78a134fcd9e3339c0caf50545574a4326dde66"
+    },
+    {
+      "path": "cygwin/usr/local/bin/cygidn2-0.dll",
+      "size": 339456,
+      "sha256": "e6c0f8a229a160fa26ecb45586b458ed66a3b5e419b3c255c8bb783a0ff17eee"
+    },
+    {
+      "path": "cygwin/usr/local/bin/cygnghttp2-14.dll",
+      "size": 173056,
+      "sha256": "19fc3ff64218807f80cae77e264da5334d2aa74c1f67f0f38a9165467d765551"
+    },
+    {
+      "path": "cygwin/usr/local/bin/cygnghttp3-9.dll",
+      "size": 151040,
+      "sha256": "1b08345cd903a07779402b2c14a7f7bd9dd0c0b8acf8409ed74b7d45dd41dc6a"
+    },
+    {
+      "path": "cygwin/usr/local/bin/cygssl-3.dll",
+      "size": 1001472,
+      "sha256": "43db09f56c6bd6f687e445c789d9e972610c2dc09b7029348628a5ce4a9d2967"
+    },
+    {
+      "path": "cygwin/usr/local/bin/idn2.exe",
+      "size": 190005,
+      "sha256": "95c8c52ea5f2abccc3225a6e4146fa05d8b97b96506d66dab4bcfb841015ea95"
+    }
+  ]
+}
