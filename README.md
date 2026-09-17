@@ -152,9 +152,9 @@
 
 ---
 
-## 💡Структура проекта
-
 <a name="struct"></a>
+
+## 💡Структура проекта
 
 <details>
 <summary><strong>Полное описание структуры <img width="19" height="20" alt="277031mbmmfoabln" src="https://github.com/user-attachments/assets/6161bda3-fa90-40be-8e71-c077bf96af9d" /> нажми на меня</strong></summary>
@@ -708,9 +708,9 @@ No installation required. Just:
 
 ---
 
-## 💡 Project Structure
-
 <a name="structen"></a>
+
+## 💡 Project Structure
 
 <details>
 <summary><strong>Full structure description <img width="19" height="20" alt="277031mbmmfoabln" src="https://github.com/user-attachments/assets/6161bda3-fa90-40be-8e71-c077bf96af9d" /> click me</strong></summary>
