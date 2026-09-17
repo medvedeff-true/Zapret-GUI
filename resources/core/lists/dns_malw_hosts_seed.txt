@@ -1,0 +1,74 @@
+# ZapretGUI Ai DNS offline seed
+# Source snapshot: ImMALWARE/dns.malw.link hosts, 2026-08-29
+# This is used only if every online source is unavailable. The enabled mode
+# always refreshes it from the upstream hosts file when a connection is present.
+
+# OpenAI
+193.233.112.68 chatgpt.com
+193.233.112.68 ab.chatgpt.com
+193.233.112.68 auth.openai.com
+193.233.112.67 auth0.openai.com
+193.233.112.68 platform.openai.com
+193.233.112.68 api.openai.com
+193.233.112.68 cdn.oaistatic.com
+193.233.112.68 files.oaiusercontent.com
+193.233.112.68 tcr9i.chat.openai.com
+193.233.112.68 webrtc.chatgpt.com
+193.233.112.68 android.chat.openai.com
+193.233.112.67 operator.chatgpt.com
+193.233.112.67 sora.chatgpt.com
+193.233.112.68 videos.openai.com
+193.233.112.68 ios.chat.openai.com
+193.233.112.68 cdn.platform.openai.com
+193.233.112.68 developers.openai.com
+
+# Google AI / Gemini
+62.133.62.97 gemini.google.com
+62.133.62.97 aistudio.google.com
+62.133.62.97 generativelanguage.googleapis.com
+62.133.62.97 aitestkitchen.withgoogle.com
+62.133.62.97 aisandbox-pa.googleapis.com
+62.133.62.97 webchannel-alkalimakersuite-pa.clients6.google.com
+62.133.62.97 alkalimakersuite-pa.clients6.google.com
+62.133.62.97 assistant-s3-pa.googleapis.com
+62.133.62.97 proactivebackend-pa.googleapis.com
+62.133.62.97 robinfrontend-pa.googleapis.com
+62.133.62.97 o.pki.goog
+62.133.62.97 labs.google
+62.133.62.97 notebooklm.google.com
+62.133.62.97 jules.google.com
+62.133.62.97 stitch.withgoogle.com
+
+# Anthropic / Claude
+193.233.112.68 claude.ai
+193.233.112.68 console.anthropic.com
+193.233.112.68 api.anthropic.com
+193.233.112.68 platform.claude.com
+193.233.112.68 a.claude.ai
+
+# Microsoft Copilot and GitHub Copilot
+193.233.112.68 copilot.microsoft.com
+193.233.112.67 sydney.bing.com
+193.233.112.67 edgeservices.bing.com
+193.233.112.68 api.individual.githubcopilot.com
+193.233.112.68 proxy.individual.githubcopilot.com
+
+# Grok, Perplexity-compatible and developer AI services
+193.233.112.68 grok.com
+193.233.112.68 accounts.x.ai
+193.233.112.68 assets.grok.com
+193.233.112.68 datalore.jetbrains.com
+193.233.112.67 api.jetbrains.ai
+193.233.112.68 elevenlabs.io
+193.233.112.68 api.elevenlabs.io
+193.233.112.68 api.us.elevenlabs.io
+193.233.112.68 windsurf.com
+193.233.112.68 codeium.com
+193.233.112.68 server.codeium.com
+193.233.112.68 web-backend.codeium.com
+193.233.112.68 unleash.codeium.com
+193.233.112.68 inference.codeium.com
+193.233.112.68 windsurf-stable.codeium.com
+193.233.112.68 marketplace.windsurf.com
+193.233.112.68 api.trae.ai
+193.233.112.68 api-sg-central.trae.ai

@@ -1,0 +1,63 @@
+# Python environments
+.venv/
+.venv_*/
+venv/
+env/
+ENV/
+
+# Python caches, tools and coverage
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Build and release artifacts
+/build/
+/dist/
+/build_*/
+/dist_*/
+*.pyinstaller/
+/ZapretGUI.spec
+/EzUnBlock.spec
+/packaging/*.generated.spec
+*.zip.sha256
+
+# Runtime-generated application data
+/user/
+settings.ini
+.app_version
+autotest_last.log
+autotest_result.json
+_no_update_input.txt
+uninstall.bat
+resources/background_service/telegram-hosts.txt
+
+# Test artifacts
+tests/.service-smoke-child.json
+tests/service-smoke-result.json
+tests/service-smoke-standard-result.json
+
+# Local editor/OS files
+.agents/
+.vscode/
+.idea/
+*.code-workspace
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.log
+*.tmp
+*.bak
+
+# Legacy/temporary helper output
+/output/
+/test-output/
+
+# Local reference repositories
+/.github-baseline/
+/.flowseal-latest*/
