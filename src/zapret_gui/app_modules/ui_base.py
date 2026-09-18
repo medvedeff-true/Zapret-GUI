@@ -10,9 +10,31 @@ def _was_started_after_update(argv: list[str] | None = None) -> bool:
     return any(str(arg).strip().casefold() == "--post-update" for arg in args)
 
 
-def _should_start_minimized(start_minimized_enabled: bool, launched_by_autostart: bool) -> bool:
-    """The setting applies only to the Task Scheduler launch, never a manual one."""
-    return bool(start_minimized_enabled and launched_by_autostart)
+def _should_start_minimized(
+    start_minimized_enabled: bool, launched_by_autostart: bool, tray_available: bool = True,
+) -> bool:
+    """The setting applies only to an autostart launch, never a manual one."""
+    return bool(start_minimized_enabled and launched_by_autostart and tray_available)
+
+
+def _quote_windows_command_argument(value: str) -> str:
+    """Quote one argv item even when Windows would normally omit the quotes."""
+    result = ['"']
+    backslashes = 0
+    for char in str(value):
+        if char == "\\":
+            backslashes += 1
+            continue
+        if char == '"':
+            result.append("\\" * (backslashes * 2 + 1))
+            result.append('"')
+        else:
+            result.append("\\" * backslashes)
+            result.append(char)
+        backslashes = 0
+    result.append("\\" * (backslashes * 2))
+    result.append('"')
+    return "".join(result)
 
 
 def _build_autostart_task_command(
@@ -21,7 +43,7 @@ def _build_autostart_task_command(
     app_dir: str | None = None,
     frozen: bool | None = None,
 ) -> str:
-    """Build the exact Task Scheduler command for a system-start launch."""
+    """Build an unambiguous Windows Run-key command for a logon launch."""
     is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else bool(frozen)
     app_path = os.path.abspath(app_dir or APP_DIR)
     if is_frozen:
@@ -34,7 +56,49 @@ def _build_autostart_task_command(
             os.path.abspath(script or sys.argv[0]),
         ]
     parts.extend([f"--app-dir={app_path}", AUTOSTART_LAUNCH_ARGUMENT])
-    return subprocess.list2cmdline(parts)
+    # Quote paths consistently, including portable paths without spaces.
+    # This is defensive quoting, not proof that an unquoted Run value caused
+    # a particular user's startup failure.
+    quoted_count = len(parts) - 1
+    return " ".join(
+        _quote_windows_command_argument(part) if index < quoted_count else part
+        for index, part in enumerate(parts)
+    )
+
+
+def _autostart_environment_warnings() -> list[str]:
+    """Read-only diagnostics: never override Task Manager or compatibility settings."""
+    import winreg
+    warnings = []
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for section in ("Run", "Run32"):
+            try:
+                path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved" + "\\" + section
+                with winreg.OpenKey(hive, path) as key:
+                    value, _ = winreg.QueryValueEx(key, "ZapretGUI")
+                # Known disabled markers. Unknown formats are logged, not changed.
+                if isinstance(value, bytes) and value and value[0] in (3, 7):
+                    warnings.append(
+                        "ZapretGUI отключён в автозагрузке Windows. "
+                        "Включите его в Диспетчере задач → Автозагрузка приложений."
+                    )
+            except OSError:
+                pass
+        if getattr(sys, "frozen", False):
+            try:
+                with winreg.OpenKey(hive, r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers") as key:
+                    value, _ = winreg.QueryValueEx(key, os.path.realpath(sys.executable))
+                if "RUNASADMIN" in str(value).upper().split():
+                    warnings.append(
+                        "Для ZapretGUI.exe включено «Запускать от имени администратора». "
+                        "Снимите эту галочку в свойствах EXE → Совместимость "
+                        "(также проверьте «Изменить параметры для всех пользователей»). "
+                        "GUI не требует повышения прав; для обхода используется отдельная служба."
+                    )
+            except OSError:
+                pass
+    return list(dict.fromkeys(warnings))
+
 
 def _ensure_no_update_input(lines: int = 12) -> str:
     try:
@@ -678,4 +742,3 @@ class TextInputDialog(StyledDialog):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         QTimer.singleShot(0, self.line_edit.setFocus)
-

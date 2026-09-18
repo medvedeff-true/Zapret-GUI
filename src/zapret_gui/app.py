@@ -1,5 +1,10 @@
 import sys
 import os
+from zapret_gui.startup_diagnostics import initialize as _initialize_startup_diagnostics, logger as _startup_log
+
+if __name__ == "__main__" or getattr(sys, "frozen", False):
+    _initialize_startup_diagnostics()
+
 import subprocess
 import csv
 import ipaddress
@@ -51,6 +56,24 @@ from adaptive_strategy import (
 from adaptive_strategy.engine import SearchCancelled as AdaptiveSearchCancelled
 from adaptive_strategy.generator import profile_requires_telegram_hosts
 from adaptive_strategy.resources import ensure_adaptive_runtime
+
+
+if __name__ == "__main__" and "--startup-self-test" in sys.argv:
+    # An explicit packaging probe: load Qt and the real onefile imports without
+    # touching Run, services, hosts, runtime migration or the user's settings.
+    destination = sys.argv[sys.argv.index("--startup-self-test") + 1]
+    probe = QApplication(sys.argv)
+    QTimer.singleShot(50, probe.quit)
+    result = probe.exec()
+    Path(destination).write_text(json.dumps({
+        "exit_code": result,
+        "frozen": bool(getattr(sys, "frozen", False)),
+        "executable": sys.executable,
+        "cwd": os.getcwd(),
+        "argv": sys.argv,
+        "tray_available": QSystemTrayIcon.isSystemTrayAvailable(),
+    }, ensure_ascii=False), encoding="utf-8")
+    raise SystemExit(result)
 
 
 # The executable entry point and backwards-compatible public module.

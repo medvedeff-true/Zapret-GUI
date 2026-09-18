@@ -304,13 +304,17 @@ class MainWindow(QWidget):
             except Exception:
                 pass
 
-        self.set_autostart(self.autostart, provision=self.autostart and not self.launched_by_autostart)
+        # Repair a moved portable EXE's path, but never request UAC merely for
+        # opening the GUI. Service provisioning belongs to explicit settings.
+        self.set_autostart(self.autostart)
         self.init_tray_icon()
         self._bypass_status_timer = QTimer(self)
         self._bypass_status_timer.timeout.connect(self._refresh_bypass_process_state)
         self._bypass_status_timer.start(1500)
 
-        if _should_start_minimized(self.minimized, self.launched_by_autostart):
+        if _should_start_minimized(
+            self.minimized, self.launched_by_autostart, QSystemTrayIcon.isSystemTrayAvailable(),
+        ):
             self.hide()
         else:
             self.show()
@@ -327,7 +331,7 @@ class MainWindow(QWidget):
             self._pending_autostart = True
             self._pending_autostart_profile = autostart_profile
 
-        QTimer.singleShot(0, self.start_lists_sync)
+        QTimer.singleShot(0, self._start_startup_tasks)
         QTimer.singleShot(150, self.refresh_dns_malw_link_indicator)
         QTimer.singleShot(250, self.restore_telegram_mode_if_enabled)
 
@@ -915,6 +919,22 @@ class MainWindow(QWidget):
 
         if profile in self.presets:
             self._start_main_bypass_after_button_animation(profile)
+
+    def _start_startup_tasks(self):
+        # Cached/bundled lists are already initialized. Do not hold automatic
+        # bypass startup hostage to network availability immediately after logon.
+        self._run_pending_autostart_if_needed()
+        QTimer.singleShot(250, self._start_startup_lists_sync)
+
+    def _start_startup_lists_sync(self):
+        if getattr(self, "_exiting", False):
+            return
+        if (getattr(self, "_pending_toggle_starting", False)
+                or getattr(self, "_bypass_toggle_busy", False)
+                or getattr(self, "_telegram_mode_busy", False)):
+            QTimer.singleShot(250, self._start_startup_lists_sync)
+            return
+        self.start_lists_sync()
 
     def start_lists_sync(self):
         if getattr(self, "_lists_check_in_progress", False):
@@ -4229,16 +4249,34 @@ class MainWindow(QWidget):
     def set_autostart(self, enable: bool, provision: bool = False):
         try:
             import winreg
-            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+            with winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0, winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE,
+            ) as key:
                 if enable:
-                    winreg.SetValueEx(key, "ZapretGUI", 0, winreg.REG_SZ, _build_autostart_task_command())
+                    command = _build_autostart_task_command()
+                    if len(command) > 260:
+                        raise RuntimeError(
+                            "Autostart command exceeds 260 characters. Move ZapretGUI.exe "
+                            "to a shorter local path and enable autostart again."
+                        )
+                    winreg.SetValueEx(key, "ZapretGUI", 0, winreg.REG_SZ, command)
+                    if winreg.QueryValueEx(key, "ZapretGUI") != (command, winreg.REG_SZ):
+                        raise RuntimeError("Windows did not retain the autostart registration.")
                 else:
                     try:
                         winreg.DeleteValue(key, "ZapretGUI")
                     except FileNotFoundError:
                         pass
-            # Best effort migration; the elevated service installer also removes
-            # the old task when its ACL prevents the ordinary GUI from doing so.
+            _startup_log.info("Autostart registration enabled=%s", enable)
+            if enable:
+                warnings = _autostart_environment_warnings()
+                if warnings:
+                    _startup_log.warning("Autostart environment: %s", warnings)
+                    if provision:
+                        _show_centered_message(
+                            self, QMessageBox.Icon.Warning, "Autostart", "\n\n".join(warnings)
+                        )
             _run_hidden(["schtasks", "/Delete", "/TN", "ZapretGUI", "/F"], timeout=5)
             if enable and provision and getattr(self, "_background_setup_worker", None) is None:
                 worker = BackgroundSetupWorker(self.core_dir, self)
@@ -4247,8 +4285,9 @@ class MainWindow(QWidget):
                 worker.finished.connect(worker.deleteLater)
                 worker.start()
         except Exception as error:
-            self.autostart = False
-            self.settings.setValue("autostart", False)
+            # Keep the requested setting so a transient registry failure can be
+            # repaired next launch; do not silently discard the user's intent.
+            _startup_log.exception("Autostart registration failed")
             _show_centered_message(self, QMessageBox.Icon.Warning,
                                    "Автозапуск" if self.lang == "ru" else "Autostart", str(error))
 
@@ -4257,9 +4296,9 @@ class MainWindow(QWidget):
         if getattr(self, "_exiting", False):
             return
         if error:
-            self.autostart = False
-            self.settings.setValue("autostart", False)
-            self.set_autostart(False)
+            # GUI startup does not require the privileged bypass service.
+            # UAC cancellation/service failure must not remove its Run entry.
+            _startup_log.error("Background service setup failed; GUI autostart retained: %s", error)
             _show_centered_message(self, QMessageBox.Icon.Warning,
                                    "Автозапуск" if self.lang == "ru" else "Autostart", error)
 

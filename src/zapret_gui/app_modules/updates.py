@@ -874,6 +874,12 @@ function Write-UpdateLog([string]$Message) {
     } catch {}
 }
 
+function Quote-WindowsArgument([string]$Value) {
+    return '"' + [regex]::Replace(
+        [regex]::Replace($Value, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1'
+    ) + '"'
+}
+
 function Update-ZapretShortcuts([string]$OldExe, [string]$NewExe, [string]$WorkDir) {
     try {
         $shell = New-Object -ComObject WScript.Shell
@@ -983,7 +989,10 @@ function Update-ZapretShortcuts([string]$OldExe, [string]$NewExe, [string]$WorkD
     try {
         $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
         if (Get-ItemProperty -LiteralPath $runKey -Name 'ZapretGUI' -ErrorAction SilentlyContinue) {
-            Set-ItemProperty -LiteralPath $runKey -Name 'ZapretGUI' -Value ('"' + $OldExePath + '" --autostart')
+            Set-ItemProperty -LiteralPath $runKey -Name 'ZapretGUI' -Value (
+                (Quote-WindowsArgument $OldExePath) + ' ' +
+                (Quote-WindowsArgument "--app-dir=$AppDir") + ' --autostart'
+            )
         }
     } catch {
         Write-UpdateLog ("Autostart update failed: " + $_.Exception.Message)
@@ -993,7 +1002,7 @@ function Update-ZapretShortcuts([string]$OldExe, [string]$NewExe, [string]$WorkD
     try { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } catch {}
 
     Write-UpdateLog "Starting updated GUI: $OldExePath --post-update"
-    $launchArgs = @("--app-dir=$AppDir", "--post-update")
+    $launchArgs = (Quote-WindowsArgument "--app-dir=$AppDir") + " --post-update"
     $newProcess = Start-Process -FilePath $OldExePath -ArgumentList $launchArgs -WorkingDirectory $InstallDir -PassThru
     $markerPath = Join-Path $AppDir ".app_version"
     $readyDeadline = (Get-Date).AddSeconds(45)
@@ -1022,7 +1031,7 @@ function Update-ZapretShortcuts([string]$OldExe, [string]$NewExe, [string]$WorkD
         try {
             if (Test-Path -LiteralPath $OldExePath) { Remove-Item -LiteralPath $OldExePath -Force }
             Move-Item -LiteralPath $backupPath -Destination $OldExePath -Force
-            Start-Process -FilePath $OldExePath -ArgumentList @("--app-dir=$AppDir") -WorkingDirectory $InstallDir
+            Start-Process -FilePath $OldExePath -ArgumentList (Quote-WindowsArgument "--app-dir=$AppDir") -WorkingDirectory $InstallDir
         } catch {
             Write-UpdateLog ("Rollback failed: " + $_.Exception.Message)
         }
