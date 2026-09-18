@@ -242,11 +242,16 @@ def _notify_existing_instance_to_activate(retries: int = 8) -> bool:
 
 def _handle_existing_instance_before_start(app: QApplication) -> bool:
     acquired, handle, _error = _try_acquire_single_instance_lock()
+    _startup_log.info("Single-instance acquired=%s detail=%s", acquired, _error)
     if acquired:
         _keep_single_instance_lock(app, handle)
         return True
 
+    if _was_started_by_autostart():
+        _startup_log.info("Autostart duplicate: existing instance retained")
+        return False
     if _notify_existing_instance_to_activate():
+        _startup_log.info("Existing instance notified")
         return False
 
     # The first instance can be exiting while its mutex is still alive.  In
@@ -261,10 +266,13 @@ def _handle_existing_instance_before_start(app: QApplication) -> bool:
 
     # Do not show an "already running" error: the first instance may still be
     # closing, or Windows may briefly keep a stale mutex/window handle.
+    _startup_log.warning("Existing mutex remains but activation could not be delivered")
     return False
 
 
 def main():
+    _initialize_startup_diagnostics()
+    _startup_log.info("Main entered version=%s app_dir=%r", APP_VERSION, APP_DIR)
     dns_cli_action = None
     telegram_hosts_cli_action = None
     for arg in sys.argv[1:]:
@@ -314,6 +322,8 @@ def main():
         pass
 
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+    _startup_log.info("Qt initialized tray_available=%s", QSystemTrayIcon.isSystemTrayAvailable())
     _apply_unified_qt_style(app)
     if not _handle_existing_instance_before_start(app):
         return
@@ -338,9 +348,11 @@ def main():
         post_update_splash.show()
         app.processEvents()
     try:
+        _startup_log.info("Runtime initialization started")
         wipe_app_dir_if_new_version()
         extract_files_from_meipass()
     except (RuntimeMigrationError, OSError) as error:
+        _startup_log.exception("Runtime initialization failed")
         QMessageBox.critical(
             None,
             "Ошибка обновления runtime" if str(sys.argv).lower().find("ru") >= 0 else "Runtime update error",
@@ -372,6 +384,7 @@ def main():
                 f"Детали: {error}",
             )
     win = MainWindow(settings, launched_by_autostart=_was_started_by_autostart())
+    _startup_log.info("Main window ready visible=%s autostart=%s", win.isVisible(), win.launched_by_autostart)
     _install_single_instance_activation_listener(app, win)
     if post_update_splash is not None:
         post_update_splash.close()
@@ -383,4 +396,5 @@ def main():
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
     exit_code = app.exec()
+    _startup_log.info("Qt event loop exited code=%s", exit_code)
     sys.exit(exit_code)
