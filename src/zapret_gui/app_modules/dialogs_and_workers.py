@@ -802,6 +802,7 @@ class AdaptiveSearchWorker(QThread):
                 self.runtime_source,
                 self.runtime_destination,
                 progress=self._install_progress,
+                project_root=self.app_dir,
             )
             if self.cancel_event.is_set():
                 raise AdaptiveSearchCancelled()

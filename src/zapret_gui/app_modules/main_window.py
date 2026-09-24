@@ -1436,7 +1436,11 @@ class MainWindow(QWidget):
                 Path(APP_DIR),
                 Path(ADAPTIVE_RUNTIME_DIR),
             )
-            generator = ZapretGuiBatGenerator(paths, Path(USER_PROFILE_DIR))
+            generator = ZapretGuiBatGenerator(
+                paths,
+                Path(USER_PROFILE_DIR),
+                runtime_source=_bundled_path("adaptive-runtime"),
+            )
             destination = generator.generate(outcome, filename, lang=self.lang)
         except Exception as exc:
             dlg.set_adaptive_save_error(str(exc))

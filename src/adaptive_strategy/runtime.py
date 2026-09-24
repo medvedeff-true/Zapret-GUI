@@ -254,6 +254,7 @@ class RuntimePaths:
             self.fake_tls_max,
             self.fake_tls_4pda,
             self.fake_quic,
+            self.fake_udp_dbank,
             self.fake_stun,
             self.winws_dir / "stun2.bin",
             self.winws_dir / "tls_clienthello_sochi_park.bin",

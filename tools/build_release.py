@@ -315,6 +315,23 @@ def validate_adaptive_runtime() -> None:
             continue
         seen_paths.add(path_key)
 
+        destination_text = entry.get("destination")
+        if destination_text is not None:
+            destination_text = str(destination_text)
+            project_prefix = "project/"
+            destination_path = PurePosixPath(destination_text[len(project_prefix):])
+            if (
+                not destination_text.startswith(project_prefix)
+                or "\\" in destination_text
+                or destination_path.is_absolute()
+                or any(
+                    part in {"", ".", ".."} or ":" in part
+                    for part in destination_text[len(project_prefix):].split("/")
+                )
+            ):
+                errors.append(f"{relative_text}: unsafe destination {destination_text!r}")
+                continue
+
         expected_size = entry.get("size")
         expected_hash = str(entry.get("sha256") or "").casefold()
         if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
