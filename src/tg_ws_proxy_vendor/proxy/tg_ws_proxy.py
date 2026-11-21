@@ -387,10 +387,11 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
     cf_h2_pool = CfH2Pool() if proxy_config.h2_enabled else None
 
     user_cf_domains = proxy_config.cfproxy_user_domains
-    if user_cf_domains:
-        balancer.update_domains_list(user_cf_domains)
-    else:
-        start_cfproxy_domain_refresh()
+    if proxy_config.fallback_cfproxy:
+        if user_cf_domains:
+            balancer.update_domains_list(user_cf_domains)
+        else:
+            start_cfproxy_domain_refresh()
 
     secret_bytes = bytes.fromhex(proxy_config.secret)
     stopping = False

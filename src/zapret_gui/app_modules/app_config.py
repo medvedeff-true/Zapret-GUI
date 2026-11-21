@@ -1,4 +1,4 @@
-APP_VERSION = "3.1.0"
+APP_VERSION = "3.1.1"
 
 from zapret_gui.traffic_modes import (
     TRAFFIC_MODE_ALL,
@@ -82,6 +82,7 @@ TELEGRAM_MODE_ENABLED_KEY = "telegram_mode/enabled"
 TELEGRAM_MODE_PROXY_ENABLED_KEY = "telegram_mode/proxy_enabled"
 TELEGRAM_MODE_PROXY_PORT_KEY = "telegram_mode/proxy_port"
 TELEGRAM_MODE_PROXY_SECRET_KEY = "telegram_mode/proxy_secret"
+TELEGRAM_MODE_PROXY_OPTIONS_KEY = "telegram_mode/proxy_options"
 TELEGRAM_MODE_LAST_ERROR_KEY = "telegram_mode/last_error"
 TELEGRAM_MODE_HOSTS_ENABLED_KEY = "telegram_mode/hosts_enabled_by_app"
 TELEGRAM_MODE_HOSTS_LAST_ATTEMPT_KEY = "telegram_mode/hosts_last_attempt"

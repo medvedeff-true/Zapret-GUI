@@ -165,14 +165,17 @@ def _normalize_domain_pool(domains: List[str]) -> List[str]:
     return normalized
 
 
-def refresh_cfproxy_domains() -> None:
-    if proxy_config.cfproxy_user_domains:
+def refresh_cfproxy_domains(stop_event=None) -> None:
+    if proxy_config.cfproxy_user_domains or (stop_event is not None and stop_event.is_set()):
         return
 
     fetched = _fetch_cfproxy_domain_list()
     pool = _normalize_domain_pool(fetched)
     if len(pool) >= _CFPROXY_MIN_VALID_DOMAINS:
-        balancer.update_domains_list(pool)
+        with _refresh_lock:
+            if proxy_config.cfproxy_user_domains or (stop_event is not None and stop_event.is_set()):
+                return
+            balancer.update_domains_list(pool)
         log.info("CF proxy domain pool updated from GitHub (%d domains)", len(pool))
         return
 
@@ -190,24 +193,25 @@ def refresh_cfproxy_domains() -> None:
 
 
 _refresh_stop: threading.Event = threading.Event()
+_refresh_lock = threading.Lock()
 
 
 def stop_cfproxy_domain_refresh() -> None:
-    _refresh_stop.set()
+    with _refresh_lock:
+        _refresh_stop.set()
 
 
 def start_cfproxy_domain_refresh() -> None:
     global _refresh_stop
-    _refresh_stop.set()
-    _refresh_stop = threading.Event()
-    stop = _refresh_stop
-
-    balancer.update_domains_list(CFPROXY_DEFAULT_DOMAINS)
+    with _refresh_lock:
+        _refresh_stop.set()
+        _refresh_stop = stop = threading.Event()
+        balancer.update_domains_list(CFPROXY_DEFAULT_DOMAINS)
 
     def _loop():
-        refresh_cfproxy_domains()
+        refresh_cfproxy_domains(stop)
         while not stop.wait(timeout=3600):
-            refresh_cfproxy_domains()
+            refresh_cfproxy_domains(stop)
 
     threading.Thread(target=_loop, daemon=True, name='cfproxy-domains-refresh').start()
 

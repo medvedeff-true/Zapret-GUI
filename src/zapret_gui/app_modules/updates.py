@@ -876,6 +876,15 @@ param(
 $ErrorActionPreference = "Stop"
 $LogPath = Join-Path $InstallDir "ZapretGUI-update.log"
 
+# This script can outlive the onefile runtime that launched it. Never pass
+# that runtime's extraction directory or process level to the new bootloader.
+foreach ($name in [Environment]::GetEnvironmentVariables("Process").Keys) {
+    if ($name -like "_PYI_*" -or $name -eq "_MEIPASS2") {
+        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+    }
+}
+$env:PYINSTALLER_RESET_ENVIRONMENT = "1"
+
 function Write-UpdateLog([string]$Message) {
     try {
         $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -982,7 +991,18 @@ function Update-ZapretShortcuts([string]$OldExe, [string]$NewExe, [string]$WorkD
     # Portable update: replace only the running executable. Runtime migration
     # is performed transactionally by the new GUI on its first start.
     $backupPath = $OldExePath + ".update-backup-" + [Guid]::NewGuid().ToString("N")
-    Move-Item -LiteralPath $OldExePath -Destination $backupPath -Force
+    # The onefile bootloader parent may still be cleaning its extraction
+    # directory after the GUI PID exits. Retry the rename, not the copy.
+    $replaceDeadline = (Get-Date).AddSeconds(15)
+    while ($true) {
+        try {
+            Move-Item -LiteralPath $OldExePath -Destination $backupPath -Force
+            break
+        } catch {
+            if ((Get-Date) -ge $replaceDeadline) { throw }
+            Start-Sleep -Milliseconds 250
+        }
+    }
     try {
         Copy-Item -LiteralPath $sourceExe -Destination $OldExePath -Force
         if (!(Test-Path -LiteralPath $OldExePath)) { throw "Updated exe was not installed" }
@@ -991,20 +1011,6 @@ function Update-ZapretShortcuts([string]$OldExe, [string]$NewExe, [string]$WorkD
         if (Test-Path -LiteralPath $backupPath) { Move-Item -LiteralPath $backupPath -Destination $OldExePath -Force }
         $backupPath = ""
         throw
-    }
-
-    Update-ZapretShortcuts -OldExe $OldExePath -NewExe $OldExePath -WorkDir $InstallDir
-
-    try {
-        $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-        if (Get-ItemProperty -LiteralPath $runKey -Name 'ZapretGUI' -ErrorAction SilentlyContinue) {
-            Set-ItemProperty -LiteralPath $runKey -Name 'ZapretGUI' -Value (
-                (Quote-WindowsArgument $OldExePath) + ' ' +
-                (Quote-WindowsArgument "--app-dir=$AppDir") + ' --autostart'
-            )
-        }
-    } catch {
-        Write-UpdateLog ("Autostart update failed: " + $_.Exception.Message)
     }
 
     try { Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue } catch {}
@@ -1030,6 +1036,18 @@ function Update-ZapretShortcuts([string]$OldExe, [string]$NewExe, [string]$WorkD
     $finalMarker = ""
     try { $finalMarker = (Get-Content -LiteralPath $markerPath -Raw -ErrorAction Stop).Trim() } catch {}
     if ($finalMarker -eq $NewVersion -and $backupPath) {
+        Update-ZapretShortcuts -OldExe $OldExePath -NewExe $OldExePath -WorkDir $InstallDir
+        try {
+            $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+            if (Get-ItemProperty -LiteralPath $runKey -Name 'ZapretGUI' -ErrorAction SilentlyContinue) {
+                Set-ItemProperty -LiteralPath $runKey -Name 'ZapretGUI' -Value (
+                    (Quote-WindowsArgument $OldExePath) + ' ' +
+                    (Quote-WindowsArgument "--app-dir=$AppDir") + ' --autostart'
+                )
+            }
+        } catch {
+            Write-UpdateLog ("Autostart update failed: " + $_.Exception.Message)
+        }
         try { Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue } catch {}
         $backupPath = ""
     } else {
@@ -1118,9 +1136,8 @@ def _schedule_gui_update_restart(
             "-ChecksumUrl", str(checksum_url or ""),
         ]
         result["updater_args"] = args
-        # The caller launches this only after the bypass, workers and service
-        # pipe have been shut down. Preparing the updater must not race GUI
-        # shutdown or start replacement too early.
+        # The GUI launches the prepared helper when it commits to shutdown.
+        # The helper waits for the old PID before replacing the executable.
         result["archive_sha256"] = verified_sha256
         result["checksum_url"] = str(checksum_url or "")
         result["ok"] = True
@@ -1147,6 +1164,11 @@ def _schedule_gui_update_restart(
 def _launch_gui_updater_process(updater_args: list[str], install_dir: str) -> None:
     if not updater_args:
         raise RuntimeError("GUI updater command is missing")
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.upper().startswith("_PYI_") and key.upper() != "_MEIPASS2"
+    }
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     subprocess.Popen(
         updater_args,
         cwd=install_dir,
@@ -1154,6 +1176,7 @@ def _launch_gui_updater_process(updater_args: list[str], install_dir: str) -> No
         stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         close_fds=True,
+        env=env,
     )
 
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zapret-gui"
-version = "3.1.0"
+version = "3.1.1"
 description = "Windows GUI for managing Zapret/WinDivert bypass profiles."
 readme = "README.md"
 requires-python = ">=3.10"

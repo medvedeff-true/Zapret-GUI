@@ -311,50 +311,40 @@ def _set_telegram_mode_enabled(enabled: bool, settings: QSettings | None = None)
     port = _safe_int_setting(qs, TELEGRAM_MODE_PROXY_PORT_KEY, 1443)
     if port <= 0 or port > 65535 or port == 1080:
         qs.setValue(TELEGRAM_MODE_PROXY_PORT_KEY, 1443)
-    if not _is_valid_telegram_proxy_secret(str(qs.value(TELEGRAM_MODE_PROXY_SECRET_KEY, "") or "")):
-        qs.setValue(TELEGRAM_MODE_PROXY_SECRET_KEY, os.urandom(16).hex())
     qs.sync()
 
 
-def _get_telegram_proxy_port(settings: QSettings | None = None) -> int:
+def _get_telegram_proxy_options(settings: QSettings | None = None) -> TelegramProxyOptions:
     qs = _load_settings_if_needed(settings)
+    saved = qs.value(TELEGRAM_MODE_PROXY_OPTIONS_KEY, "")
+    if saved:
+        try:
+            return TelegramProxyOptions(**json.loads(saved))
+        except (ValueError, TypeError, AttributeError, TelegramProxyError):
+            _startup_log.warning("Invalid saved Telegram proxy settings; using defaults")
+
+    # Preserve the connection information used by installations with no
+    # settings dialog, so Telegram Desktop need not be configured again.
     port = _safe_int_setting(qs, TELEGRAM_MODE_PROXY_PORT_KEY, 1443)
-    if port <= 0 or port > 65535 or port == 1080:
+    if not 1 <= port <= 65535 or port == 1080:
         port = 1443
-    return port
-
-
-def _is_valid_telegram_proxy_secret(value: str) -> bool:
-    value = str(value or "").strip().lower()
-    if value.startswith("dd") and len(value) == 34:
-        value = value[2:]
-    if len(value) != 32:
-        return False
-    try:
-        bytes.fromhex(value)
-        return True
-    except Exception:
-        return False
-
-
-def _get_telegram_proxy_secret(settings: QSettings | None = None) -> str:
-    qs = _load_settings_if_needed(settings)
     secret = str(qs.value(TELEGRAM_MODE_PROXY_SECRET_KEY, "") or "").strip().lower()
     if secret.startswith("dd") and len(secret) == 34:
         secret = secret[2:]
-    if not _is_valid_telegram_proxy_secret(secret):
+    if not re.fullmatch(r"[0-9a-f]{32}", secret):
         secret = os.urandom(16).hex()
         qs.setValue(TELEGRAM_MODE_PROXY_SECRET_KEY, secret)
         qs.sync()
-    return secret
+    return TelegramProxyOptions(port=port, secret=secret)
+
+
+def _save_telegram_proxy_options(settings: QSettings, options: TelegramProxyOptions) -> None:
+    settings.setValue(TELEGRAM_MODE_PROXY_OPTIONS_KEY, json.dumps(asdict(options)))
+    settings.sync()
 
 
 def _get_telegram_proxy_link(settings: QSettings | None = None) -> str:
-    return (
-        "tg://proxy?server=127.0.0.1"
-        f"&port={int(_get_telegram_proxy_port(settings))}"
-        f"&secret=dd{_get_telegram_proxy_secret(settings)}"
-    )
+    return _get_telegram_proxy_options(settings).link()
 
 
 def _set_telegram_last_error(error: str, settings: QSettings | None = None) -> None:

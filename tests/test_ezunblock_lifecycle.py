@@ -750,6 +750,38 @@ class LifecycleTests(unittest.TestCase):
                 self.assertIn("--post-update", Path(script_path).read_text(encoding="utf-8"))
             popen.assert_not_called()
 
+    def test_gui_update_launches_updater_before_waiting_for_workers(self) -> None:
+        window = SimpleNamespace(
+            _exiting=False,
+            _gui_update_shutdown=False,
+            settings=mock.Mock(),
+            _shutdown_and_quit=mock.Mock(),
+        )
+        with mock.patch.object(app, "_launch_gui_updater_process") as launch:
+            sequence = mock.Mock()
+            sequence.attach_mock(launch, "launch")
+            sequence.attach_mock(window._shutdown_and_quit, "shutdown")
+            directory = os.path.abspath("update-test")
+            app.MainWindow._begin_gui_update_install(
+                window, ["powershell.exe", "-File", "apply.ps1"], directory,
+            )
+        self.assertEqual(sequence.mock_calls, [
+            mock.call.launch(["powershell.exe", "-File", "apply.ps1"], directory),
+            mock.call.shutdown(),
+        ])
+        self.assertTrue(window._gui_update_shutdown)
+
+    def test_gui_update_does_not_shut_down_if_updater_cannot_launch(self) -> None:
+        window = SimpleNamespace(
+            _exiting=False, _gui_update_shutdown=False,
+            settings=mock.Mock(), _shutdown_and_quit=mock.Mock(),
+        )
+        with mock.patch.object(app, "_launch_gui_updater_process", side_effect=OSError("not started")):
+            with self.assertRaisesRegex(OSError, "not started"):
+                app.MainWindow._begin_gui_update_install(window, ["powershell.exe"], ".")
+        self.assertFalse(window._gui_update_shutdown)
+        window._shutdown_and_quit.assert_not_called()
+
     def test_flowseal_core_update_rolls_back_when_the_archive_is_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
