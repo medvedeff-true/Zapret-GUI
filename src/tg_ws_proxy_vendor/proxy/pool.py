@@ -213,7 +213,7 @@ class _WsPool:
     ) -> Optional[RawWebSocket]:
         """Try one direct Telegram WS connection without waiting for the pool."""
         target_ip = proxy_config.dc_redirects.get(dc)
-        if not target_ip or proxy_config.pool_size <= 0:
+        if not target_ip:
             return None
         try:
             return await asyncio.wait_for(

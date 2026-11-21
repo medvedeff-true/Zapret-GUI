@@ -1498,8 +1498,7 @@ class BypassToggleWorker(QThread):
                     if self.telegram_proxy is not None and not self.telegram_proxy.is_running():
                         try:
                             self.telegram_proxy.start(
-                                _get_telegram_proxy_port(settings),
-                                _get_telegram_proxy_secret(settings),
+                                options=_get_telegram_proxy_options(settings),
                             )
                             _set_telegram_last_error("", settings)
                         except Exception as error:
@@ -1617,12 +1616,15 @@ class TelegramModeWorker(QThread):
     proxy_ready = pyqtSignal(str, int)
 
     def __init__(
-        self, action: str, proxy_controller: TelegramProxyController | None, parent=None, *, request_id="",
+        self, action: str, proxy_controller: TelegramProxyController | None, parent=None, *,
+        request_id="", options=None, open_link=False,
     ):
         super().__init__(parent)
         self.action = (action or "").strip().lower()
         self.proxy_controller = proxy_controller
         self.request_id = request_id
+        self.options = options
+        self.open_link = open_link
 
     def _cancelled(self):
         return APP_SHUTTING_DOWN.is_set() or self.isInterruptionRequested()
@@ -1658,16 +1660,24 @@ class TelegramModeWorker(QThread):
             settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
             if self._cancelled():
                 return
-            if self.action == "enable" or (
-                self.action == "restore" and _is_telegram_mode_enabled(settings)
+            was_enabled = _is_telegram_mode_enabled(settings)
+            if self.action in {"enable", "restart"} or (
+                self.action == "restore" and was_enabled
             ):
                 try:
                     if self.proxy_controller is None:
                         raise RuntimeError("Telegram proxy controller is not available")
-                    port = _get_telegram_proxy_port(settings)
-                    self.proxy_controller.start(port, _get_telegram_proxy_secret(settings), cancelled=self._cancelled)
+                    options = self.options or _get_telegram_proxy_options(settings)
+                    port = options.port
+                    if self.action == "restart":
+                        self.proxy_controller.restart(options, cancelled=self._cancelled)
+                    else:
+                        self.proxy_controller.start(options=options, cancelled=self._cancelled)
                 except Exception:
-                    if not self._cancelled():
+                    if not self._cancelled() and (
+                        self.action != "restart" or self.proxy_controller is None
+                        or not self.proxy_controller.is_running()
+                    ):
                         _set_telegram_mode_enabled(False, settings)
                     raise
                 if self._cancelled():
@@ -1678,11 +1688,15 @@ class TelegramModeWorker(QThread):
                 if not result["proxy_running"]:
                     _set_telegram_mode_enabled(False, settings)
                     raise RuntimeError("Telegram Desktop proxy stopped during startup")
+                if self.options is not None:
+                    _save_telegram_proxy_options(settings, options)
                 _set_telegram_last_error("", settings)
                 _set_telegram_mode_enabled(True, settings)
                 result["enabled"] = True
                 result["ok"] = True
                 self.proxy_ready.emit(self.action, port)
+                if self.action == "restart" and was_enabled:
+                    return  # Restart Desktop only; do not touch hosts or bypass lists.
             elif self.action in {"disable", "cleanup"}:
                 _set_telegram_mode_enabled(False, settings)
                 try:
@@ -1727,11 +1741,11 @@ class TelegramModeWorker(QThread):
                 return
             if not enabled:
                 result["ok"] = not result["error"]
-            if result["hosts_permission_error"] and self.action in {"enable", "disable"}:
+            if result["hosts_permission_error"] and self.action in {"enable", "disable", "restart"}:
                 try:
                     if not self._cancelled():
                         result["hosts_helper_launched"] = _run_self_as_admin_for_telegram_hosts_action(
-                            self.action, self.request_id,
+                            "enable" if self.action == "restart" else self.action, self.request_id,
                         )
                 except Exception as e:
                     result["hosts_error"] = str(e) or type(e).__name__

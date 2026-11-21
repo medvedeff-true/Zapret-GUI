@@ -275,8 +275,6 @@ class MainWindow(QWidget):
         self._lists_worker = None
         self._gui_update_busy = False
         self._gui_update_worker = None
-        self._pending_gui_updater_args = []
-        self._pending_gui_updater_install_dir = ""
         self._gui_update_shutdown = False
         self._pending_autostart = False
         self._pending_autostart_profile = " "
@@ -286,7 +284,7 @@ class MainWindow(QWidget):
         self._settings_guard_installed = False
         self._adaptive_guard_installed = False
         self._game_settings_dlg = None
-        self._telegram_help_msg = None
+        self._telegram_settings_dlg = None
         self.game_mode_enabled = _is_game_mode_enabled(self.settings)
         self.telegram_mode_enabled = _is_telegram_mode_enabled(self.settings)
         self._telegram_hosts_cleanup_pending = False
@@ -299,8 +297,7 @@ class MainWindow(QWidget):
         self._telegram_mode_hosts_poll_timer = None
         self._telegram_mode_hosts_poll_attempts = 0
         self._telegram_proxy_autoconnect_generation = 0
-        self._telegram_help_proxy_link_sent_this_session = False
-        self.telegram_proxy = TelegramProxyController()
+        self.telegram_proxy = TelegramProxyController(os.path.join(APP_DIR, "logs", "telegram-proxy.log"))
         self.dns_malw_link_active = False
         self.dns_malw_group_status = {}
         self._dns_malw_link_busy = False
@@ -1991,12 +1988,12 @@ class MainWindow(QWidget):
             return
         self._exiting = True
         APP_SHUTTING_DOWN.set()
-        if not getattr(self, "_gui_update_shutdown", False):
-            # Native I/O, UAC, or a worker may not honor interruption. Never
-            # leave our hidden GUI (and its proxy sockets) alive indefinitely.
-            watchdog = threading.Timer(7.0, os._exit, args=(0,))
-            watchdog.daemon = True
-            watchdog.start()
+        # Native I/O, UAC, or a worker may not honor interruption. During an
+        # update the external helper is already waiting for this process, so
+        # the same bounded exit can be used without killing individual threads.
+        watchdog = threading.Timer(7.0, os._exit, args=(0,))
+        watchdog.daemon = True
+        watchdog.start()
         self.hide()
         if getattr(self, "tray", None) is not None:
             self.tray.hide()
@@ -2051,14 +2048,16 @@ class MainWindow(QWidget):
     def _begin_gui_update_install(self, updater_args: list[str], install_dir: str) -> None:
         if not updater_args or not install_dir:
             raise RuntimeError("GUI updater was not prepared correctly")
-        self._pending_gui_updater_args = list(updater_args)
-        self._pending_gui_updater_install_dir = os.path.abspath(install_dir)
-        self._gui_update_shutdown = True
-        self._gui_update_shutdown_deadline = time.monotonic() + 20.0
+        if self._exiting or self._gui_update_shutdown:
+            raise RuntimeError("The GUI is already shutting down")
         try:
             self.settings.sync()
         except Exception:
             pass
+        # If launching PowerShell fails, leave the GUI and its workers alone.
+        # The helper cannot replace the EXE until this process has exited.
+        _launch_gui_updater_process(updater_args, os.path.abspath(install_dir))
+        self._gui_update_shutdown = True
         self._shutdown_and_quit()
 
     def _handle_system_shutdown_request(self, *_args) -> None:
@@ -2073,60 +2072,7 @@ class MainWindow(QWidget):
             except RuntimeError:
                 running = False  # QObject has already been deleted after finished.
             if running:
-                if (
-                    getattr(self, "_gui_update_shutdown", False)
-                    and time.monotonic() >= float(getattr(self, "_gui_update_shutdown_deadline", 0.0) or 0.0)
-                ):
-                    self._exiting = False
-                    self._gui_update_shutdown = False
-                    APP_SHUTTING_DOWN.clear()
-                    self.show()
-                    _show_centered_message(
-                        self,
-                        QMessageBox.Icon.Critical,
-                        "Ошибка обновления" if self.lang == "ru" else "Update error",
-                        (
-                            "Не удалось дождаться завершения фоновых операций. "
-                            "Обновление GUI не запущено."
-                            if self.lang == "ru" else
-                            "Background operations did not stop in time. "
-                            "The GUI update was not started."
-                        ),
-                    )
-                    return
                 QTimer.singleShot(100, self._finish_shutdown_when_idle)
-                return
-        if getattr(self, "_gui_update_shutdown", False):
-            stop_error = ""
-            try:
-                _force_stop_blockers(self.core_dir)
-            except Exception as error:
-                stop_error = str(error)
-            try:
-                winws_still_running = _is_winws_running_silent()
-            except Exception:
-                winws_still_running = True
-            if stop_error or winws_still_running:
-                self._exiting = False
-                self._gui_update_shutdown = False
-                self._pending_gui_updater_args = []
-                self._pending_gui_updater_install_dir = ""
-                APP_SHUTTING_DOWN.clear()
-                self.show()
-                _show_centered_message(
-                    self,
-                    QMessageBox.Icon.Critical,
-                    "Ошибка обновления" if self.lang == "ru" else "Update error",
-                    (
-                        "Не удалось полностью остановить обход. Обновление GUI не запущено.\n\n"
-                        + (stop_error or "winws всё ещё работает.")
-                    )
-                    if self.lang == "ru" else
-                    (
-                        "The bypass could not be stopped completely. The GUI update was not started.\n\n"
-                        + (stop_error or "winws is still running.")
-                    ),
-                )
                 return
 
         # Closing IPC makes the service stop its job. A GUI crash closes IPC in
@@ -2143,31 +2089,10 @@ class MainWindow(QWidget):
             except Exception:
                 pass
 
-        if getattr(self, "_gui_update_shutdown", False):
-            _bypass_service.disconnect()
-        elif _bypass_service.close(timeout=1.0) is False:
+        if _bypass_service.close(timeout=1.0) is False:
             # Don't run Qt/Python destructors against a thread still in IPC.
             # The shutdown watchdog now owns final process termination.
             return
-
-        if getattr(self, "_gui_update_shutdown", False):
-            updater_args = list(getattr(self, "_pending_gui_updater_args", []) or [])
-            install_dir = str(getattr(self, "_pending_gui_updater_install_dir", "") or "")
-            try:
-                self.settings.sync()
-                _launch_gui_updater_process(updater_args, install_dir)
-            except Exception as error:
-                self._exiting = False
-                self._gui_update_shutdown = False
-                APP_SHUTTING_DOWN.clear()
-                self.show()
-                _show_centered_message(
-                    self,
-                    QMessageBox.Icon.Critical,
-                    "Ошибка обновления" if self.lang == "ru" else "Update error",
-                    str(error),
-                )
-                return
 
         try:
             if self.tray is not None:
@@ -3043,9 +2968,9 @@ class MainWindow(QWidget):
         self.telegram_mode_btn.setPixmapTuning(scale=0.86, offset_x=0, offset_y=0)
         self.telegram_mode_btn.clicked.connect(self.on_telegram_mode_clicked)
 
-        self.telegram_help_btn = SmallCircleButton("?", "text", self)
-        self.telegram_help_btn.setFixedSize(22, 22)
-        self.telegram_help_btn.clicked.connect(self.show_telegram_mode_help)
+        self.telegram_help_btn = SmallCircleButton("", "gear", self)
+        self.telegram_help_btn.setFixedSize(24, 24)
+        self.telegram_help_btn.clicked.connect(self.open_telegram_mode_settings)
 
         self.traffic_quick_switch = TrafficModeSelector(parent=self, vertical=True)
         self.traffic_quick_switch.setCurrentIndex(
@@ -3393,11 +3318,11 @@ class MainWindow(QWidget):
             )
 
         if hasattr(self, "telegram_help_btn"):
-            self._apply_small_circle_button_state(self.telegram_help_btn, True, "?", "text")
+            self._apply_small_circle_button_state(self.telegram_help_btn, True, "", "gear")
             self.telegram_help_btn.setToolTip(
-                "Как настроить Telegram Desktop"
+                "Настройки Telegram Mode"
                 if self.lang == "ru" else
-                "How to configure Telegram Desktop"
+                "Telegram Mode settings"
             )
 
     def _update_ai_mode_ui(self) -> None:
@@ -3783,13 +3708,13 @@ class MainWindow(QWidget):
         if self.telegram_mode_enabled:
             self._start_telegram_mode_worker("restore")
 
-    def _start_telegram_mode_worker(self, action: str) -> None:
+    def _start_telegram_mode_worker(self, action: str, *, options=None, open_link=False) -> None:
         import psutil
 
         if self._exiting or self._telegram_mode_busy:
             return
         self._cancel_telegram_mode_request()
-        if action == "disable":
+        if action in {"disable", "restart"}:
             self._telegram_proxy_autoconnect_generation += 1
         self._telegram_mode_proxy_ready = False
         self._telegram_mode_request_id = f"{os.getpid()}:{psutil.Process().create_time()}:{os.urandom(16).hex()}"
@@ -3797,6 +3722,7 @@ class MainWindow(QWidget):
         self.settings.sync()
         worker = TelegramModeWorker(
             action, self.telegram_proxy, self, request_id=self._telegram_mode_request_id,
+            options=options, open_link=open_link,
         )
         self._telegram_mode_worker = worker
         self._telegram_mode_workers.add(worker)
@@ -3808,7 +3734,7 @@ class MainWindow(QWidget):
             self._telegram_mode_worker_watchdog = QTimer(self)
             self._telegram_mode_worker_watchdog.setSingleShot(True)
             self._telegram_mode_worker_watchdog.timeout.connect(self._on_telegram_mode_worker_timeout)
-        self._telegram_mode_worker_watchdog.start(16000)
+        self._telegram_mode_worker_watchdog.start(32000 if action == "restart" else 16000)
         self._set_telegram_mode_busy(action != "restore")
         worker.start()
 
@@ -3837,7 +3763,14 @@ class MainWindow(QWidget):
         self.telegram_mode_enabled = bool(port)
         self._telegram_mode_worker_watchdog.start(30000)
         self._set_telegram_mode_busy(False)
-        if action == "enable" and port:
+        if action == "restart" and port:
+            dialog = self._telegram_settings_dlg
+            if dialog is not None:
+                dialog.proxy_restarted()
+            if getattr(self._telegram_mode_worker, "open_link", False) and not self._open_telegram_proxy_link():
+                if dialog is not None:
+                    dialog.show_open_error()
+        elif action == "enable" and port:
             self._handle_telegram_proxy_ready_after_enable(port)
         self._resume_pending_toggle_if_ready()
 
@@ -3862,6 +3795,9 @@ class MainWindow(QWidget):
                 "The local proxy timed out. Try again.",
                 self.settings,
             )
+            dialog = getattr(self, "_telegram_settings_dlg", None)
+            if dialog is not None:
+                dialog.show_error(str(self.settings.value(TELEGRAM_MODE_LAST_ERROR_KEY, "")))
         else:
             # Web hosts are optional. Never expose their timeout as a
             # Telegram Desktop error or keep the mode in a failed state.
@@ -3888,6 +3824,9 @@ class MainWindow(QWidget):
             self._cancel_telegram_mode_request()
         if error:
             _startup_log.warning("Telegram Mode action=%s: %s", action, error)
+            dialog = getattr(self, "_telegram_settings_dlg", None)
+            if action == "restart" and dialog is not None:
+                dialog.show_error(error)
         if not result.get("hosts_ok", True):
             _startup_log.warning("Telegram Web action=%s: %s", action, result.get("hosts_error", ""))
         self._set_telegram_mode_busy(False)
@@ -3905,11 +3844,15 @@ class MainWindow(QWidget):
                 return True
         except Exception:
             pass
-        return _telegram_desktop_has_local_proxy_connection(_get_telegram_proxy_port(self.settings))
+        return _telegram_desktop_has_local_proxy_connection(_get_telegram_proxy_options(self.settings).port)
 
     def _open_telegram_proxy_link(self) -> bool:
         try:
-            return bool(QDesktopServices.openUrl(QUrl(_get_telegram_proxy_link(self.settings))))
+            link = (
+                self.telegram_proxy.proxy_link() if self.telegram_proxy.is_running()
+                else _get_telegram_proxy_link(self.settings)
+            )
+            return bool(QDesktopServices.openUrl(QUrl(link)))
         except Exception:
             return False
 
@@ -4010,52 +3953,31 @@ class MainWindow(QWidget):
         _set_telegram_hosts_action_status(ok, "" if ok else error or "Telegram Web: hosts update failed", self.settings)
         self._update_telegram_mode_ui()
 
-    def show_telegram_mode_help(self) -> None:
-        port = _get_telegram_proxy_port(self.settings)
-        if (
-            _is_telegram_mode_enabled(self.settings)
-            and not bool(getattr(self, "_telegram_help_proxy_link_sent_this_session", False))
-            and not self._telegram_proxy_has_client_connection()
-        ):
-            self._telegram_help_proxy_link_sent_this_session = True
-            self._open_telegram_proxy_link()
+    def open_telegram_mode_settings(self) -> None:
+        dialog = self._telegram_settings_dlg
+        if dialog is None:
+            dialog = TelegramModeSettingsDialog(self)
+            self._telegram_settings_dlg = dialog
+            dialog.finished.connect(lambda _: setattr(self, "_telegram_settings_dlg", None))
+            _center_widget_on_screen(dialog, self)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
-        try:
-            if self._telegram_help_msg is not None and self._telegram_help_msg.isVisible():
-                self._telegram_help_msg.close()
-        except Exception:
-            pass
-
-        text = (
-            "Как это работает: приложение добавит записи для Telegram Web в hosts "
-            "и запустит локальный MTProto proxy.\n\n"
-            "После включения Telegram Mode, откроется Telegram Desktop(если скачен) и через несколько секунд появится запрос на подключение, нажмите 'Подключить'.\n"
-            "Если автоматическое подключение не появилось, попробуйте нажать на 'вопросик'. Если и это не помогло, добавьте протокол вручную.\n\n"
-            "Как добавить вручную: Настройки->Тип соединения->Использовать собственный прокси->MTProto proxy.\n"
-            f"Сервер: 127.0.0.1\nПорт: {int(port)}\n"
-            f"Secret: dd{_get_telegram_proxy_secret(self.settings)}"
-            if self.lang == "ru" else
-            "Enable Telegram Mode: the app will add Telegram Web hosts entries "
-            "and start a local MTProto proxy. The main bypass is not started.\n\n"
-            "Telegram Web: open web.telegram.org in your browser.\n\n"
-            "Telegram Desktop: use MTProto proxy, not SOCKS5.\n"
-            f"Server: 127.0.0.1\nPort: {int(port)}\n"
-            f"Secret: dd{_get_telegram_proxy_secret(self.settings)}"
-        )
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Telegram Mode")
-        msg.setIcon(QMessageBox.Icon.NoIcon)
-        msg.setText(text)
-        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-        msg.setWindowModality(Qt.WindowModality.NonModal)
-        self._telegram_help_msg = msg
-        msg.finished.connect(lambda _=0: setattr(self, "_telegram_help_msg", None))
-        msg.adjustSize()
-        _center_widget_on_screen(msg, self)
-        msg.show()
-        msg.raise_()
-        msg.activateWindow()
+    def apply_telegram_proxy_settings(self, options: TelegramProxyOptions, action: str) -> bool:
+        if self._exiting or self._telegram_mode_busy or self._telegram_mode_worker is not None:
+            raise RuntimeError(
+                "Дождитесь завершения текущей настройки Telegram Mode."
+                if self.lang == "ru" else "Wait for Telegram Mode to finish its current operation."
+            )
+        running = self.telegram_proxy.is_running()
+        if action == "restart" or (running and self.telegram_proxy.options != options) or (not running and action == "open"):
+            self._start_telegram_mode_worker("restart", options=options, open_link=action == "open")
+            return True
+        _save_telegram_proxy_options(self.settings, options)
+        if action == "open" and not self._open_telegram_proxy_link():
+            self._telegram_settings_dlg.show_open_error()
+        return False
 
     def _ensure_telegram_mode_ready_for_bypass(self) -> None:
         if not _is_telegram_mode_enabled(self.settings):
@@ -4064,10 +3986,8 @@ class MainWindow(QWidget):
 
         _apply_telegram_mode_files(True, self.settings)
         if not self.telegram_proxy.is_running():
-            port = _get_telegram_proxy_port(self.settings)
-            secret = _get_telegram_proxy_secret(self.settings)
             try:
-                self.telegram_proxy.start(port, secret)
+                self.telegram_proxy.start(options=_get_telegram_proxy_options(self.settings))
                 _set_telegram_last_error("", self.settings)
             except Exception as e:
                 _set_telegram_last_error(str(e), self.settings)

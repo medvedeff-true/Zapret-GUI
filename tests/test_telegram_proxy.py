@@ -8,7 +8,7 @@ import unittest
 from collections import deque
 from unittest.mock import AsyncMock, Mock, patch
 
-from tg_ws_proxy_vendor.proxy import __version__, bridge, raw_websocket, tg_ws_proxy
+from tg_ws_proxy_vendor.proxy import __version__, bridge, cf_h2, raw_websocket, tg_ws_proxy
 from tg_ws_proxy_vendor.proxy.config import ProxyConfig
 from zapret_gui.telegram_proxy import TelegramProxyController, TelegramProxyError
 
@@ -238,12 +238,36 @@ class TelegramMediaRoutingTests(unittest.IsolatedAsyncioTestCase):
             ))
         tcp.assert_awaited_once()
 
-    async def test_media_relay_first_tries_cf_before_direct(self):
+    async def test_media_relay_first_uses_h2_before_websockets(self):
+        channel = Mock()
+        h2_pool = Mock(open=AsyncMock(return_value=channel))
+        direct = AsyncMock(return_value=True)
+        with (
+            patch.object(bridge, "proxy_config", ProxyConfig()),
+            patch.object(bridge, "bridge_h2", new=AsyncMock()) as h2_bridge,
+            patch.object(bridge, "_cfproxy_fallback", new=AsyncMock()) as cf,
+            patch.object(bridge, "_tcp_fallback", new=AsyncMock()) as tcp,
+        ):
+            reader, writer, ctx = Mock(), Mock(), Mock()
+            self.assertTrue(await bridge.do_fallback(
+                reader, writer, b"", "media", 2, False, True, " media",
+                ctx, h2_pool=h2_pool, proto_tag=tg_ws_proxy.PROTO_TAG_SECURE,
+                try_direct=direct,
+            ))
+        h2_pool.open.assert_awaited_once_with(2, "media")
+        h2_bridge.assert_awaited_once_with(
+            reader, writer, channel, ctx, tg_ws_proxy.PROTO_TAG_SECURE,
+        )
+        direct.assert_not_awaited()
+        cf.assert_not_awaited()
+        tcp.assert_not_awaited()
+
+    async def test_unavailable_h2_tries_direct_before_cf_websocket(self):
         steps = []
 
-        async def cf_unavailable(*_args, **_kwargs):
-            steps.append("cf")
-            return False
+        async def h2_unavailable(*_args):
+            steps.append("h2")
+            return None
 
         async def direct_available():
             steps.append("direct")
@@ -251,14 +275,225 @@ class TelegramMediaRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(bridge, "proxy_config", ProxyConfig()),
-            patch.object(bridge, "_cfproxy_fallback", side_effect=cf_unavailable),
+            patch.object(bridge, "_cfproxy_fallback", new=AsyncMock()) as cf,
         ):
             self.assertTrue(await bridge.do_fallback(
                 Mock(), Mock(), b"", "media", 2, False, True, " media",
-                Mock(), h2_pool=None, proto_tag=tg_ws_proxy.PROTO_TAG_SECURE,
+                Mock(), h2_pool=Mock(open=AsyncMock(side_effect=h2_unavailable)),
+                proto_tag=tg_ws_proxy.PROTO_TAG_SECURE,
                 try_direct=direct_available,
             ))
-        self.assertEqual(steps, ["cf", "direct"])
+        self.assertEqual(steps, ["h2", "direct"])
+        cf.assert_not_awaited()
+
+    async def test_media_without_h2_or_direct_can_still_use_cf_websocket(self):
+        steps = []
+
+        async def direct_unavailable():
+            steps.append("direct")
+            return False
+
+        async def cf_available(*_args, **_kwargs):
+            steps.append("cf")
+            return True
+
+        with (
+            patch.object(bridge, "proxy_config", ProxyConfig()),
+            patch.object(bridge, "_cfproxy_fallback", side_effect=cf_available),
+        ):
+            self.assertTrue(await bridge.do_fallback(
+                Mock(), Mock(), b"", "media", 2, False, True, " media",
+                Mock(), try_direct=direct_unavailable,
+            ))
+        self.assertEqual(steps, ["direct", "cf"])
+
+    async def test_media_cf_automatically_uses_port80_when_tls_is_blocked(self):
+        modes = []
+        ws = Mock(send=AsyncMock())
+
+        async def connect(*_args, **kwargs):
+            modes.append(kwargs["secure"])
+            if kwargs["secure"]:
+                raise asyncio.TimeoutError()
+            return ws
+
+        with (
+            patch.object(bridge, "proxy_config", ProxyConfig()),
+            patch.object(bridge, "_media_cf_retry_after", {}),
+            patch.object(bridge, "_media_cf_plain_until", {}),
+            patch.object(bridge.balancer, "get_domains_for_dc", return_value=["relay.invalid"]),
+            patch.object(bridge.balancer, "update_domain_for_dc"),
+            patch.object(raw_websocket.RawWebSocket, "connect",
+                         new=AsyncMock(side_effect=connect)),
+            patch.object(bridge, "bridge_ws_reencrypt",
+                         new=AsyncMock(return_value=(64, 1024))),
+        ):
+            self.assertTrue(await bridge._cfproxy_fallback(
+                Mock(), Mock(), b"init", "media", Mock(), dc=2, is_media=True,
+            ))
+            retry_tls_at = bridge._media_cf_plain_until[2]
+            self.assertTrue(await bridge._cfproxy_fallback(
+                Mock(), Mock(), b"init", "media", Mock(), dc=2, is_media=True,
+            ))
+            self.assertEqual(bridge._media_cf_plain_until[2], retry_tls_at)
+            self.assertEqual(modes, [True, False, False])
+            bridge._media_cf_plain_until[2] = 0
+            self.assertTrue(await bridge._cfproxy_fallback(
+                Mock(), Mock(), b"init", "media", Mock(), dc=2, is_media=True,
+            ))
+            self.assertEqual(modes, [True, False, False, True, False])
+
+    async def test_message_cf_does_not_automatically_disable_tls(self):
+        with (
+            patch.object(bridge, "proxy_config", ProxyConfig()),
+            patch.object(bridge.balancer, "get_domains_for_dc", return_value=["relay.invalid"]),
+            patch.object(raw_websocket.RawWebSocket, "connect",
+                         new=AsyncMock(side_effect=asyncio.TimeoutError)) as connect,
+        ):
+            self.assertFalse(await bridge._cfproxy_fallback(
+                Mock(), Mock(), b"init", "message", Mock(), dc=2, is_media=False,
+            ))
+        connect.assert_awaited_once()
+        self.assertTrue(connect.await_args.kwargs["secure"])
+
+    async def test_media_cf_fallback_keeps_a_total_deadline(self):
+        async def stalled(*_args, **_kwargs):
+            await asyncio.Future()
+
+        with (
+            patch.object(bridge, "proxy_config", ProxyConfig()),
+            patch.object(bridge, "_media_cf_retry_after", {}),
+            patch.object(bridge, "_media_cf_plain_until", {}),
+            patch.object(bridge, "CF_WS_ATTEMPT_TIMEOUT", 0.02),
+            patch.object(bridge, "CF_WS_SETUP_TIMEOUT", 0.05),
+            patch.object(bridge.balancer, "get_domains_for_dc",
+                         return_value=[f"relay{i}.invalid" for i in range(20)]),
+            patch.object(raw_websocket.RawWebSocket, "connect",
+                         new=AsyncMock(side_effect=stalled)),
+        ):
+            self.assertFalse(await asyncio.wait_for(bridge._cfproxy_fallback(
+                Mock(), Mock(), b"init", "media", Mock(), dc=2, is_media=True,
+            ), 1))
+
+    def test_stop_clears_media_transport_preference(self):
+        with patch.object(bridge, "_media_cf_plain_until", {2: float("inf")}):
+            bridge.reset_route_backoff()
+            self.assertFalse(bridge._media_cf_plain_until)
+
+    async def test_h2_not_used_for_messages_test_dcs_or_disabled_cf(self):
+        for is_media, is_test_dc, enabled in (
+            (False, False, True),
+            (True, True, True),
+            (True, False, False),
+        ):
+            with self.subTest(media=is_media, test_dc=is_test_dc, cf=enabled):
+                config = ProxyConfig(fallback_cfproxy=enabled)
+                h2_pool = Mock(open=AsyncMock())
+                with (
+                    patch.object(bridge, "proxy_config", config),
+                    patch.object(bridge, "_cfproxy_fallback",
+                                 new=AsyncMock(return_value=False)),
+                    patch.object(bridge, "_tcp_fallback",
+                                 new=AsyncMock(return_value=True)) as tcp,
+                ):
+                    self.assertTrue(await bridge.do_fallback(
+                        Mock(), Mock(), b"", "test", 2, is_test_dc, is_media, "",
+                        Mock(), h2_pool=h2_pool, proto_tag=tg_ws_proxy.PROTO_TAG_SECURE,
+                    ))
+                h2_pool.open.assert_not_awaited()
+                tcp.assert_awaited_once()
+
+    async def test_h2_media_transfers_large_encrypted_reply_for_all_native_protocols(self):
+        # Use the real listener, secret/DC handshake, AES streams and H2
+        # packet conversion. Only the external HTTP channel is replaced.
+        for tag in (
+            tg_ws_proxy.PROTO_TAG_ABRIDGED,
+            tg_ws_proxy.PROTO_TAG_INTERMEDIATE,
+            tg_ws_proxy.PROTO_TAG_SECURE,
+        ):
+            for dc in (2, 4):
+                with self.subTest(proto=tag.hex(), dc=dc):
+                    await self._check_h2_media_transfer(tag, dc)
+
+    async def _check_h2_media_transfer(self, tag, dc):
+        config = ProxyConfig(media_cf_first={2})
+        secret = b"\x01" * 16
+        handshake = tg_ws_proxy._generate_relay_init(tag, -dc)
+        keys = handshake[8:56]
+
+        def key_stream(key):
+            return tg_ws_proxy.Cipher(
+                tg_ws_proxy.algorithms.AES(key), tg_ws_proxy.modes.CTR(keys[32:]),
+            ).encryptor().update(bytes(64))[56:]
+
+        tail = bytes(a ^ b ^ c for a, b, c in zip(
+            handshake[56:], key_stream(keys[:32]),
+            key_stream(hashlib.sha256(keys[:32] + secret).digest()),
+        ))
+        handshake = handshake[:56] + tail
+        native = tg_ws_proxy._build_crypto_ctx(keys, secret, handshake)
+        request = b"r" * 56  # 24-byte MTProto header + aligned encrypted body
+        reply = b"\x01" * 24 + bytes(range(256)) * 1024
+        requested = asyncio.Event()
+        finished = asyncio.Event()
+        delivered = False
+
+        async def send(body, quick):
+            self.assertEqual(body, request)
+            self.assertFalse(quick)
+            requested.set()
+
+        async def receive():
+            nonlocal delivered
+            await requested.wait()
+            if delivered:
+                await asyncio.Future()
+            delivered = True
+            return reply
+
+        async def recover():
+            await asyncio.Future()
+
+        async def handle(reader, writer):
+            try:
+                await tg_ws_proxy._handle_client(reader, writer, secret)
+            finally:
+                finished.set()
+
+        channel = Mock(
+            closed=False, transport_error=None, down=0, label="media", channel_id=1,
+            send=AsyncMock(side_effect=send), receive=AsyncMock(side_effect=receive),
+            _recover=AsyncMock(side_effect=recover), close=AsyncMock(),
+        )
+        h2_pool = Mock(open=AsyncMock(return_value=channel))
+        with (
+            patch.object(tg_ws_proxy, "proxy_config", config),
+            patch.object(bridge, "proxy_config", config),
+            patch.object(tg_ws_proxy, "cf_h2_pool", h2_pool),
+            patch.object(tg_ws_proxy.ws_pool, "get", new=AsyncMock(return_value=None)),
+            patch.object(tg_ws_proxy.ws_pool, "connect_direct",
+                         new=AsyncMock(return_value=None)),
+            patch.object(bridge, "_cfproxy_fallback", new=AsyncMock()) as cf_ws,
+        ):
+            server = await asyncio.start_server(handle, "127.0.0.1", 0)
+            async with server:
+                reader, writer = await asyncio.open_connection(*server.sockets[0].getsockname())
+                try:
+                    writer.write(handshake + native.clt_dec.update(cf_h2._encode_reply(request, tag)))
+                    await writer.drain()
+                    body, quick = await asyncio.wait_for(
+                        cf_h2._read_packet(reader, native.clt_enc, tag), 2,
+                    )
+                    self.assertEqual(body, reply)
+                    self.assertFalse(quick)
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+                await asyncio.wait_for(finished.wait(), 1)
+        h2_pool.open.assert_awaited_once()
+        self.assertEqual(h2_pool.open.await_args.args[0], dc)
+        channel.close.assert_awaited_once()
+        cf_ws.assert_not_awaited()
 
     async def test_media_relay_that_never_answers_is_skipped_on_reconnect(self):
         async def blocked():
@@ -273,7 +508,7 @@ class TelegramMediaRoutingTests(unittest.IsolatedAsyncioTestCase):
         cipher.update.side_effect = lambda data: data
         ctx = bridge.CryptoCtx(cipher, cipher, cipher, cipher)
         ws = Mock(send=AsyncMock(), recv=AsyncMock(side_effect=blocked), close=AsyncMock())
-        direct = AsyncMock(return_value=True)
+        direct = AsyncMock(side_effect=[False, True])
         with (
             patch.object(bridge, "proxy_config", ProxyConfig()),
             patch.object(bridge, "_media_cf_retry_after", {}),
@@ -290,9 +525,10 @@ class TelegramMediaRoutingTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(await asyncio.wait_for(attempt(), 1))
             ws.close.assert_awaited_once()
-            direct.assert_not_awaited()  # do not replay a stream already sent to CF
+            # Only the preflight attempt: never replay a stream sent to CF.
+            self.assertEqual(direct.await_count, 1)
             self.assertTrue(await asyncio.wait_for(attempt(), 1))
-            direct.assert_awaited_once()
+            self.assertEqual(direct.await_count, 2)
             connect.assert_awaited_once()
 
     async def test_media_relay_forwards_large_payload_after_negative_dc_handshake(self):
@@ -347,12 +583,15 @@ class TelegramMediaRoutingTests(unittest.IsolatedAsyncioTestCase):
         ws = Mock(send=AsyncMock(side_effect=send), recv=AsyncMock(side_effect=recv), close=AsyncMock())
         with (
             patch.object(tg_ws_proxy, "proxy_config", config),
+            patch.object(tg_ws_proxy, "cf_h2_pool", None),
             patch.object(bridge, "proxy_config", config),
             patch.object(bridge, "_media_cf_retry_after", {}),
             patch.object(bridge.balancer, "get_domains_for_dc", return_value=["relay.invalid"]),
             patch.object(bridge.balancer, "update_domain_for_dc"),
             patch.object(raw_websocket.RawWebSocket, "connect", new=AsyncMock(return_value=ws)),
-            patch.object(tg_ws_proxy.ws_pool, "get", new=AsyncMock()) as direct_get,
+            patch.object(tg_ws_proxy.ws_pool, "get", new=AsyncMock(return_value=None)),
+            patch.object(tg_ws_proxy.ws_pool, "connect_direct",
+                         new=AsyncMock(return_value=None)),
         ):
             server = await asyncio.start_server(handle, "127.0.0.1", 0)
             async with server:
@@ -366,7 +605,6 @@ class TelegramMediaRoutingTests(unittest.IsolatedAsyncioTestCase):
                     writer.close()
                     await writer.wait_closed()
                 await asyncio.wait_for(finished.wait(), 1)
-        direct_get.assert_not_awaited()
 
     async def test_cold_primary_connection_tries_direct_ws_before_cf(self):
         config = ProxyConfig()

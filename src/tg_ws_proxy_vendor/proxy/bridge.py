@@ -31,6 +31,7 @@ _tcp_failures: Dict[Tuple[str, int], int] = {}
 _tcp_retry_after: Dict[Tuple[str, int], float] = {}
 _tcp_connecting: Set[Tuple[str, int]] = set()
 _media_cf_retry_after: Dict[int, float] = {}
+_media_cf_plain_until: Dict[int, float] = {}
 
 
 def reset_route_backoff() -> None:
@@ -38,6 +39,7 @@ def reset_route_backoff() -> None:
     _tcp_retry_after.clear()
     _tcp_connecting.clear()
     _media_cf_retry_after.clear()
+    _media_cf_plain_until.clear()
 
 
 class CryptoCtx:
@@ -156,10 +158,12 @@ async def do_fallback(reader, writer, relay_init, label,
 
     if worker_domains and fallback_dst:
         methods.append('cf_worker')
-    if use_cf:
-        methods.append('cf')
+    if use_cf and is_media and h2_pool is not None and proto_tag is not None:
+        methods.append('h2')
     if try_direct is not None:
         methods.append('direct')
+    if use_cf:
+        methods.append('cf')
     if fallback_dst:
         methods.append('tcp')
 
@@ -171,17 +175,19 @@ async def do_fallback(reader, writer, relay_init, label,
                 fallback_dst=fallback_dst, splitter=splitter)
             if ok:
                 return True
+        elif method == 'h2':
+            # Media relay-first must still use Flowseal's HTTP transport.
+            # A successful CF WebSocket upgrade does not guarantee that
+            # the relay will deliver file requests. Setup is bounded by
+            # CfH2Pool; if unavailable, try direct WS before CF WS.
+            channel = await h2_pool.open(dc, label)
+            if channel is not None:
+                media_log.info("Telegram Desktop media DC%d: CF HTTP/2", dc)
+                stats.connections_h2 += 1
+                stats.connections_cfproxy += 1
+                await bridge_h2(reader, writer, channel, ctx, proto_tag)
+                return True
         elif method == 'cf':
-            # On relay-first routes go straight to WS instead of spending
-            # an extra setup deadline on the HTTP/2 probe.
-            if is_media and try_direct is None and h2_pool is not None and proto_tag is not None:
-                channel = await h2_pool.open(dc, label)
-                if channel is not None:
-                    media_log.info("Telegram Desktop media DC%d: CF HTTP/2", dc)
-                    stats.connections_h2 += 1
-                    stats.connections_cfproxy += 1
-                    await bridge_h2(reader, writer, channel, ctx, proto_tag)
-                    return True
             ok = await _cfproxy_fallback(
                 reader, writer, relay_init, label, ctx,
                 dc=dc, is_media=is_media,
@@ -258,6 +264,7 @@ async def _cfproxy_fallback(reader, writer, relay_init, label,
     media_tag = ' media' if is_media else ''
     ws = None
     chosen_domain = None
+    chosen_secure = not proxy_config.disable_secure
 
     log.info("[%s] DC%d%s -> trying CF proxy",
             label, dc, media_tag)
@@ -266,28 +273,39 @@ async def _cfproxy_fallback(reader, writer, relay_init, label,
     loop = asyncio.get_running_loop()
     if is_media and loop.time() < _media_cf_retry_after.get(dc, 0):
         return False
+    secure_modes = (not proxy_config.disable_secure,)
+    if is_media and not proxy_config.disable_secure:
+        # Some networks block CF TLS while the same MTProto WS relay is
+        # reachable on port 80. MTProto payloads remain encrypted; only the
+        # outer TLS layer is absent. Leave message/direct/H2 transports
+        # untouched and periodically retry TLS.
+        secure_modes = ((False, True) if loop.time() < _media_cf_plain_until.get(dc, 0)
+                        else (True, False))
     deadline = loop.time() + CF_WS_SETUP_TIMEOUT
     for base_domain in balancer.get_domains_for_dc(dc):
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            break
         domain = f'kws{dc}.{base_domain}'
-        try:
-            timeout = min(remaining, CF_WS_ATTEMPT_TIMEOUT)
-            candidate = await asyncio.wait_for(
-                RawWebSocket.connect(domain, domain, timeout=timeout,
-                                     secure=not proxy_config.disable_secure),
-                timeout,
-            )
+        for secure in secure_modes:
             remaining = deadline - loop.time()
-            if not await send_ws_relay_init(candidate, relay_init, timeout=remaining):
-                continue
-            ws = candidate
-            chosen_domain = base_domain
+            if remaining <= 0:
+                break
+            try:
+                timeout = min(remaining, CF_WS_ATTEMPT_TIMEOUT)
+                candidate = await asyncio.wait_for(
+                    RawWebSocket.connect(domain, domain, timeout=timeout, secure=secure),
+                    timeout,
+                )
+                remaining = deadline - loop.time()
+                if not await send_ws_relay_init(candidate, relay_init, timeout=remaining):
+                    continue
+                ws = candidate
+                chosen_domain = base_domain
+                chosen_secure = secure
+                break
+            except Exception as exc:
+                log.warning("[%s] DC%d%s CF proxy port %d failed: %s",
+                            label, dc, media_tag, 443 if secure else 80, repr(exc))
+        if ws is not None or loop.time() >= deadline:
             break
-        except Exception as exc:
-            log.warning("[%s] DC%d%s CF proxy failed: %s",
-                        label, dc, media_tag, repr(exc))
 
     if ws is None:
         if is_media:
@@ -296,10 +314,15 @@ async def _cfproxy_fallback(reader, writer, relay_init, label,
 
     if is_media:
         _media_cf_retry_after.pop(dc, None)
+        if chosen_secure:
+            _media_cf_plain_until.pop(dc, None)
+        elif not proxy_config.disable_secure and secure_modes[0]:
+            _media_cf_plain_until[dc] = loop.time() + CF_WS_RETRY_DELAY
     log.debug('[%s] WS CONNECT DC%d%s route=cf setup_ms=%.0f',
               label, dc, media_tag, (time.monotonic() - connect_started) * 1000)
     if is_media:
-        media_log.info("Telegram Desktop media DC%d: CF WebSocket", dc)
+        media_log.info("Telegram Desktop media DC%d: CF WebSocket port %d",
+                       dc, 443 if chosen_secure else 80)
     if chosen_domain and balancer.update_domain_for_dc(dc, chosen_domain):
         log.info("[%s] Switched active CF domain", label)
 

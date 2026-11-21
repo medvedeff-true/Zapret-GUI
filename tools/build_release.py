@@ -50,6 +50,7 @@ APP_MODULE_FILES = (
     "adaptive_ui.py",
     "ui_controls.py",
     "site_manager.py",
+    "telegram_settings_ui.py",
     "main_window.py",
     "application_lifecycle.py",
 )

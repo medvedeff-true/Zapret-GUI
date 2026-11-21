@@ -12,6 +12,7 @@ import base64
 import math
 import tempfile
 import threading
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from PyQt6.QtCore import (
@@ -29,7 +30,8 @@ from PyQt6.QtWidgets import (
     QSystemTrayIcon, QMenu, QTextBrowser, QProgressDialog, QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect, QStackedWidget,
     QListWidget, QListWidgetItem, QListView, QTabWidget, QToolButton, QFileDialog, QLineEdit,
-    QAbstractItemView, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTabBar, QFrame, QProgressBar, QToolTip
+    QAbstractItemView, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTabBar, QFrame, QProgressBar, QToolTip,
+    QScrollArea, QFormLayout, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QGroupBox
 )
 import shutil
 import requests
@@ -43,7 +45,7 @@ from ctypes import wintypes
 import json
 import hashlib
 from urllib.parse import quote, urlsplit
-from zapret_gui.telegram_proxy import TelegramProxyController
+from zapret_gui.telegram_proxy import TelegramProxyController, TelegramProxyOptions, TelegramProxyError
 from zapret_gui.traffic_modes import (
     TRAFFIC_MODE_ALL,
     TRAFFIC_MODE_APPLICATIONS,
@@ -106,24 +108,6 @@ from adaptive_strategy.resources import ensure_adaptive_runtime
 DNS_MALW_AI_GROUP_LABELS = {key: group.label for key, group in _AI_DNS_GROUPS.items()}
 
 
-if __name__ == "__main__" and "--startup-self-test" in sys.argv:
-    # An explicit packaging probe: load Qt and the real onefile imports without
-    # touching Run, services, hosts, runtime migration or the user's settings.
-    destination = sys.argv[sys.argv.index("--startup-self-test") + 1]
-    probe = QApplication(sys.argv)
-    QTimer.singleShot(50, probe.quit)
-    result = probe.exec()
-    Path(destination).write_text(json.dumps({
-        "exit_code": result,
-        "frozen": bool(getattr(sys, "frozen", False)),
-        "executable": sys.executable,
-        "cwd": os.getcwd(),
-        "argv": sys.argv,
-        "tray_available": QSystemTrayIcon.isSystemTrayAvailable(),
-    }, ensure_ascii=False), encoding="utf-8")
-    raise SystemExit(result)
-
-
 # The executable entry point and backwards-compatible public module.
 #
 # Feature code is separated into app_modules/*.py.  Fragments are executed in
@@ -143,6 +127,7 @@ _SOURCE_FRAGMENT_NAMES = (
     'adaptive_ui.py',
     'ui_controls.py',
     'site_manager.py',
+    'telegram_settings_ui.py',
     'main_window.py',
     'application_lifecycle.py',
 )
@@ -208,4 +193,21 @@ del _source_fragments_root
 
 
 if __name__ == '__main__':
+    if "--startup-self-test" in sys.argv:
+        # Exercise the embedded fragments too, without touching the user's
+        # settings, services, hosts, or runtime.
+        destination = sys.argv[sys.argv.index("--startup-self-test") + 1]
+        probe = QApplication(sys.argv)
+        QTimer.singleShot(50, probe.quit)
+        result = probe.exec()
+        Path(destination).write_text(json.dumps({
+            "exit_code": result,
+            "version": APP_VERSION,
+            "frozen": bool(getattr(sys, "frozen", False)),
+            "executable": sys.executable,
+            "cwd": os.getcwd(),
+            "argv": sys.argv,
+            "tray_available": QSystemTrayIcon.isSystemTrayAvailable(),
+        }, ensure_ascii=False), encoding="utf-8")
+        raise SystemExit(result)
     main()
