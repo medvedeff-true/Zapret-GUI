@@ -61,12 +61,21 @@ def write_manifest(source: Path, files: dict[str, bytes]) -> None:
 
 
 class RuntimeManifestInstallerTests(unittest.TestCase):
+    def test_runtime_paths_require_dbank_fake_udp_component(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = make_runtime_paths(Path(temporary))
+            self.assertIn(paths.fake_udp_dbank, paths.missing())
+
     def test_packaged_runtime_does_not_include_notice_file(self) -> None:
         packaged = Path(__file__).resolve().parents[1] / "resources" / "adaptive-runtime"
         manifest = load_runtime_manifest(packaged)
 
         self.assertEqual("https://github.com/bol-van/zapret-win-bundle", manifest["source"])
         self.assertNotIn("NOTICE.txt", [entry["path"] for entry in manifest["files"]])
+        self.assertIn(
+            "core/bin/quic_initial_dbankcloud_ru.bin",
+            [entry["path"] for entry in manifest["files"]],
+        )
         self.assertFalse((packaged / "NOTICE.txt").exists())
 
     def test_installer_reuses_verified_files_and_repairs_corruption(self) -> None:
@@ -108,6 +117,25 @@ class RuntimeManifestInstallerTests(unittest.TestCase):
                 (destination / "manifest.json").read_bytes(),
             )
             self.assertEqual([], list(destination.rglob("*.installing")))
+
+    def test_installer_repairs_project_runtime_component(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "packaged"
+            destination = root / "installed"
+            write_manifest(
+                source,
+                {"core/bin/quic_initial_dbankcloud_ru.bin": b"dbank-component"},
+            )
+            manifest_path = source / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["files"][0]["destination"] = "project/core/bin/quic_initial_dbankcloud_ru.bin"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            ensure_adaptive_runtime(source, destination, project_root=root)
+
+            restored = root / "core/bin/quic_initial_dbankcloud_ru.bin"
+            self.assertEqual(b"dbank-component", restored.read_bytes())
 
     def test_installer_removes_only_the_legacy_generated_notice(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

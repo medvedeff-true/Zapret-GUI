@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unicodedata
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from pathlib import Path
 from .catalog import tcp_strategy_by_id
 from .hostlist import grouped_targets, profile_hosts
 from .models import SearchOutcome, Strategy
+from .resources import AdaptiveRuntimeError, ensure_adaptive_runtime
 from .runtime import CREATE_NO_WINDOW, RuntimePaths, run_external
 
 
@@ -147,9 +149,20 @@ def validate_strategy_name(
 class ZapretGuiBatGenerator:
     """Render a confirmed outcome as one Zapret GUI profile BAT."""
 
-    def __init__(self, paths: RuntimePaths, strategies_dir: Path | str) -> None:
+    def __init__(
+        self,
+        paths: RuntimePaths,
+        strategies_dir: Path | str,
+        *,
+        runtime_source: Path | str | None = None,
+    ) -> None:
         self.paths = paths
         self.strategies_dir = Path(strategies_dir).resolve()
+        self.runtime_source = (
+            Path(runtime_source).resolve()
+            if runtime_source is not None
+            else self._default_runtime_source()
+        )
 
     def generate(self, outcome: SearchOutcome, requested_name: str, *, lang: str = "ru") -> Path:
         if not outcome.success:
@@ -167,6 +180,7 @@ class ZapretGuiBatGenerator:
             raise ValueError(error)
 
         runtime_arguments = self.build_arguments(outcome, for_bat=False)
+        self._validate_runtime_files(runtime_arguments)
         self._dry_run(runtime_arguments)
         bat_arguments = self.build_arguments(outcome, for_bat=True)
         content = self._bat_text(outcome, bat_arguments)
@@ -206,6 +220,78 @@ class ZapretGuiBatGenerator:
                 pass
         outcome.output_dir = destination
         return destination
+
+    def _validate_runtime_files(self, arguments: list[str]) -> None:
+        """Ensure every binary referenced by a generated profile is usable."""
+        referenced: list[Path] = []
+        seen: set[Path] = set()
+        for argument in arguments:
+            if ".bin" not in argument.casefold():
+                continue
+            value = argument.rsplit("=", 1)[-1].strip().strip('"')
+            path = Path(value)
+            if path.suffix.casefold() != ".bin":
+                continue
+            path = path.resolve()
+            if path not in seen:
+                seen.add(path)
+                referenced.append(path)
+
+        missing = [path for path in referenced if not path.is_file()]
+        if not missing:
+            return
+
+        if self.runtime_source is None:
+            reason = "нет доступа к официальному источнику обновления"
+        else:
+            try:
+                ensure_adaptive_runtime(
+                    self.runtime_source,
+                    self.paths.bundle_root,
+                    project_root=self.paths.project_root,
+                )
+            except (AdaptiveRuntimeError, OSError) as exc:
+                if not (self.runtime_source / "manifest.json").is_file():
+                    reason = (
+                        "нет доступа к официальному источнику обновления: "
+                        f"{exc}"
+                    )
+                else:
+                    reason = str(exc)
+            else:
+                reason = ""
+
+        still_missing = [path for path in referenced if not path.is_file()]
+        if still_missing:
+            if not reason:
+                reason = "компонент отсутствует в manifest официального runtime"
+            display_paths: list[str] = []
+            for component in still_missing:
+                try:
+                    display_path = component.relative_to(self.paths.project_root)
+                except ValueError:
+                    display_path = component
+                display_paths.append(str(display_path))
+            raise RuntimeError(
+                "Не удалось восстановить компонент runtime:\n"
+                + "\n".join(display_paths) + "\n\n"
+                f"Причина: {reason}\n\n"
+                "Проверьте подключение к интернету или переустановите runtime."
+            )
+
+    def _default_runtime_source(self) -> Path | None:
+        """Locate only the runtime bundled with this application."""
+        candidates = [
+            self.paths.project_root / "resources" / "adaptive-runtime",
+            self.paths.project_root / "adaptive-runtime",
+        ]
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.insert(0, Path(meipass) / "adaptive-runtime")
+        for candidate in candidates:
+            if (candidate / "manifest.json").is_file():
+                return candidate.resolve()
+        return None
 
     @staticmethod
     def _publish_without_overwrite(temporary: Path, destination: Path) -> None:

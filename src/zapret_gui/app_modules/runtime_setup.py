@@ -203,6 +203,12 @@ def extract_files_from_meipass():
         )
 
     try:
+        _refresh_bundled_app_engine(base_src)
+    except PermissionError as error:
+        # Leave a legacy ACL-protected runtime intact until it can be repaired.
+        _startup_log.warning("Could not update the application engine: %s", error)
+
+    try:
         src_uninstall = os.path.join(base_src, "core", "fast", "uninstall.bat")
         if os.path.exists(src_uninstall) and (not os.path.exists(REMOVE_BAT)):
             _safe_copy_file(src_uninstall, REMOVE_BAT, overwrite=False)
@@ -210,10 +216,24 @@ def extract_files_from_meipass():
         pass
 
     if hasattr(sys, "_MEIPASS"):
-        # Core can legitimately be newer than the GUI bundle after a separate
-        # core update. Same-version startup therefore checks completeness only;
-        # byte-for-byte bundle verification is reserved for GUI migration.
-        _validate_runtime_tree(APP_DIR)
+        # The upstream core can legitimately be newer than the bundled copy.
+        # Only our private backend is refreshed by content on each startup.
+        try:
+            _validate_runtime_tree(APP_DIR)
+        except RuntimeMigrationError:
+            # A deny-only ACL on an old runtime must not turn the GUI into a
+            # dead end. The SYSTEM repair path gets another chance when the
+            # bypass is first started; presentation assets are optional.
+            inaccessible = any(
+                os.path.lexists(os.path.join(APP_DIR, folder))
+                and not _runtime_tree_is_accessible(os.path.join(APP_DIR, folder))
+                for folder in ("core", "background_service")
+            )
+            if not inaccessible:
+                raise
+            _startup_log.warning(
+                "Installed runtime is present but inaccessible; continuing without replacing it"
+            )
 
 def unblock_core_tree(core_dir: str) -> None:
     if not os.path.isdir(core_dir):
@@ -275,6 +295,7 @@ MANAGED_RUNTIME_CRITICAL_FILES = (
     os.path.join("core", "bin", "cygwin1.dll"),
     os.path.join("core", "bin", "WinDivert.dll"),
     os.path.join("core", "bin", "WinDivert64.sys"),
+    *(os.path.join("core", "bin", *name.split("/")) for name in APP_ENGINE_FILES),
     os.path.join("background_service", "ZapretGUI.Service.exe"),
 )
 
@@ -352,6 +373,52 @@ def _sha256_file_strict(path: str) -> str:
         return digest.hexdigest()
     except OSError as error:
         raise RuntimeMigrationError(f"Could not read runtime file {path}: {error}") from error
+
+
+def _refresh_bundled_app_engine(base_src: str) -> None:
+    """Refresh only the application backend, even if the GUI version is unchanged."""
+    bundled_bin = Path(base_src) / "core" / "bin"
+    installed_bin = Path(APP_DIR) / "core" / "bin"
+    if bundled_bin.resolve() == installed_bin.resolve():
+        return
+
+    def hashes(root: Path) -> dict[str, str]:
+        return {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in APP_ENGINE_FILES}
+
+    expected = hashes(bundled_bin)
+    try:
+        if hashes(installed_bin) == expected:
+            return
+    except FileNotFoundError:
+        pass
+
+    installed_bin.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=".application-engine-", dir=installed_bin))
+    app_dir = installed_bin / "medvedeff-winws"
+    backup = stage / "previous"
+    preserve_backup = False
+    try:
+        for name in APP_ENGINE_FILES:
+            target = stage / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(bundled_bin / name, target)
+        if hashes(stage) != expected:
+            raise RuntimeMigrationError("Application engine changed while staging")
+        if os.path.lexists(app_dir):
+            app_dir.rename(backup)
+        try:
+            (stage / app_dir.name).rename(app_dir)
+        except OSError:
+            if os.path.lexists(backup):
+                try:
+                    backup.rename(app_dir)
+                except OSError as error:
+                    preserve_backup = True
+                    raise RuntimeMigrationError(f"Could not restore application engine from {backup}") from error
+            raise
+    finally:
+        if not preserve_backup:
+            shutil.rmtree(stage, ignore_errors=True)
 
 
 def _validate_runtime_tree(runtime_root: str, compare_to: str | None = None) -> None:
@@ -472,10 +539,45 @@ def _migrate_bundled_runtime(base_src: str, previous_version: str) -> None:
     os.makedirs(APP_DIR, exist_ok=True)
     source_root = os.path.abspath(base_src)
     _validate_runtime_tree(source_root)
+    # A previous elevated build may have left deny-only ACLs on the managed
+    # runtime. Ask the already-installed SYSTEM service to repair them before
+    # attempting rename/replace. This is also the only path that may trigger
+    # the one-time service installation prompt.
+    runtime_accessible = True
+    try:
+        for folder in ("core", "background_service"):
+            path = os.path.join(APP_DIR, folder)
+            if os.path.isdir(path):
+                with os.scandir(path):
+                    pass
+        uninstall = os.path.join(APP_DIR, "uninstall.bat")
+        if os.path.isfile(uninstall):
+            with open(uninstall, "rb") as stream:
+                stream.read(1)
+    except OSError:
+        runtime_accessible = False
+    if not runtime_accessible:
+        try:
+            helper = _bundled_path("background_service", "ZapretGUI.Service.exe")
+            result = _bypass_service.repair_runtime_access(
+                helper,
+                _bundled_path("core", "bin"),
+            )
+            if result.get("installed") is False:
+                _bypass_service.ensure(helper, _bundled_path("core", "bin"))
+                _bypass_service.repair_runtime_access(
+                    helper,
+                    _bundled_path("core", "bin"),
+                )
+        except Exception:
+            # Preserve the original migration error if ACL repair is
+            # unavailable; this is still safe and avoids partial replacement.
+            pass
     source_uninstall = os.path.join(source_root, "core", "fast", "uninstall.bat")
     if not os.path.isfile(source_uninstall):
         raise RuntimeMigrationError(f"Bundled uninstall script is missing: {source_uninstall}")
 
+    _migrate_legacy_user_files()
     current_strategy_files = _read_core_strategy_files_strict(os.path.join(APP_DIR, "core"))
     replacement_names = _strategy_bat_names_from_dir(os.path.join(source_root, "core"))
     _backup_core_strategy_files_strict(
@@ -499,7 +601,22 @@ def _migrate_bundled_runtime(base_src: str, previous_version: str) -> None:
         shutil.copy2(source_uninstall, os.path.join(stage_root, "uninstall.bat"))
         _validate_runtime_tree(stage_root, source_root)
 
-        for name in [*MANAGED_RUNTIME_DIRS, "uninstall.bat"]:
+        replace_names = [*MANAGED_RUNTIME_DIRS, "uninstall.bat"]
+        flags_destination = os.path.join(APP_DIR, "flags")
+        try:
+            # A missing flags directory is normal on a fresh installation:
+            # the staged bundled flags must be installed.  Only preserve the
+            # directory when it exists but is inaccessible because of a
+            # legacy ACL.
+            if os.path.lexists(flags_destination):
+                with os.scandir(flags_destination):
+                    pass
+        except OSError:
+            # Visual assets are optional. Do not let a stale ACL on flags
+            # block migration of the actual runtime or prevent startup.
+            if os.path.lexists(flags_destination) and "flags" in replace_names:
+                replace_names.remove("flags")
+        for name in replace_names:
             destination = os.path.join(APP_DIR, name)
             old_path = os.path.join(backup_root, name)
             if os.path.lexists(destination):

@@ -1,5 +1,55 @@
 # --- Tray profile menu -----------------------------------------------------
 
+class PersistentActionMenu(QMenu):
+    """Keep the popup hierarchy open for explicitly marked actions."""
+
+    def __init__(self, title, parent=None):
+        super().__init__(title, parent)
+        self._persistent_actions = set()
+        self._pressed_action = None
+        self.aboutToHide.connect(self._clear_press)
+
+    def add_persistent_action(self, action):
+        self.addAction(action)
+        self._persistent_actions.add(action)
+
+    def _can_trigger_in_place(self, action):
+        return action in self._persistent_actions and action.isVisible() and action.isEnabled()
+
+    def _clear_press(self):
+        self._pressed_action = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            action = self.actionAt(event.position().toPoint())
+            if self._can_trigger_in_place(action):
+                self._pressed_action = action
+                self.setActiveAction(action)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._pressed_action is not None:
+            action = self._pressed_action
+            self._clear_press()
+            if action == self.actionAt(event.position().toPoint()) and self._can_trigger_in_place(action):
+                action.trigger()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        action = self.activeAction()
+        if (event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space)
+                and self._can_trigger_in_place(action)):
+            if not event.isAutoRepeat():
+                action.trigger()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class ScrollingProfileMenu(QMenu):
     """Compact tray menu that scrolls a profile window while hovering ellipses."""
 
@@ -250,6 +300,7 @@ class MainWindow(QWidget):
         self._telegram_help_proxy_link_sent_this_session = False
         self.telegram_proxy = TelegramProxyController()
         self.dns_malw_link_active = False
+        self.dns_malw_group_status = {}
         self._dns_malw_link_busy = False
         self._dns_malw_link_worker = None
         self._dns_malw_link_show_errors = False
@@ -265,7 +316,6 @@ class MainWindow(QWidget):
         self._game_mode_restart_timer.setInterval(180)
         self._game_mode_restart_timer.timeout.connect(self._start_game_mode_restart_worker)
         self._game_mode_restart_worker = None
-
         self.tray = None
         self.tray_menu = None
         self.action_open = None
@@ -281,6 +331,11 @@ class MainWindow(QWidget):
         self.action_game_mode_enable = None
         self.action_game_mode_disable = None
         self.action_game_mode_settings = None
+        self.traffic_mode_menu = None
+        self.traffic_mode_actions = {}
+        self.traffic_mode_settings_menu = None
+        self.traffic_mode_settings_action = None
+        self.traffic_list_actions = {}
         self.sites_menu = None
         self.action_sites_open = None
         self.action_sites_add = None
@@ -411,6 +466,24 @@ class MainWindow(QWidget):
         dlg = getattr(self, "_settings_dlg", None)
         if dlg is None or not dlg.isVisible():
             return False
+        app_dialog = getattr(dlg, "_traffic_apps_dialog", None)
+        if app_dialog is not None and app_dialog.isVisible():
+            if obj is app_dialog:
+                return True
+            if isinstance(obj, QWidget):
+                try:
+                    if obj.window() is app_dialog:
+                        return True
+                except Exception:
+                    pass
+            current = obj
+            while current is not None:
+                if current is app_dialog:
+                    return True
+                try:
+                    current = current.parent()
+                except Exception:
+                    break
         if obj is dlg:
             return True
         if isinstance(obj, QWidget):
@@ -438,6 +511,20 @@ class MainWindow(QWidget):
     def _is_settings_dialog_event_target(self, obj, event) -> bool:
         if self._is_settings_dialog_object(obj):
             return True
+        dlg = getattr(self, "_settings_dlg", None)
+        app_dialog = getattr(dlg, "_traffic_apps_dialog", None) if dlg is not None else None
+        if app_dialog is not None and app_dialog.isVisible():
+            try:
+                focus = QApplication.focusWidget()
+                if focus is not None and focus.window() is app_dialog:
+                    return True
+                if (
+                    event.type() in (QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride)
+                    and QApplication.activeWindow() is app_dialog
+                ):
+                    return True
+            except Exception:
+                pass
         try:
             if hasattr(event, "globalPosition"):
                 pos = event.globalPosition().toPoint()
@@ -453,18 +540,27 @@ class MainWindow(QWidget):
         dlg = getattr(self, "_settings_dlg", None)
         if dlg is None or not dlg.isVisible():
             return
+        target = getattr(dlg, "_traffic_apps_dialog", None)
+        if target is None or not target.isVisible():
+            target = dlg
         try:
-            dlg.raise_()
-            dlg.activateWindow()
+            target.raise_()
+            target.activateWindow()
         except Exception:
             pass
         try:
-            if hasattr(dlg, "flash_attention"):
-                dlg.flash_attention()
+            if hasattr(target, "flash_attention"):
+                target.flash_attention()
         except Exception:
             pass
 
     def eventFilter(self, obj, event):
+        active_window = QApplication.activeWindow()
+        try:
+            if isinstance(active_window, QMessageBox):
+                return super().eventFilter(obj, event)
+        except Exception:
+            pass
         adaptive_dlg = self._active_auto_dialog()
         if adaptive_dlg is not None and event.type() == QEvent.Type.KeyPress:
             if event.key() == Qt.Key.Key_Space:
@@ -499,6 +595,20 @@ class MainWindow(QWidget):
                 return True
         dlg = getattr(self, "_settings_dlg", None)
         if dlg is not None and dlg.isVisible() and not self._is_settings_dialog_event_target(obj, event):
+            app_dialog = getattr(dlg, "_traffic_apps_dialog", None)
+            if (
+                app_dialog is not None
+                and app_dialog.isVisible()
+                and QApplication.activeWindow() is app_dialog
+                and event.type() in (
+                    QEvent.Type.MouseButtonPress,
+                    QEvent.Type.MouseButtonDblClick,
+                    QEvent.Type.Wheel,
+                    QEvent.Type.KeyPress,
+                    QEvent.Type.ShortcutOverride,
+                )
+            ):
+                return super().eventFilter(obj, event)
             if event.type() in (
                 QEvent.Type.MouseButtonPress,
                 QEvent.Type.MouseButtonDblClick,
@@ -636,6 +746,41 @@ class MainWindow(QWidget):
         self.game_mode_menu.addAction(self.action_game_mode_settings)
         self.tray_menu.addMenu(self.game_mode_menu)
 
+        self.traffic_mode_menu = PersistentActionMenu(self.t("Traffic processing mode"), self)
+        self.traffic_mode_actions = {}
+        for mode, label in (
+            (TRAFFIC_MODE_ALL, self.t("Traffic mode all")),
+            (TRAFFIC_MODE_APPLICATIONS, self.t("Traffic mode applications")),
+            (TRAFFIC_MODE_LISTS, self.t("Traffic mode lists")),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setData(mode)
+            action.triggered.connect(
+                lambda _checked=False, selected_mode=mode:
+                self.set_traffic_mode_from_tray(selected_mode)
+            )
+            self.traffic_mode_actions[mode] = action
+            self.traffic_mode_menu.add_persistent_action(action)
+        self.traffic_mode_settings_separator = self.traffic_mode_menu.addSeparator()
+        self.traffic_mode_settings_action = QAction(self.t("Settings"), self)
+        self.traffic_mode_settings_action.triggered.connect(self.open_traffic_mode_settings_from_tray)
+        self.traffic_mode_menu.addAction(self.traffic_mode_settings_action)
+        self.traffic_mode_settings_menu = PersistentActionMenu(self.t("Settings"), self)
+        self.traffic_list_actions = {}
+        for option in TRAFFIC_PROCESSING_LIST_OPTIONS:
+            action = QAction(self.t("{}".format(option["label_en"])) if self.lang != "ru" else option["label_ru"], self)
+            action.setCheckable(True)
+            action.setData(option["key"])
+            action.triggered.connect(
+                lambda checked=False, key=option["key"]:
+                self.set_traffic_list_option_from_tray(key, checked)
+            )
+            self.traffic_list_actions[option["key"]] = action
+            self.traffic_mode_settings_menu.add_persistent_action(action)
+        self.traffic_mode_menu.addMenu(self.traffic_mode_settings_menu)
+        self.tray_menu.addMenu(self.traffic_mode_menu)
+
         self.tray_menu.addSeparator()
         self.sites_menu = QMenu(self.t('Sites'), self)
         self.action_sites_open = QAction(self.t('Open'), self)
@@ -686,6 +831,16 @@ class MainWindow(QWidget):
         self.action_game_mode_enable.setText(self.t('Enable'))
         self.action_game_mode_disable.setText(self.t('Disable'))
         self.action_game_mode_settings.setText(self.t('Game Mode Settings'))
+        self.traffic_mode_menu.setTitle(self.t('Traffic processing mode'))
+        self.traffic_mode_actions[TRAFFIC_MODE_ALL].setText(self.t('Traffic mode all'))
+        self.traffic_mode_actions[TRAFFIC_MODE_APPLICATIONS].setText(self.t('Traffic mode applications'))
+        self.traffic_mode_actions[TRAFFIC_MODE_LISTS].setText(self.t('Traffic mode lists'))
+        self.traffic_mode_settings_action.setText(self.t('Settings'))
+        self.traffic_mode_settings_menu.setTitle(self.t('Settings'))
+        for option in TRAFFIC_PROCESSING_LIST_OPTIONS:
+            action = self.traffic_list_actions.get(option["key"])
+            if action is not None:
+                action.setText(option["label_ru"] if self.lang == "ru" else option["label_en"])
         self.sites_menu.setTitle(self.t('Sites'))
         self.action_sites_open.setText(self.t('Open'))
         self.action_sites_add.setText(self.t('Add Domain'))
@@ -723,6 +878,16 @@ class MainWindow(QWidget):
             self.action_game_mode_enable.setEnabled(not game_active)
             self.action_game_mode_disable.setEnabled(game_active)
 
+        mode = _get_traffic_processing_mode(self.settings)
+        for item_mode, action in self.traffic_mode_actions.items():
+            action.setChecked(item_mode == mode)
+        self.traffic_mode_settings_separator.setVisible(mode != TRAFFIC_MODE_ALL)
+        self.traffic_mode_settings_action.setVisible(mode == TRAFFIC_MODE_APPLICATIONS)
+        self.traffic_mode_settings_menu.menuAction().setVisible(mode == TRAFFIC_MODE_LISTS)
+        list_options = _get_traffic_processing_list_options(self.settings)
+        for key, action in self.traffic_list_actions.items():
+            action.setChecked(bool(list_options.get(key, True)))
+
         try:
             self.tray.setIcon(QIcon(self._tray_icon_path(running)))
         except Exception:
@@ -751,6 +916,49 @@ class MainWindow(QWidget):
     def set_game_mode_from_tray(self, enabled: bool) -> None:
         self.set_game_mode_enabled(bool(enabled), restart_if_running=True)
         self.update_tray_status()
+
+    def set_traffic_mode_from_tray(self, mode: str) -> None:
+        mode = _normalize_traffic_mode(mode)
+        if _get_traffic_processing_mode(self.settings) == mode:
+            self.update_tray_status()
+            return
+        _set_traffic_processing_mode(self.settings, mode)
+        self.settings.sync()
+        dialog = getattr(self, "_settings_dlg", None)
+        if dialog is not None and dialog.isVisible():
+            dialog.load_settings()
+        self.on_traffic_processing_changed()
+        self.update_tray_status()
+
+    def set_traffic_list_option_from_tray(self, key: str, enabled: bool) -> None:
+        values = _get_traffic_processing_list_options(self.settings)
+        values[key] = bool(enabled)
+        _set_traffic_processing_list_options(self.settings, values)
+        self.settings.sync()
+        dialog = getattr(self, "_settings_dlg", None)
+        if dialog is not None and dialog.isVisible():
+            dialog.load_settings()
+        self.on_traffic_processing_changed()
+        self.update_tray_status()
+
+    def open_traffic_mode_settings_from_tray(self) -> None:
+        if _get_traffic_processing_mode(self.settings) == TRAFFIC_MODE_APPLICATIONS:
+            self.open_traffic_applications()
+
+    def open_traffic_applications(self) -> None:
+        existing = getattr(self, "_traffic_apps_dialog", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dialog = TrafficApplicationsDialog(parent=self, settings=self.settings)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._traffic_apps_dialog = dialog
+        dialog.finished.connect(lambda _=0: setattr(self, "_traffic_apps_dialog", None))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _set_lists_sync_ui_busy(self, busy: bool):
         self._lists_check_in_progress = bool(busy)
@@ -1202,9 +1410,22 @@ class MainWindow(QWidget):
             self._auto_progress = None
         self._sync_adaptive_dialog_guard()
 
+    def _can_run_profile_scan(self, dialog) -> bool:
+        if _get_traffic_processing_mode(self.settings) != TRAFFIC_MODE_APPLICATIONS:
+            return True
+        dialog.show_selection(
+            "Автоподбор проверяет соединения самой программы, а не выбранных приложений. "
+            "Для автоподбора временно выберите «Весь трафик»."
+            if self.lang == "ru" else
+            "Auto-selection tests the GUI's own connections, not the selected applications. "
+            "Temporarily select All traffic to run a scan.",
+            warning=True,
+        )
+        return False
+
     def _start_adaptive_auto_test(self) -> None:
         dlg = getattr(self, "_auto_progress", None)
-        if dlg is None:
+        if dlg is None or not self._can_run_profile_scan(dlg):
             return
 
         adaptive_worker = getattr(self, "_adaptive_worker", None)
@@ -1436,7 +1657,11 @@ class MainWindow(QWidget):
                 Path(APP_DIR),
                 Path(ADAPTIVE_RUNTIME_DIR),
             )
-            generator = ZapretGuiBatGenerator(paths, Path(USER_PROFILE_DIR))
+            generator = ZapretGuiBatGenerator(
+                paths,
+                Path(USER_PROFILE_DIR),
+                runtime_source=_bundled_path("adaptive-runtime"),
+            )
             destination = generator.generate(outcome, filename, lang=self.lang)
         except Exception as exc:
             dlg.set_adaptive_save_error(str(exc))
@@ -1479,7 +1704,7 @@ class MainWindow(QWidget):
 
     def _start_legacy_auto_test(self):
         dlg = getattr(self, "_auto_progress", None)
-        if dlg is None:
+        if dlg is None or not self._can_run_profile_scan(dlg):
             return
 
         worker = getattr(self, "_auto_worker", None)
@@ -2437,6 +2662,7 @@ class MainWindow(QWidget):
 
     def refresh_runtime_lists_after_user_change(self):
         _rebuild_runtime_lists(self.settings)
+        self.on_traffic_processing_changed()
 
     def _restore_instruction_position_if_needed(self, gap: int = 8) -> None:
         instruction = self._instruction_dialog
@@ -2692,6 +2918,7 @@ class MainWindow(QWidget):
         self.lang = lang_code
         self.settings.setValue('lang', lang_code)
         self.retranslate_ui()
+        self._sync_traffic_quick_switch()
         self.retranslate_tray()
         self.update_tray_presets()
         self.update_tray_status()
@@ -2769,6 +2996,15 @@ class MainWindow(QWidget):
         self.ai_mode_btn.setFixedSize(28, 28)
         self.ai_mode_btn.clicked.connect(self.on_ai_mode_clicked)
 
+        self.ai_info_btn = SmallCircleButton("i", "text", self)
+        self.ai_info_btn.setFixedSize(24, 24)
+        self.ai_info_btn.setToolTip(
+            "Состояние relay Ai DNS"
+            if self.lang == "ru" else
+            "Ai DNS relay status"
+        )
+        self.ai_help = HoverHelpPopup(self.ai_info_btn, keep_on_popup=False)
+
         self.telegram_mode_btn = SmallCircleButton("", "pixmap", self)
         self.telegram_mode_btn.setCheckable(True)
         self.telegram_mode_btn.setFixedSize(32, 32)
@@ -2782,6 +3018,13 @@ class MainWindow(QWidget):
         self.telegram_help_btn = SmallCircleButton("?", "text", self)
         self.telegram_help_btn.setFixedSize(22, 22)
         self.telegram_help_btn.clicked.connect(self.show_telegram_mode_help)
+
+        self.traffic_quick_switch = TrafficModeSelector(parent=self, vertical=True)
+        self.traffic_quick_switch.setCurrentIndex(
+            _traffic_mode_index(_get_traffic_processing_mode(self.settings)), animated=False, emit=False)
+        self.traffic_quick_switch.currentChanged.connect(
+            lambda index: self.set_traffic_mode_from_tray(_traffic_mode_from_index(index)))
+        self._sync_traffic_quick_switch()
 
         self.game_settings_btn = SmallCircleButton("", "gear")
         self.game_settings_btn.setFixedSize(24, 24)
@@ -2891,7 +3134,10 @@ class MainWindow(QWidget):
         self.blink_timer.start(800)
         self._position_ai_mode_button()
         self._position_telegram_mode_button()
+        self._position_traffic_quick_switch()
+
         self.ai_mode_btn.raise_()
+        self.ai_info_btn.raise_()
         self.telegram_help_btn.raise_()
         self.telegram_mode_btn.raise_()
         self._update_small_circle_buttons_ui()
@@ -2900,6 +3146,16 @@ class MainWindow(QWidget):
         self._update_game_mode_ui()
         self._apply_main_window_style()
         QTimer.singleShot(0, self._position_overlay_mode_buttons)
+
+    def _position_traffic_quick_switch(self) -> None:
+        switch = getattr(self, "traffic_quick_switch", None)
+        if switch is None or not hasattr(self, "game_mode_btn"):
+            return
+        top = self.telegram_mode_btn.geometry().bottom() + 7
+        bottom = self.game_mode_btn.mapTo(self, QPoint(0, 0)).y() - 7
+        switch.move(self.width() - switch.width() - 12,
+                    max(top, top + (bottom - top - switch.height()) // 2))
+        switch.raise_()
 
     def _status_overlay_y(self, button_height: int, fallback_y: int) -> int:
         title_bottom = 0
@@ -3044,6 +3300,7 @@ class MainWindow(QWidget):
             pass
         self._position_ai_mode_button()
         self._position_telegram_mode_button()
+        self._position_traffic_quick_switch()
 
     def _position_ai_mode_button(self) -> None:
         if not hasattr(self, "ai_mode_btn"):
@@ -3052,6 +3309,11 @@ class MainWindow(QWidget):
         y = self._status_overlay_y(self.ai_mode_btn.height(), 40)
         self.ai_mode_btn.move(x, y)
         self.ai_mode_btn.raise_()
+        if hasattr(self, "ai_info_btn"):
+            gap = 5
+            info_y = y + int((self.ai_mode_btn.height() - self.ai_info_btn.height()) / 2)
+            self.ai_info_btn.move(x + self.ai_mode_btn.width() + gap, info_y)
+            self.ai_info_btn.raise_()
 
     def _position_telegram_mode_button(self) -> None:
         if not hasattr(self, "telegram_mode_btn"):
@@ -3124,6 +3386,7 @@ class MainWindow(QWidget):
         if hasattr(self.ai_mode_btn, "setBusy"):
             self.ai_mode_btn.setBusy(busy)
         self._apply_small_circle_button_state(self.ai_mode_btn, active, "Ai", "text")
+        self._update_ai_info_ui()
 
         if busy:
             tooltip = (
@@ -3146,6 +3409,64 @@ class MainWindow(QWidget):
         self.ai_mode_btn.setToolTip(tooltip)
         self.update_tray_status()
 
+    def _update_ai_info_ui(self) -> None:
+        if not hasattr(self, "ai_info_btn"):
+            return
+        status = dict(getattr(self, "dns_malw_group_status", {}) or {})
+        busy = bool(getattr(self, "_dns_malw_link_busy", False))
+        active = bool(getattr(self, "dns_malw_link_active", False))
+        groups = []
+        working = 0
+        failed = 0
+        for group, info in status.items():
+            if group not in _AI_DNS_GROUPS or not isinstance(info, dict) or info.get("status") == "not-present":
+                continue
+            label = DNS_MALW_AI_GROUP_LABELS.get(group, group)
+            source = " (last-known-good)" if info.get("source") == "last-known-good" else ""
+            if info.get("status") == "ok":
+                working += 1
+                groups.append(f"✓ {label}: relay {info.get('relay', '—')}{source}")
+            else:
+                failed += 1
+                groups.append(f"✗ {label}: relay недоступен")
+
+        if busy:
+            color = "#e6b84b"
+            heading = "Ai DNS: проверка relay…"
+        elif not active and failed:
+            color = "#d46060"
+            heading = "Ai DNS не запущен: relay недоступен"
+        elif not active:
+            color = "#8a8a8a"
+            heading = "Ai DNS выключен"
+        elif working and failed:
+            color = "#e6b84b"
+            heading = "Ai DNS включён частично"
+        elif working:
+            color = "#2db45f"
+            heading = "Ai DNS работает полностью"
+        else:
+            color = "#d46060"
+            heading = "Ai DNS: relay недоступен"
+
+        tooltip_lines = [heading]
+        if groups:
+            tooltip_lines.extend(groups)
+        elif active:
+            tooltip_lines.append("Нет подтверждённых рабочих групп.")
+        tooltip_lines.append(
+            "Проверка выполняется по TCP/443, TLS SNI и HTTP."
+            if self.lang == "ru" else
+            "Checks use TCP/443, TLS SNI and HTTP."
+        )
+        self.ai_info_btn.setStatusColor(color)
+        self.ai_info_btn.setToolTip("\n".join(tooltip_lines))
+        if hasattr(self, "ai_help"):
+            from html import escape
+            self.ai_help.setText("<br>".join(escape(line) for line in tooltip_lines))
+        self.ai_info_btn.setVisible(True)
+        self.ai_info_btn.update()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         _update_rounded_window_mask(self)
@@ -3165,9 +3486,16 @@ class MainWindow(QWidget):
             self.settings.sync()
             managed = _is_dns_malw_link_enabled_by_app(self.settings)
             status = _get_dns_malw_link_status()
-            self.dns_malw_link_active = bool(managed and status.get("ok") and status.get("active"))
+            mechanism_current = str(
+                self.settings.value(DNS_MALW_MECHANISM_VERSION_KEY, "") or ""
+            ).strip() == DNS_MALW_MECHANISM_VERSION
+            self.dns_malw_link_active = bool(
+                managed and mechanism_current and status.get("ok") and status.get("active")
+            )
+            self.dns_malw_group_status = dict(status.get("groups") or {})
         except Exception:
             self.dns_malw_link_active = False
+            self.dns_malw_group_status = {}
         self._update_ai_mode_ui()
 
     def _set_dns_malw_link_busy(self, busy: bool) -> None:
@@ -3192,17 +3520,12 @@ class MainWindow(QWidget):
         except Exception:
             pass
 
-        error = str(result.get("error") or "")
-        if (not result.get("ok")) and _is_hosts_permission_error_message(error):
-            launched = _run_self_as_admin_for_dns_action(action)
-            if launched:
-                self._start_dns_malw_link_poll(expected_active=(action == "enable"))
-                return
-
         self._finish_dns_malw_link_action(action, result, show_errors=self._dns_malw_link_show_errors)
         self._resume_pending_toggle_if_ready()
 
     def _finish_dns_malw_link_action(self, action: str, result: dict, show_errors: bool = False) -> None:
+        if result.get("groups"):
+            self.dns_malw_group_status = dict(result["groups"])
         self._dns_malw_link_pending_action = ""
         self._set_dns_malw_link_busy(False)
         self.refresh_dns_malw_link_indicator()
@@ -3237,6 +3560,27 @@ class MainWindow(QWidget):
                 if self.lang == "ru" else
                 "Administrator rights are required for this action."
             )
+        elif error == "ai-no-working-relays":
+            text = (
+                "Ai DNS не включён: серверы перенаправления не прошли проверку TCP/TLS/HTTP. "
+                "Это не ошибка прав службы: изменение hosts ещё не выполнялось. "
+                "Серверы могут быть недоступны или блокироваться сетью. Попробуйте позже "
+                "или проверьте с включённым обходом. Прежние настройки hosts сохранены."
+                if self.lang == "ru" else
+                "Ai DNS was not enabled: relays failed TCP/TLS/HTTP checks. The hosts service "
+                "has not been called, so this is not a service permission error. Relays may be "
+                "offline or blocked by your network. Retry later or with bypass enabled. "
+                "Existing hosts settings were preserved."
+            )
+            failures = []
+            for key, info in (result.get("groups") or {}).items():
+                checks = [check for attempt in info.get("attempts", []) for check in attempt.get("checks", [])]
+                checks = checks or info.get("checks", [])
+                errors = sorted({check.get("error", "") for check in checks if not check.get("ok")})
+                if errors:
+                    failures.append(f"{DNS_MALW_AI_GROUP_LABELS.get(key, key)}: {', '.join(errors)}")
+            if failures:
+                text += "\n\n" + "\n".join(failures[:5])
         elif error == "timeout":
             text = (
                 "Не удалось дождаться завершения настройки Ai DNS."
@@ -3335,18 +3679,9 @@ class MainWindow(QWidget):
         self._dns_malw_link_show_errors = True
         self._set_dns_malw_link_busy(True)
 
-        if self.is_admin():
-            self._start_dns_malw_link_worker(action, show_errors=True)
-            return
-
-        launched = _run_self_as_admin_for_dns_action(action)
-        if not launched:
-            self._set_dns_malw_link_busy(False)
-            self._update_ai_mode_ui()
-            self._resume_pending_toggle_if_ready()
-            return
-
-        self._start_dns_malw_link_poll(expected_active=(action == "enable"))
+        # The background service owns the privileged hosts mutation. Do not
+        # elevate the GUI process and do not show a UAC prompt per toggle.
+        self._start_dns_malw_link_worker(action, show_errors=True)
 
     def _set_telegram_mode_busy(self, busy: bool) -> None:
         self._telegram_mode_busy = bool(busy)
@@ -3718,6 +4053,16 @@ class MainWindow(QWidget):
             self.retranslate_ui()
             return
 
+        if self._traffic_configuration_issue():
+            self.process = None
+            self._adaptive_hosts_owned = False
+            self._adaptive_active_profile_script = ""
+            self._set_main_toggle_checked_visual(False, animated=True)
+            self.status_lbl.setText(self.t("Off"))
+            self._update_traffic_configuration_notice()
+            self.update_tray_status()
+            return
+
         if not hasattr(self, "toggle_btn") or not self.toggle_btn.isChecked():
             self.retranslate_ui()
             return
@@ -3794,6 +4139,49 @@ class MainWindow(QWidget):
         except Exception:
             self._release_adaptive_profile_hosts()
             raise
+
+    def on_traffic_applications_changed(self) -> None:
+        self.on_traffic_processing_changed()
+
+    def _traffic_configuration_issue(self) -> str:
+        mode = _get_traffic_processing_mode(self.settings)
+        if mode == TRAFFIC_MODE_APPLICATIONS:
+            return "applications" if not effective_application_paths(self.settings) else ""
+        if mode == TRAFFIC_MODE_LISTS:
+            options = _get_traffic_processing_list_options(self.settings)
+            if not any(
+                options.get(option["key"], True)
+                and _traffic_list_file_has_entries(option["path"])
+                for option in TRAFFIC_PROCESSING_LIST_OPTIONS
+            ):
+                return "lists"
+        return ""
+
+    def _update_traffic_configuration_notice(self) -> None:
+        dialog = getattr(self, "_settings_dlg", None)
+        if dialog is not None and dialog.isVisible() and hasattr(dialog, "set_traffic_validation_notice"):
+            dialog.set_traffic_validation_notice(self._traffic_configuration_issue())
+
+    def on_traffic_processing_changed(self) -> None:
+        self._sync_traffic_quick_switch()
+        self._update_traffic_configuration_notice()
+        if hasattr(self, "toggle_btn") and self.toggle_btn.isChecked():
+            self._schedule_game_mode_restart_after_change(
+                "Применение режима обработки трафика..."
+                if self.lang == "ru" else
+                "Applying traffic processing mode..."
+            )
+        self.update_tray_status()
+
+    def _sync_traffic_quick_switch(self) -> None:
+        switch = getattr(self, "traffic_quick_switch", None)
+        if switch is None:
+            return
+        switch.setCurrentIndex(_traffic_mode_index(_get_traffic_processing_mode(self.settings)), emit=False)
+        labels = (self.t("Traffic mode all"), self.t("Traffic mode applications"), self.t("Traffic mode lists"))
+        for button, label in zip(switch._buttons, labels):
+            button.setToolTip(label)
+            button.setAccessibleName(label)
 
     def set_game_mode_enabled(self, enabled: bool, restart_if_running: bool = True) -> None:
         enabled = bool(enabled)
@@ -4038,6 +4426,17 @@ class MainWindow(QWidget):
         if hosts_error:
             print(hosts_error)
 
+        configuration_issue = self._traffic_configuration_issue()
+        if action == "start" and error and configuration_issue:
+            self.process = None
+            self._adaptive_hosts_owned = False
+            self._adaptive_active_profile_script = ""
+            self._set_main_toggle_checked_visual(False, animated=True)
+            self.status_lbl.setText(self.t("Off"))
+            self._update_traffic_configuration_notice()
+            self.update_tray_status()
+            return
+
         if action == "start" and result.get("ok"):
             self.process = result.get("process")
             self._suppress_bypass_exit_notification = False
@@ -4092,6 +4491,12 @@ class MainWindow(QWidget):
             return
 
         if checked:
+            if self._traffic_configuration_issue():
+                self._set_main_toggle_checked_visual(False, animated=True)
+                self.status_lbl.setText(self.t("Off"))
+                self._update_traffic_configuration_notice()
+                self.update_tray_status()
+                return
             script = self._profile_script_path(profile)
             if not script:
                 self.status_lbl.setText(
@@ -4125,10 +4530,15 @@ class MainWindow(QWidget):
             return
 
         dlg = SettingsDialog(self, self.settings)
+        dlg.profile_cb.blockSignals(True)
         dlg.profile_cb.clear()
         dlg.profile_cb.addItem(" ")
         dlg.profile_cb.addItems([p for p in self.presets if p != " "])
-        dlg.profile_cb.setCurrentText(self.settings.value('autostart_profile', ' '))
+        saved_profile = str(self.settings.value('autostart_profile', ' ') or ' ')
+        if saved_profile.strip() and dlg.profile_cb.findText(saved_profile) < 0:
+            dlg.profile_cb.addItem(saved_profile)
+        dlg.profile_cb.setCurrentText(saved_profile)
+        dlg.profile_cb.blockSignals(False)
 
         dlg.setWindowModality(Qt.WindowModality.NonModal)
 
@@ -4248,6 +4658,15 @@ class MainWindow(QWidget):
 
     def set_autostart(self, enable: bool, provision: bool = False):
         try:
+            # Running from source/IDE must never overwrite the user's installed
+            # EXE autostart entry. This was the reason a reboot launched
+            # EzUnBlock.py from the workspace with the installed app-dir.
+            if not getattr(sys, "frozen", False):
+                _startup_log.info(
+                    "Skipping autostart registration in source mode enable=%s",
+                    enable,
+                )
+                return
             import winreg
             with winreg.CreateKeyEx(
                 winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run",

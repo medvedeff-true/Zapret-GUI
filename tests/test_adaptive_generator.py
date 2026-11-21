@@ -40,7 +40,7 @@ https://rutracker.org/forum/index.php
 def make_runtime_paths(root: Path) -> RuntimePaths:
     bin_dir = root / "core" / "bin"
     validators = root / "user" / "adaptive-runtime"
-    return RuntimePaths(
+    paths = RuntimePaths(
         project_root=root,
         bundle_root=validators,
         winws_dir=bin_dir,
@@ -57,6 +57,20 @@ def make_runtime_paths(root: Path) -> RuntimePaths:
         cygwin_curl_kyber=validators / "cygwin" / "usr" / "local" / "bin" / "curl-kyber.exe",
         browser=None,
     )
+    for path in (
+        paths.fake_tls,
+        paths.fake_tls_max,
+        paths.fake_tls_4pda,
+        paths.fake_quic,
+        paths.fake_udp_dbank,
+        paths.fake_stun,
+        paths.winws_dir / "stun2.bin",
+        paths.winws_dir / "tls_clienthello_sochi_park.bin",
+        paths.winws_dir / "ACTIVE_DISCORD_UDP.bin",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"test-runtime-component")
+    return paths
 
 
 class StrategyNameTests(unittest.TestCase):
@@ -261,6 +275,59 @@ class OneBatGeneratorTests(unittest.TestCase):
             self.assertTrue(bat_hostlists)
             self.assertFalse(any(argument.startswith('"--hostlist-domains=') for argument in bat_hostlists))
             self.assertTrue(any(argument.startswith('--hostlist-domains="') for argument in bat_hostlists))
+
+    def test_missing_bin_is_repaired_before_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = make_runtime_paths(root)
+            paths.fake_udp_dbank.unlink()
+            outcome = SearchOutcome(
+                True,
+                parse_targets(FIXED_TARGETS, include_quic=True),
+                [],
+                tcp_profiles={"custom": tcp_strategy_by_id("ts-fake")},
+                quic_profiles={"youtube": QUIC_STRATEGIES[0]},
+            )
+            import shutil
+
+            runtime_source = root / "runtime-source"
+            shutil.copytree(
+                Path(__file__).resolve().parents[1] / "resources" / "adaptive-runtime",
+                runtime_source,
+            )
+            generator = ZapretGuiBatGenerator(
+                paths,
+                root / "user" / "strategies",
+                runtime_source=runtime_source,
+            )
+            with patch.object(generator, "_dry_run"):
+                generator.generate(outcome, "recovered")
+
+            self.assertTrue(paths.fake_udp_dbank.is_file())
+
+    def test_missing_bin_reports_runtime_source_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = make_runtime_paths(root)
+            paths.fake_udp_dbank.unlink()
+            outcome = SearchOutcome(
+                True,
+                parse_targets(FIXED_TARGETS, include_quic=True),
+                [],
+                tcp_profiles={"custom": tcp_strategy_by_id("ts-fake")},
+                quic_profiles={"youtube": QUIC_STRATEGIES[0]},
+            )
+            generator = ZapretGuiBatGenerator(
+                paths,
+                root / "user" / "strategies",
+                runtime_source=root / "missing-official-runtime",
+            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"(?s)Не удалось восстановить компонент runtime.*нет доступа к официальному источнику обновления",
+            ):
+                generator.generate(outcome, "unavailable")
+            self.assertFalse((root / "user" / "strategies" / "unavailable.bat").exists())
 
     def test_atomic_publish_does_not_replace_a_racing_destination(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

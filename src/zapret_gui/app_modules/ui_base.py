@@ -338,7 +338,7 @@ def _show_centered_message(
     text: str,
     buttons: QMessageBox.StandardButton = QMessageBox.StandardButton.Ok,
 ) -> QMessageBox.StandardButton:
-    msg = QMessageBox(parent)
+    msg = RoundedMessageBox(parent)
     msg.setWindowTitle(title)
     msg.setText(text)
     msg.setIcon(icon)
@@ -361,8 +361,18 @@ def _update_rounded_window_mask(widget: QWidget, radius: float = WINDOW_RADIUS) 
     try:
         if widget.width() <= 0 or widget.height() <= 0:
             return
-        path = _rounded_window_path(QRectF(widget.rect()), radius)
-        widget.setMask(QRegion(path.toFillPolygon().toPolygon()))
+        # Rasterize symmetric pixel-centred corner arcs. Polygon conversion
+        # rounds the first curve's closing edge differently at fractional DPI.
+        width, height = widget.width(), widget.height()
+        radius = min(float(radius), width / 2, height / 2)
+        mask = QRegion()
+        for y in range(height):
+            distance = min(y + 0.5, height - y - 0.5)
+            inset = 0
+            if distance < radius:
+                inset = max(0, math.ceil(radius - math.sqrt(radius * radius - (radius - distance) ** 2) - 0.5))
+            mask |= QRegion(inset, y, max(0, width - 2 * inset), 1)
+        widget.setMask(mask)
     except Exception:
         pass
 
@@ -564,6 +574,13 @@ class CustomTitleBar(QWidget):
     def setTitle(self, title: str) -> None:
         self.title_lbl.setText(title or "")
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Child widgets/styles can otherwise paint a square corner over the
+        # translucent parent surface, especially under Windows DPI scaling.
+        path = _rounded_window_path(QRectF(0, 0, self.window().width(), self.window().height()))
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()).intersected(QRegion(self.rect())))
+
     def _request_window_close(self) -> None:
         window = self.window()
         if hasattr(window, "_request_manual_close"):
@@ -588,6 +605,47 @@ class CustomTitleBar(QWidget):
     def mouseReleaseEvent(self, event) -> None:
         self._drag_pos = None
         super().mouseReleaseEvent(event)
+
+
+class RoundedMessageBox(QMessageBox):
+    """Use the same clipped client-side corners as the other GUI windows."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet(_app_dialog_stylesheet())
+        margins = self.layout().contentsMargins()
+        self.layout().setContentsMargins(margins.left(), margins.top() + 30,
+                                        margins.right(), margins.bottom())
+        self._title_bar = CustomTitleBar("", self, allow_minimize=False)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # QMessageBox recomputes its layout margins when it is first shown.
+        margins = self.layout().contentsMargins()
+        self.layout().setContentsMargins(margins.left(), max(42, margins.top()),
+                                        margins.right(), margins.bottom())
+        self.layout().activate()
+        self.adjustSize()
+        self._title_bar.setGeometry(0, 0, self.width(), 30)
+        self._title_bar.raise_()
+
+    def setWindowTitle(self, title):
+        super().setWindowTitle(title)
+        if hasattr(self, "_title_bar"):
+            self._title_bar.setTitle(title)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        _paint_app_surface(painter, QRectF(self.rect()))
+        painter.end()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_title_bar"):
+            self._title_bar.setGeometry(0, 0, self.width(), 30)
+        _update_rounded_window_mask(self)
 
 
 class StyledDialog(QDialog):

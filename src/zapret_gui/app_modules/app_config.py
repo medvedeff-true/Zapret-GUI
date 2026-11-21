@@ -1,11 +1,24 @@
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.1.0"
+
+from zapret_gui.traffic_modes import (
+    TRAFFIC_MODE_ALL,
+    TRAFFIC_MODE_APPLICATIONS,
+    TRAFFIC_MODE_LISTS,
+    TRAFFIC_MODES,
+    list_has_values as _traffic_list_file_has_entries,
+    mode_from_index as _traffic_mode_from_index,
+    mode_index as _traffic_mode_index,
+    normalize_traffic_mode as _normalize_traffic_mode,
+    settings_bool as _traffic_settings_bool,
+    settings_mode as _traffic_settings_mode,
+    APPLICATION_MODE_UNAVAILABLE_REASON,
+    application_mode_available,
+)
 
 # Application-wide settings and bundled runtime paths.
 APP_DIR = _app_dir_from_cli_or_default()
-os.makedirs(APP_DIR, exist_ok=True)
 
 USER_DIR = os.path.join(APP_DIR, "user")
-os.makedirs(USER_DIR, exist_ok=True)
 USER_STRATEGY_BACKUP_DIR = os.path.join(USER_DIR, "strategy-backups")
 ADAPTIVE_STRATEGY_DIR = os.path.join(USER_DIR, "adaptive-strategies")
 # Generated and manually imported profiles intentionally share one user-owned
@@ -23,7 +36,7 @@ ADAPTIVE_TARGET_URLS = (
 ADAPTIVE_TIMEOUT_SECONDS = 5.0
 
 FLOWSEAL_REPO = "Flowseal/zapret-discord-youtube"
-FLOWSEAL_DEFAULT_VER = "1.10.2"
+FLOWSEAL_DEFAULT_VER = "1.10.4"
 FLOWSEAL_VER_KEY = "flowseal_release"
 FLOWSEAL_VERSION_URL = "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/.service/version.txt"
 
@@ -45,7 +58,7 @@ GUI_UPDATE_STARTUP_LAST_CHECK_KEY = "gui_update/startup_last_check"
 GUI_UPDATE_STARTUP_MIN_INTERVAL_SECONDS = 6 * 60 * 60
 TG_WS_PROXY_REPO = "Flowseal/tg-ws-proxy"
 TG_WS_PROXY_RELEASES_URL = f"https://github.com/{TG_WS_PROXY_REPO}/releases"
-TG_WS_PROXY_VENDOR_VERSION = "1.6.5"
+TG_WS_PROXY_VENDOR_VERSION = "1.11.4"
 GAME_MODE_KEY = "game_mode_enabled"
 GAME_MODE_MAIN_BYPASS_KEY = "game_mode/main_bypass_enabled"
 GAME_MODE_USER_LISTS_KEY = "game_mode/user_lists_enabled"
@@ -59,6 +72,12 @@ LISTS_SYNC_LAST_SUCCESS_KEY = "lists_sync/last_success"
 LISTS_SYNC_MIN_INTERVAL_SECONDS = 6 * 60 * 60
 LISTS_STARTUP_RETRY_DELAYS_SECONDS = (2.0, 5.0)
 GAME_FILTER_FLAG_MODE = "all"
+TRAFFIC_PROCESSING_MODE_KEY = "traffic_processing/mode"
+TRAFFIC_PROCESSING_LIST_DOMAINS_ADD_KEY = "traffic_processing/lists/domains_add"
+TRAFFIC_PROCESSING_LIST_DOMAINS_EXCLUDE_KEY = "traffic_processing/lists/domains_exclude"
+TRAFFIC_PROCESSING_LIST_IP_ADD_KEY = "traffic_processing/lists/ip_add"
+TRAFFIC_PROCESSING_LIST_IP_EXCLUDE_KEY = "traffic_processing/lists/ip_exclude"
+TRAFFIC_PROCESSING_LIST_DEFAULT_ENABLED = True
 TELEGRAM_MODE_ENABLED_KEY = "telegram_mode/enabled"
 TELEGRAM_MODE_PROXY_ENABLED_KEY = "telegram_mode/proxy_enabled"
 TELEGRAM_MODE_PROXY_PORT_KEY = "telegram_mode/proxy_port"
@@ -108,8 +127,6 @@ RUNTIME_IP_EXCLUDE_USER_FILE = os.path.join(APP_DIR, "core", "lists", "ipset-exc
 RUNTIME_TELEGRAM_DOMAIN_FILE = os.path.join(APP_DIR, "core", "lists", "telegram-domains.txt")
 RUNTIME_TELEGRAM_IP_FILE = os.path.join(APP_DIR, "core", "lists", "telegram-ipset.txt")
 GAME_FILTER_FLAG_FILE = os.path.join(APP_DIR, "core", "utils", "game_filter.enabled")
-USER_LIST_SEEDED_BACKUP_SUFFIX = ".seeded-backup"
-USER_LIST_SEEDED_OVERLAP_RATIO = 0.60
 PLACEHOLDER_ITEM_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 EMPTY_USER_LIST_PLACEHOLDERS = {
@@ -125,6 +142,65 @@ USER_LIST_FILE_MAP = {
     ("ip", "add"): USER_IP_ALL_FILE,
     ("ip", "exclude"): USER_IP_EXCLUDE_FILE,
 }
+
+TRAFFIC_PROCESSING_LIST_OPTIONS = (
+    {
+        "key": TRAFFIC_PROCESSING_LIST_DOMAINS_ADD_KEY,
+        "path": USER_GENERAL_FILE,
+        "label_ru": "Домены доб.",
+        "label_en": "Domains add",
+    },
+    {
+        "key": TRAFFIC_PROCESSING_LIST_DOMAINS_EXCLUDE_KEY,
+        "path": USER_EXCLUDE_FILE,
+        "label_ru": "Домены иск.",
+        "label_en": "Domains exclude",
+    },
+    {
+        "key": TRAFFIC_PROCESSING_LIST_IP_ADD_KEY,
+        "path": USER_IP_ALL_FILE,
+        "label_ru": "IP доб.",
+        "label_en": "IP add",
+    },
+    {
+        "key": TRAFFIC_PROCESSING_LIST_IP_EXCLUDE_KEY,
+        "path": USER_IP_EXCLUDE_FILE,
+        "label_ru": "IP иск.",
+        "label_en": "IP exclude",
+    },
+)
+
+
+def _get_traffic_processing_mode(settings) -> str:
+    return _traffic_settings_mode(settings, TRAFFIC_PROCESSING_MODE_KEY, TRAFFIC_MODE_ALL)
+
+
+def _set_traffic_processing_mode(settings, mode) -> str:
+    normalized = _normalize_traffic_mode(mode)
+    settings.setValue(TRAFFIC_PROCESSING_MODE_KEY, normalized)
+    return normalized
+
+
+def _get_traffic_processing_list_options(settings) -> dict[str, bool]:
+    return {
+        option["key"]: _traffic_settings_bool(
+            settings,
+            option["key"],
+            TRAFFIC_PROCESSING_LIST_DEFAULT_ENABLED,
+        )
+        for option in TRAFFIC_PROCESSING_LIST_OPTIONS
+    }
+
+
+def _set_traffic_processing_list_options(settings, values) -> dict[str, bool]:
+    normalized = {}
+    values = values if isinstance(values, dict) else {}
+    for option in TRAFFIC_PROCESSING_LIST_OPTIONS:
+        key = option["key"]
+        enabled = bool(values.get(key, TRAFFIC_PROCESSING_LIST_DEFAULT_ENABLED))
+        settings.setValue(key, enabled)
+        normalized[key] = enabled
+    return normalized
 
 GAMING_LIST_TARGETS = {
     "medvedeff-game-list-all.txt": {
@@ -250,6 +326,9 @@ DNS_MALW_LAST_UPDATED_KEY = "dns_malw_link/last_updated"
 DNS_MALW_LAST_DOH_KEY = "dns_malw_link/last_doh"
 DNS_MALW_ENABLED_BY_APP_KEY = "dns_malw_link/enabled_by_app"
 DNS_MALW_RESTORE_SNAPSHOT_KEY = "dns_malw_link/restore_snapshot"
+DNS_MALW_GROUP_STATUS_KEY = "dns_malw_link/group_status"
+DNS_MALW_MECHANISM_VERSION_KEY = "dns_malw_link/mechanism_version"
+DNS_MALW_MECHANISM_VERSION = "3.1.0-google-relays-no-api-v3"
 # Ai DNS hosts change independently from a ZapretGUI release.  Keep an enabled
 # installation fresh soon after the next launch instead of letting an old cache
 # stay in use for most of a day.
@@ -269,6 +348,8 @@ DNS_MALW_ADDITIONAL_MIRROR_URLS = (
 DNS_MALW_HOSTS_PATH = r"C:\Windows\System32\drivers\etc\hosts"
 DNS_MALW_HOSTS_BACKUP_PATH = os.path.join(APP_DIR, "dns_malw_hosts_backup.txt")
 DNS_MALW_HOSTS_CACHE_PATH = os.path.join(APP_DIR, "dns_malw_hosts_cache.txt")
+DNS_MALW_HOSTS_LAST_GOOD_PATH = os.path.join(APP_DIR, "dns_malw_hosts_last_good.txt")
+AI_DNS_SOURCE_CACHE_PATH = os.path.join(APP_DIR, "ai_dns_sources.json")
 DNS_MALW_HOSTS_SEED_PATH = os.path.join(APP_DIR, "core", "lists", "dns_malw_hosts_seed.txt")
 DNS_MALW_HOSTS_BLOCK_BEGIN = "# ZapretGUI Ai DNS BEGIN"
 DNS_MALW_HOSTS_BLOCK_END = "# ZapretGUI Ai DNS END"

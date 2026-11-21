@@ -2,6 +2,22 @@
 
 _PENDING_STRATEGY_RESTORE: dict | None = None
 
+
+def _repair_runtime_access_via_service() -> bool:
+    """Use the installed SYSTEM helper before touching an ACL-protected runtime."""
+    try:
+        helper = _bundled_path("background_service", "ZapretGUI.Service.exe")
+        bundled_core = _bundled_path("core", "bin")
+        result = _bypass_service.repair_runtime_access(helper, bundled_core)
+        if not result.get("ok") and not result.get("installed", True):
+            # First installation is the only normal UAC boundary.
+            _bypass_service.ensure(helper, bundled_core)
+            result = _bypass_service.repair_runtime_access(helper, bundled_core)
+        return bool(result.get("ok"))
+    except Exception as error:
+        _startup_log.warning("Runtime ACL repair through service failed: %s", error)
+        return False
+
 FLOWSEAL_CORE_PRESERVE_PATHS = (
     os.path.join("bin", "game_filter.enabled"),
     os.path.join("bin", "tls_clienthello_sochi_park.bin"),
@@ -24,6 +40,7 @@ FLOWSEAL_CORE_PRESERVE_PATHS = (
     os.path.join("user", "medvedeff-game-ipset.txt"),
     os.path.join("user", "medvedeff-game-list-all.txt"),
     os.path.join("utils", "check_updates.enabled"),
+    *(os.path.join("bin", *name.split("/")) for name in APP_ENGINE_FILES),
 )
 
 
@@ -179,7 +196,9 @@ def wipe_app_dir_if_new_version():
         # Не пытаемся поверх такой папки что-либо копировать: сначала вернём
         # права, затем обычный запуск продолжится со старым рабочим runtime.
         inaccessible = False
-        for folder in MANAGED_RUNTIME_DIRS:
+        # flags are optional presentation assets. Their ACL must never prevent
+        # the application from starting or trigger an elevation prompt.
+        for folder in ("core", "background_service"):
             path = os.path.join(APP_DIR, folder)
             try:
                 exists = os.path.lexists(path)
@@ -198,14 +217,11 @@ def wipe_app_dir_if_new_version():
                 inaccessible = True
                 break
         if inaccessible:
-            for folder in MANAGED_RUNTIME_DIRS:
-                path = os.path.join(APP_DIR, folder)
-                try:
-                    exists = os.path.lexists(path)
-                except OSError:
-                    continue
-                if exists and not _make_runtime_tree_accessible(path):
-                    raise RuntimeMigrationError(f"Could not repair access to runtime directory: {path}")
+            if _repair_runtime_access_via_service():
+                return
+            _startup_log.warning(
+                "Runtime ACL repair unavailable; keeping the existing runtime and continuing startup"
+            )
             return
 
     runtime_needs_repair = False
@@ -226,6 +242,12 @@ def wipe_app_dir_if_new_version():
     except OSError:
         runtime_needs_repair = False
 
+    if prev == APP_VERSION and not runtime_needs_repair:
+        core_service = os.path.join(APP_DIR, "core", "service.bat")
+        installed = re.search(r'(?im)^\s*set\s+"LOCAL_VERSION\s*=\s*([^"]+)"', _read_text(core_service))
+        runtime_needs_repair = bool(
+            installed and _version_key(installed.group(1)) < _version_key(FLOWSEAL_DEFAULT_VER)
+        )
     if prev == APP_VERSION and not runtime_needs_repair:
         return
 
@@ -255,20 +277,7 @@ def restore_pending_user_strategies_after_extract() -> None:
 
 def update_domain_files():
     try:
-        import psutil
-
-        def is_winws_running() -> bool:
-            try:
-                out = subprocess.check_output(
-                    'tasklist /FI "IMAGENAME eq winws.exe" /NH',
-                    shell=True,
-                    text=True
-                )
-                return "winws.exe" in out.lower()
-            except Exception:
-                return False
-
-        if is_winws_running():
+        if _is_winws_running_silent():
             QMessageBox.warning(
                 None,
                 "Обновление",
@@ -1165,6 +1174,8 @@ def _prepare_post_update_runtime() -> None:
 
 
 def _replace_core_from_archive(archive: zipfile.ZipFile, core_target: str) -> int:
+    if os.path.normcase(os.path.abspath(core_target)) == os.path.normcase(os.path.join(APP_DIR, "core")):
+        _migrate_legacy_user_files()
     driver_names = {"windivert64.sys", "windivert32.sys"}
     driver_backups: dict[str, bytes] = {}
 
@@ -1224,9 +1235,12 @@ def _replace_core_from_archive(archive: zipfile.ZipFile, core_target: str) -> in
             rel = member[len(root_prefix):] if root_prefix else member
             if not rel:
                 continue
-
             dst_path = os.path.abspath(os.path.join(stage_target, rel))
             if dst_path != core_root and not dst_path.startswith(core_prefix):
+                continue
+            # Only GUI updates are allowed to replace the Applications engine.
+            parts = os.path.relpath(dst_path, core_root).casefold().split(os.sep)
+            if parts[:2] == ["bin", "medvedeff-winws"]:
                 continue
 
             os.makedirs(os.path.dirname(dst_path), exist_ok=True)
@@ -1639,6 +1653,16 @@ translations = {
         'Game Mode': 'Игровой режим',
         'Game Mode Settings': 'Настройки игрового режима',
         'Game Mode Placeholder': 'Настройки игрового режима появятся позже.',
+        'Traffic processing mode': 'Режим обработки трафика',
+        'Traffic mode all': 'Весь трафик',
+        'Traffic mode applications': 'Приложения',
+        'Traffic mode lists': 'Только списки',
+        'Traffic processing info': 'Эта функция работает в тестовом режиме. Если вы столкнулись с багами, пожалуйста, сообщите об этом в Issues:',
+        'Traffic lists hint': 'Нажмите для Вкл/Выкл на нужные списки для обхода',
+        'Traffic applications placeholder': 'Выбранные приложения будут обрабатываться через medvedeff-winws.',
+        'Traffic applications unavailable': 'Для режима «Приложения» требуется доступный medvedeff-winws и хотя бы одно выбранное приложение.',
+        'Traffic applications empty': 'Добавьте приложения для обхода',
+        'Traffic applications invalid': 'Список приложений слишком большой или содержит недопустимые пути.',
         'Instruction Text': """
         <b>1.</b> Выберите из выпадающего списка <b>профиль настроек</b>, затем нажмите на <span style="display:inline-block; padding:2px 8px; border-radius:8px; background:#d94b4b; color:white;"><b>большую красную кнопку</b></span>, чтобы запустить обход блокировок. Если выбранный профиль не сработал, переходите к следующему.<br><br>
         <b>2.</b> Проверить, работает ли текущий профиль можно, например на: <a href="https://www.youtube.com">@YouTube</a> или <a href="https://discord.com/">@Discord</a><br><br>
@@ -1682,6 +1706,16 @@ translations = {
         'Game Mode': 'Game mode',
         'Game Mode Settings': 'Game mode settings',
         'Game Mode Placeholder': 'Game mode settings will be added later.',
+        'Traffic processing mode': 'Traffic processing mode',
+        'Traffic mode all': 'All traffic',
+        'Traffic mode applications': 'Applications',
+        'Traffic mode lists': 'Lists only',
+        'Traffic processing info': 'This feature is experimental. If you encounter a bug, please report it in Issues:',
+        'Traffic lists hint': 'Click to enable or disable the lists used for bypass',
+        'Traffic applications placeholder': 'Selected applications are processed by medvedeff-winws.',
+        'Traffic applications unavailable': 'Applications mode requires medvedeff-winws and at least one selected application.',
+        'Traffic applications empty': 'Add applications to bypass',
+        'Traffic applications invalid': 'The application list is too large or contains invalid paths.',
         'Instruction Text': """
         <b>1.</b> Select a <b>profile</b> from the dropdown list, then click the <span style="display:inline-block; padding:2px 8px; border-radius:8px; background:#d94b4b; color:white;"><b>big red button</b></span> to start the bypass. <i>By default, profile <b>General (ALT)</b> is used.</i><br><br>
         <b>2.</b> If the selected profile does not work, stop bypass with the <span style="display:inline-block; padding:2px 8px; border-radius:8px; background:#2db45f; color:white;"><b>green button</b></span> and choose another profile.<br><br>

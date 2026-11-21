@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.IO.Pipes;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -32,8 +33,101 @@ public sealed class Argument
 public sealed class Request
 {
     public string op;
+    public string engine;
     public Argument[] args;
-    public string[] files;
+    public InputFile[] files;
+    public string hosts;
+    public string hosts_hash;
+    public string hosts_mode;
+}
+public sealed class InputFile
+{
+    public long size;
+    public bool gzip;
+}
+public sealed class UploadException : IOException
+{
+    public UploadException(Exception inner) : base(inner.Message, inner) { }
+}
+
+public static class Uploads
+{
+    public const long MaxBytes = 8L * 1024 * 1024 * 1024;
+    public const int BlockBytes = 256 * 1024;
+    public const int ControlBytes = 4 * 1024 * 1024;
+    public const long PayloadBytes = 16L * 1024 * 1024;
+    public const long ApplicationScopeBytes = 1L * 1024 * 1024;
+
+    public static string[] Paths(InputFile[] files, string directory)
+    {
+        files = files ?? new InputFile[0];
+        if (files.Length > 256) throw new InvalidDataException("Too many profile files (maximum 256)");
+        long total = 0;
+        var paths = new string[files.Length];
+        for (int i = 0; i < files.Length; i++) {
+            if (files[i] == null || files[i].size < 0 || files[i].size > MaxBytes - total)
+                throw new InvalidDataException("Profile files exceed 8 GiB or have an invalid size");
+            total += files[i].size;
+            paths[i] = Path.Combine(directory, "input-" + i + (files[i].gzip ? ".dat.gz" : ".dat"));
+        }
+        var drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(directory)));
+        if (drive.AvailableFreeSpace < total + 64L * 1024 * 1024)
+            throw new IOException("Not enough free disk space for profile files");
+        return paths;
+    }
+
+    public static void Receive(Stream pipe, InputFile file, string path, Stopwatch elapsed)
+    {
+        // All buffers are per-block, regardless of the declared file size.
+        byte[] wire = new byte[BlockBytes], decoded = new byte[BlockBytes], header = new byte[12];
+        long received = 0;
+        using (var hash = SHA256.Create())
+        using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write,
+            FileShare.None, 65536, FileOptions.SequentialScan)) {
+            while (true) {
+                Broker.ReadInto(pipe, header, header.Length);
+                int rawSize = BitConverter.ToInt32(header, 0);
+                int wireSize = BitConverter.ToInt32(header, 4);
+                int codec = BitConverter.ToInt32(header, 8);
+                if (elapsed.Elapsed > TimeSpan.FromHours(2))
+                    throw new IOException("Profile upload exceeded 2 hours");
+                if (rawSize == 0 && wireSize == 0 && codec == 0) break;
+                if (rawSize <= 0 || rawSize > BlockBytes || wireSize <= 0 || wireSize > BlockBytes ||
+                    rawSize > file.size - received || (codec != 0 && codec != 1) ||
+                    (codec == 0 && rawSize != wireSize))
+                    throw new InvalidDataException("Invalid profile upload block");
+                Broker.ReadInto(pipe, wire, wireSize);
+                byte[] data = wire;
+                if (codec == 1) {
+                    using (var memory = new MemoryStream(wire, 0, wireSize, false))
+                    using (var gzip = new GZipStream(memory, CompressionMode.Decompress)) {
+                        int count = 0;
+                        while (count < rawSize) {
+                            int read = gzip.Read(decoded, count, rawSize - count);
+                            if (read == 0) throw new InvalidDataException("Truncated compressed block");
+                            count += read;
+                        }
+                        // Never expand more than one bounded block, including
+                        // malicious compression bombs with a false raw length.
+                        if (gzip.ReadByte() != -1)
+                            throw new InvalidDataException("Compressed block exceeds its declared size");
+                    }
+                    data = decoded;
+                }
+                output.Write(data, 0, rawSize);
+                hash.TransformBlock(data, 0, rawSize, data, 0);
+                received += rawSize;
+            }
+            byte[] expectedHash = new byte[32];
+            Broker.ReadInto(pipe, expectedHash, expectedHash.Length);
+            hash.TransformFinalBlock(new byte[0], 0, 0);
+            byte[] actualHash = hash.Hash;
+            int difference = 0;
+            for (int i = 0; i < expectedHash.Length; i++) difference |= expectedHash[i] ^ actualHash[i];
+            if (received != file.size || difference != 0)
+                throw new InvalidDataException("Profile file size or SHA-256 mismatch");
+        }
+    }
 }
 
 public static class Options
@@ -42,7 +136,7 @@ public static class Options
     // prefix: a future --lua-init/--pidfile must not become a SYSTEM primitive.
     static readonly HashSet<string> Values = new HashSet<string>((
         "comment ctrack-timeouts ctrack-disable ipcache-lifetime ipcache-hostname " +
-        "wf-iface wf-l3 wf-tcp wf-udp wf-filter-lan ssid-filter nlm-filter " +
+        "wf-iface wf-l3 wf-tcp wf-udp wf-raw wf-raw-part wf-filter-lan ssid-filter nlm-filter " +
         "new skip filter-l3 filter-tcp filter-udp filter-l7 ipset-ip ipset-exclude-ip " +
         "hostlist-domains hostlist-exclude-domains hostlist-auto-fail-threshold " +
         "hostlist-auto-fail-time hostlist-auto-retrans-threshold " +
@@ -61,33 +155,27 @@ public static class Options
         "dpi-desync-udplen-increment dpi-desync-start dpi-desync-cutoff").Split(' '));
     static readonly HashSet<string> Lists = new HashSet<string>(new[] {
         "hostlist", "hostlist-exclude", "ipset", "ipset-exclude" });
+    static readonly HashSet<string> ApplicationFiles = new HashSet<string>(new[] {
+        "app-scope-file" });
     static readonly HashSet<string> Payloads = new HashSet<string>((
         "dpi-desync-split-seqovl-pattern dpi-desync-fakedsplit-pattern dpi-desync-udplen-pattern " +
         "dpi-desync-fake-http dpi-desync-fake-tls dpi-desync-fake-unknown dpi-desync-fake-syndata " +
         "dpi-desync-fake-quic dpi-desync-fake-wireguard dpi-desync-fake-dht dpi-desync-fake-discord " +
         "dpi-desync-fake-stun dpi-desync-fake-unknown-udp").Split(' '));
 
-    public static string[] Materialize(Request request, string directory)
+    public static string[] Materialize(Request request, string[] paths)
     {
         if (request.args == null || request.args.Length == 0 || request.args.Length > 2048)
             throw new InvalidDataException("Invalid argument count");
-        string[] encoded = request.files ?? new string[0];
-        if (encoded.Length > 256) throw new InvalidDataException("Too many files");
-        var paths = new List<string>();
-        long total = 0;
-        foreach (string value in encoded)
-        {
-            byte[] data = Convert.FromBase64String(value);
-            total += data.Length;
-            if (total > 32 * 1024 * 1024) throw new InvalidDataException("Profile files exceed 32 MiB");
-            string extension = data.Length > 2 && data[0] == 31 && data[1] == 139 ? ".dat.gz" : ".dat";
-            string path = Path.Combine(directory, "input-" + paths.Count + extension);
-            File.WriteAllBytes(path, data);
-            paths.Add(path);
-        }
+        string engine = request.engine ?? "winws";
+        if (engine != "winws" && engine != "medvedeff-winws")
+            throw new InvalidDataException("Unsupported backend engine");
         var output = new List<string>();
+        var referenced = new bool[paths.Length];
+        int applicationScopeFiles = 0;
         foreach (Argument arg in request.args)
         {
+            if (arg == null) throw new InvalidDataException("Invalid argument");
             string name = arg.name ?? "";
             string value = arg.value;
             if ((value != null && (value.Length > 16000 || value.IndexOf('\0') >= 0)) ||
@@ -96,14 +184,30 @@ public static class Options
             bool file = arg.file >= 0;
             bool payload = Payloads.Contains(name);
             bool raw = name == "wf-raw" || name == "wf-raw-part";
+            bool applicationFile = ApplicationFiles.Contains(name);
             if (file)
             {
-                if ((!Lists.Contains(name) && !payload && !raw) || arg.file >= paths.Count || value != null)
+                if ((!Lists.Contains(name) && !payload && !raw && !applicationFile) ||
+                    arg.file >= paths.Length || value != null)
                     throw new InvalidDataException("Invalid file option: " + name);
+                if (applicationFile)
+                {
+                    if (engine != "medvedeff-winws")
+                        throw new InvalidDataException("--app-scope-file requires medvedeff-winws");
+                    if (request.files[arg.file].gzip || request.files[arg.file].size < 1 ||
+                        request.files[arg.file].size > Uploads.ApplicationScopeBytes)
+                        throw new InvalidDataException("Application scope file must be plain UTF-8 (1 byte to 1 MiB)");
+                    applicationScopeFiles++;
+                }
+                if (!Lists.Contains(name) && !applicationFile && request.files[arg.file].size > Uploads.PayloadBytes)
+                    throw new InvalidDataException("Binary payload exceeds 16 MiB: --" + name);
+                referenced[arg.file] = true;
                 string prefix = arg.prefix ?? "";
                 if (!Regex.IsMatch(prefix, @"\A(?:\+[0-9]+)?\z") || (!payload && prefix != ""))
                     throw new InvalidDataException("Invalid payload offset");
-                value = prefix + (raw || prefix != "" ? "@" : "") + paths[arg.file];
+                value = applicationFile
+                    ? paths[arg.file]
+                    : prefix + (raw || prefix != "" ? "@" : "") + paths[arg.file];
             }
             else if (Lists.Contains(name))
                 throw new InvalidDataException("File content required: " + name);
@@ -112,6 +216,10 @@ public static class Options
                 if (value == null || !(Regex.IsMatch(value, @"\A0x[0-9a-fA-F]+\z") ||
                     (name == "dpi-desync-fake-tls" && Regex.IsMatch(value, @"\A!(?:\+[0-9]+)?\z"))))
                     throw new InvalidDataException("Payload must be uploaded: " + name);
+            }
+            else if (applicationFile)
+            {
+                throw new InvalidDataException("Application scope file content required");
             }
             else if (raw)
             {
@@ -126,7 +234,80 @@ public static class Options
                 throw new InvalidDataException("Unsupported background option: --" + name);
             output.Add("--" + name + (value == null ? "" : "=" + value));
         }
+        if (engine == "medvedeff-winws" && applicationScopeFiles != 1)
+            throw new InvalidDataException("medvedeff-winws requires exactly one --app-scope-file");
+        if (engine == "winws" && applicationScopeFiles != 0)
+            throw new InvalidDataException("--app-scope-file is not valid for winws");
+        foreach (bool used in referenced)
+            if (!used) throw new InvalidDataException("Unreferenced profile file");
         return output.ToArray();
+    }
+}
+
+public static class AiDnsHosts
+{
+    const string Begin = "# ZapretGUI Ai DNS BEGIN";
+    const string End = "# ZapretGUI Ai DNS END";
+    static readonly string MutexName = "Local\\ZapretGUI.AiDNS.Hosts";
+
+    static string Path
+    {
+        get { return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+            @"drivers\etc\hosts"); }
+    }
+
+    static string Hash(byte[] data)
+    {
+        using (var sha = SHA256.Create())
+            return BitConverter.ToString(sha.ComputeHash(data)).Replace("-", "").ToLowerInvariant();
+    }
+
+    public static object Apply(Request request)
+    {
+        if (request == null || request.hosts == null || request.hosts_hash == null ||
+            (request.hosts_mode != "apply" && request.hosts_mode != "restore"))
+            throw new InvalidDataException("Invalid Ai DNS hosts request");
+        if (request.hosts.Length > 2 * 1024 * 1024 || request.hosts.IndexOf('\0') >= 0)
+            throw new InvalidDataException("Ai DNS hosts content is too large or contains NUL");
+        if (request.hosts_mode == "apply" &&
+            (request.hosts.IndexOf(Begin, StringComparison.Ordinal) < 0 ||
+             request.hosts.IndexOf(End, StringComparison.Ordinal) < 0))
+            throw new InvalidDataException("Ai DNS managed block is missing");
+        if (request.hosts_mode == "restore" &&
+            request.hosts.IndexOf(Begin, StringComparison.Ordinal) >= 0)
+            throw new InvalidDataException("Restore content still contains Ai DNS block");
+        using (var mutex = new System.Threading.Mutex(false, MutexName))
+        {
+            if (!mutex.WaitOne(10000)) throw new IOException("Ai DNS hosts operation timed out");
+            try
+            {
+                if (File.Exists(Path) &&
+                    (File.GetAttributes(Path) & FileAttributes.ReparsePoint) != 0)
+                    throw new IOException("The system hosts file must not be a link");
+                byte[] current = File.Exists(Path) ? File.ReadAllBytes(Path) : new byte[0];
+                if (!String.Equals(Hash(current), request.hosts_hash, StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("hosts-changed");
+                byte[] data = new UTF8Encoding(false).GetBytes(request.hosts.Replace("\r\n", "\n").Replace("\r", "\n"));
+                string directory = System.IO.Path.GetDirectoryName(Path);
+                string temporary = System.IO.Path.Combine(directory, "." + Guid.NewGuid().ToString("N") + ".hosts.tmp");
+                File.WriteAllBytes(temporary, data);
+                try
+                {
+                    if (File.Exists(Path))
+                        File.Replace(temporary, Path, null, true);
+                    else
+                        File.Move(temporary, Path);
+                }
+                finally
+                {
+                    try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
+                }
+                if (!Hash(File.ReadAllBytes(Path)).Equals(Hash(data), StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("hosts-write-verification-failed");
+                return new { ok = true, applied = 1 };
+            }
+            finally { mutex.ReleaseMutex(); }
+        }
     }
 }
 
@@ -162,11 +343,83 @@ public static class TelegramHosts
     }
 }
 
+public static class RuntimeAccess
+{
+    static string RuntimeRoot(string root, string sid)
+    {
+        string profile = "";
+        try {
+            using (var key = Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\" + sid)) {
+                profile = Convert.ToString(key == null ? null : key.GetValue("ProfileImagePath"));
+            }
+        } catch (Exception) { }
+        if (String.IsNullOrWhiteSpace(profile))
+            throw new InvalidDataException("User profile path is missing");
+        string runtime = Path.GetFullPath(Path.Combine(
+            Environment.ExpandEnvironmentVariables(profile), "ZapretGUI"));
+        if (!String.Equals(Path.GetFileName(runtime), "ZapretGUI", StringComparison.OrdinalIgnoreCase) ||
+            String.IsNullOrWhiteSpace(Path.GetDirectoryName(runtime)))
+            throw new InvalidDataException("Runtime path is not a user ZapretGUI directory");
+        return runtime;
+    }
+
+    static int Icalcs(string arguments)
+    {
+        var info = new ProcessStartInfo(
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "icacls.exe"),
+            arguments);
+        info.UseShellExecute = false;
+        info.CreateNoWindow = true;
+        using (var process = Process.Start(info)) {
+            if (process == null) throw new IOException("Could not start icacls");
+            if (!process.WaitForExit(60000)) throw new IOException("icacls timed out");
+            return process.ExitCode;
+        }
+    }
+
+    public static object Repair(string root, string sid)
+    {
+        string runtime = RuntimeRoot(root, sid);
+        // Never reset ACLs recursively on the whole user-owned ZapretGUI
+        // directory: that also contains user strategies, lists, settings and
+        // backups.  The previous implementation did exactly that and could
+        // make unrelated user data require elevation.  Repair only the
+        // managed runtime trees that the SYSTEM service actually needs.
+        var targets = new List<string>();
+        foreach (string name in new[] { "core", "background_service", "flags" }) {
+            string path = Path.Combine(runtime, name);
+            if (Directory.Exists(path)) targets.Add(path);
+        }
+        if (targets.Count == 0)
+            throw new DirectoryNotFoundException("Managed ZapretGUI runtime directories are missing");
+
+        var results = new List<int>();
+        foreach (string path in targets) {
+            string target = Native.Quote(path);
+            int reset = Icalcs(target + " /reset /T /C /Q");
+            int grant = Icalcs(
+                target + " /inheritance:e /grant:r " +
+                Native.Quote("*" + sid + ":(OI)(CI)F") + " /T /C /Q");
+            results.Add(reset);
+            results.Add(grant);
+        }
+        bool success = true;
+        foreach (int code in results) if (code != 0) success = false;
+        if (!success)
+            throw new IOException("icacls failed (" + String.Join(",", results) + ")");
+        return new { ok = true, reset_exit = results[0], grant_exit = results[1] };
+    }
+}
+
 public sealed class Child : IDisposable
 {
     IntPtr process, job;
     public uint Pid { get; private set; }
     readonly StringBuilder log = new StringBuilder();
+    const string ApplicationReadyLine = "\nmedvedeff-winws: application capture ready\n";
+    volatile bool applicationReady;
+    public bool ApplicationReady { get { return applicationReady; } }
     public string Log { get { lock (log) return log.ToString(); } }
     public bool Running { get { return process != IntPtr.Zero && Native.WaitForSingleObject(process, 0) == 258; } }
     public uint ExitCode { get { uint code; Native.Check(Native.GetExitCodeProcess(process, out code)); return code; } }
@@ -174,6 +427,7 @@ public sealed class Child : IDisposable
 
     public Child(string executable, string[] arguments)
     {
+        bool applicationEngine = Path.GetFileName(executable) == "medvedeff-winws.exe";
         IntPtr read = IntPtr.Zero, write = IntPtr.Zero, input = IntPtr.Zero;
         Native.PROCESS_INFORMATION pi = new Native.PROCESS_INFORMATION();
         try
@@ -210,6 +464,9 @@ public sealed class Child : IDisposable
                     while ((count = text.Read(buffer, 0, buffer.Length)) > 0) lock (log) {
                         log.Append(buffer, 0, count);
                         if (log.Length > 16000) log.Remove(0, log.Length - 16000);
+                        if (applicationEngine && !applicationReady &&
+                            log.ToString().Replace("\r\n", "\n").Contains(ApplicationReadyLine))
+                            applicationReady = true;
                     }
                 }} catch (IOException) { }
             });
@@ -242,7 +499,7 @@ public sealed class Child : IDisposable
 
 public sealed class Broker : ServiceBase
 {
-    public const int Protocol = 1;
+    public const int Protocol = 2;
     readonly string sid, root, pipeName;
     volatile bool quitting;
     NamedPipeServerStream pipe;
@@ -318,17 +575,31 @@ public sealed class Broker : ServiceBase
             pid = child == null ? 0 : child.Pid, exit_code = child == null || child.Running ? (uint?)null : child.ExitCode,
             log = child == null ? "" : child.Log,
             engine = File.ReadAllText(Path.Combine(root, "engine.sha256")).Trim(),
-            helper = Install.FileHash(Assembly.GetExecutingAssembly().Location) };
+            helper = Install.FileHash(Assembly.GetExecutingAssembly().Location),
+            features = new[] { "runtime-access" } };
     }
-    object Dispatch(Request request)
+    void Reply(JavaScriptSerializer json, object reply)
+    {
+        byte[] encoded = Encoding.UTF8.GetBytes(json.Serialize(reply));
+        if (encoded.Length > Uploads.ControlBytes) throw new InvalidDataException("Reply is too large");
+        pipe.Write(BitConverter.GetBytes(encoded.Length), 0, 4);
+        pipe.Write(encoded, 0, encoded.Length); pipe.Flush();
+    }
+    object Dispatch(Request request, JavaScriptSerializer json)
     {
         lock (gate)
         {
+            if (request == null) throw new InvalidDataException("Empty request");
             if (quitting) throw new IOException("Service is stopping");
+            request.engine = request.engine ?? "winws";
+            if (request.engine != "winws" && request.engine != "medvedeff-winws")
+                throw new InvalidDataException("Unsupported backend engine");
             if (request.op == "hello" || request.op == "status") return Status();
             if (request.op == "telegram-hosts-on" || request.op == "telegram-hosts-off") {
                 TelegramHosts.SetEnabled(request.op == "telegram-hosts-on"); return Status();
             }
+            if (request.op == "ai-dns-hosts") return AiDnsHosts.Apply(request);
+            if (request.op == "repair-runtime-access") return RuntimeAccess.Repair(root, sid);
             if (request.op == "stop") { StopChild(); StopLegacy(); return Status(); }
             if (request.op != "start" && request.op != "validate") throw new InvalidDataException("Unknown operation");
             if (child != null && child.Running) throw new IOException("Bypass is already running");
@@ -337,28 +608,75 @@ public sealed class Broker : ServiceBase
             Directory.CreateDirectory(runDirectory);
             try
             {
-                string[] args = Options.Materialize(request, runDirectory);
+                string[] paths = Uploads.Paths(request.files, runDirectory);
+                // Validate the complete option allowlist before accepting any
+                // file bytes. Paths are generated here, never provided by GUI.
+                string[] args = Options.Materialize(request, paths);
+                if (request.files != null) {
+                    Reply(json, new { ok = true, upload = true });
+                    try {
+                        var elapsed = Stopwatch.StartNew();
+                        for (int i = 0; i < request.files.Length; i++) {
+                            Uploads.Receive(pipe, request.files[i], paths[i], elapsed);
+                            Reply(json, new { ok = true, received = i });
+                        }
+                    } catch (Exception ex) { throw new UploadException(ex); }
+                }
                 if (request.op == "validate") {
                     var validationArgs = new List<string>(args); validationArgs.Insert(0, "--dry-run");
-                    child = new Child(Path.Combine(root, "engine", "winws.exe"), validationArgs.ToArray());
+                    child = new Child(
+                        EngineExecutable(request.engine),
+                        validationArgs.ToArray());
                     if (!child.Wait(10000)) throw new IOException("Profile validation timed out");
                     Thread.Sleep(50); // let the output reader consume the final buffered bytes
                     uint code = child.ExitCode; string log = child.Log;
                     StopChild();
                     return new { ok = code == 0, error = code == 0 ? "" : log, exit_code = code, log = log };
                 }
-                child = new Child(Path.Combine(root, "engine", "winws.exe"), args);
-                // A successful CreateProcess alone says nothing about driver initialization.
-                Thread.Sleep(1200);
+                child = new Child(
+                    EngineExecutable(request.engine),
+                    args);
+                if (request.engine == "medvedeff-winws") {
+                    var startup = Stopwatch.StartNew();
+                    while (child.Running && !child.ApplicationReady && startup.ElapsedMilliseconds < 8000)
+                        Thread.Sleep(25);
+                    if (child.Running && !child.ApplicationReady)
+                        throw new IOException("medvedeff-winws did not initialize application capture: " + child.Log);
+                } else {
+                    // Preserve the original startup behaviour of stock winws.
+                    Thread.Sleep(1200);
+                }
                 if (!child.Running)
-                    throw new IOException("winws exited (" + child.ExitCode + "): " + child.Log);
+                    throw new IOException(request.engine + " exited (" + child.ExitCode + "): " + child.Log);
                 return Status();
             }
             catch { StopChild(); throw; }
         }
     }
+    string EngineExecutable(string engine)
+    {
+        string relative = engine == "medvedeff-winws"
+            ? Path.Combine("medvedeff-winws", "medvedeff-winws.exe")
+            : "winws.exe";
+        string executable = Path.Combine(root, "engine", relative);
+        if (!File.Exists(executable))
+            throw new FileNotFoundException("Requested backend is not installed", executable);
+        return executable;
+    }
     void Serve()
     {
+        // A process crash bypasses finally. No child survives the kill-on-close
+        // job, so only old, service-generated GUID staging directories remain.
+        string runs = Path.Combine(root, "runs");
+        if (Directory.Exists(runs)) {
+            foreach (string directory in Directory.GetDirectories(runs)) {
+                if (!Regex.IsMatch(Path.GetFileName(directory), @"\A[0-9a-f]{32}\z") ||
+                    (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) continue;
+                try { Directory.Delete(directory, true); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
         while (!quitting)
         {
             try
@@ -387,19 +705,24 @@ public sealed class Broker : ServiceBase
                     {
                         // Pin the original process handle; PID reuse cannot transfer ownership.
                         IntPtr ownerHandle = owner.Handle;
-                        var json = new JavaScriptSerializer { MaxJsonLength = 48 * 1024 * 1024, RecursionLimit = 16 };
+                        var json = new JavaScriptSerializer { MaxJsonLength = Uploads.ControlBytes, RecursionLimit = 16 };
                         while (!quitting)
                         {
                             byte[] header = ReadExact(pipe, 4);
                             int size = BitConverter.ToInt32(header, 0);
-                            if (size <= 0 || size > 48 * 1024 * 1024) throw new InvalidDataException("Invalid message length");
+                            if (size <= 0 || size > Uploads.ControlBytes) throw new InvalidDataException("Invalid message length");
                             byte[] body = ReadExact(pipe, size);
                             object reply;
-                            try { reply = Dispatch(json.Deserialize<Request>(Encoding.UTF8.GetString(body))); }
+                            try { reply = Dispatch(json.Deserialize<Request>(Encoding.UTF8.GetString(body)), json); }
+                            catch (UploadException ex) {
+                                // There may be unread binary bytes on the pipe.
+                                // Fail closed, never reinterpret them as JSON.
+                                try { Reply(json, new { ok = false, error = ex.Message }); }
+                                catch (IOException) { } // the GUI may have cancelled/disconnected
+                                break;
+                            }
                             catch (Exception ex) { reply = new { ok = false, error = ex.Message }; }
-                            byte[] encoded = Encoding.UTF8.GetBytes(json.Serialize(reply));
-                            pipe.Write(BitConverter.GetBytes(encoded.Length), 0, 4);
-                            pipe.Write(encoded, 0, encoded.Length); pipe.Flush();
+                            Reply(json, reply);
                         }
                     }
                     }
@@ -417,7 +740,13 @@ public sealed class Broker : ServiceBase
     }
     static byte[] ReadExact(Stream stream, int size)
     {
-        byte[] data = new byte[size]; int offset = 0;
+        byte[] data = new byte[size];
+        ReadInto(stream, data, size);
+        return data;
+    }
+    public static void ReadInto(Stream stream, byte[] data, int size)
+    {
+        int offset = 0;
         while (offset < size)
         {
             var pending = stream.BeginRead(data, offset, size - offset, null, null);
@@ -429,14 +758,32 @@ public sealed class Broker : ServiceBase
             if (count == 0) throw new EndOfStreamException();
             offset += count;
         }
-        return data;
     }
 }
 
 public static class Install
 {
     public static string ServiceName(string sid) { return "ZapretGUI.Bypass." + sid; }
-    static readonly string[] EngineFiles = { "winws.exe", "cygwin1.dll", "WinDivert.dll", "WinDivert64.sys" };
+    static readonly string[] StockFiles = {
+        "winws.exe", "cygwin1.dll", "WinDivert.dll", "WinDivert64.sys"
+    };
+    static readonly string[] ApplicationFiles = {
+        "medvedeff-winws/medvedeff-winws.exe",
+        "medvedeff-winws/cygwin1.dll", "medvedeff-winws/cygz.dll",
+        "medvedeff-winws/WinDivert.dll", "medvedeff-winws/WinDivert64.sys",
+        "medvedeff-winws/LICENSE.txt", "medvedeff-winws/WINDIVERT-LICENSE.txt",
+        "medvedeff-winws/CYGWIN-LICENSE.txt", "medvedeff-winws/ZLIB-LICENSE.txt",
+        "medvedeff-winws/SOURCES.txt"
+    };
+    static IEnumerable<string> EngineFiles(string directory)
+    {
+        foreach (string name in StockFiles) yield return name;
+        foreach (string name in ApplicationFiles) {
+            var file = new FileInfo(Path.Combine(directory, name));
+            if (!file.Exists || file.Length == 0) yield break;
+        }
+        foreach (string name in ApplicationFiles) yield return name;
+    }
     public static string FileHash(string path) {
         using (var hash = SHA256.Create()) using (var file = File.OpenRead(path))
             return BitConverter.ToString(hash.ComputeHash(file)).Replace("-", "").ToLowerInvariant();
@@ -445,8 +792,8 @@ public static class Install
     {
         using (var hash = SHA256.Create()) {
             var manifest = new StringBuilder();
-            foreach (string name in EngineFiles) manifest.Append(name).Append(":").Append(
-                BitConverter.ToString(hash.ComputeHash(File.ReadAllBytes(Path.Combine(directory, name)))).Replace("-", "").ToLowerInvariant()).Append("\n");
+            foreach (string name in EngineFiles(directory)) manifest.Append(name).Append(":")
+                .Append(FileHash(Path.Combine(directory, name))).Append("\n");
             return BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(manifest.ToString()))).Replace("-", "").ToLowerInvariant();
         }
     }
@@ -524,7 +871,11 @@ public static class Install
         SecureDirectory(userRoot);
         string root = Path.Combine(userRoot, Guid.NewGuid().ToString("N")); SecureDirectory(root);
         string engine = Path.Combine(root, "engine"); SecureDirectory(engine);
-        foreach (string file in EngineFiles) File.Copy(Path.Combine(source, file), Path.Combine(engine, file));
+        foreach (string file in EngineFiles(source)) {
+            string target = Path.Combine(engine, file);
+            Directory.CreateDirectory(Path.GetDirectoryName(target));
+            File.Copy(Path.Combine(source, file), target);
+        }
         // WinDivert32 is optional for legacy 32-bit distributions.
         if (File.Exists(Path.Combine(source, "WinDivert32.sys"))) File.Copy(Path.Combine(source, "WinDivert32.sys"), Path.Combine(engine, "WinDivert32.sys"));
         string executable = Path.Combine(root, "ZapretGUI.Service.exe");

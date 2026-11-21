@@ -1,5 +1,7 @@
 PyQt6>=6.6
 requests>=2.31
+httpx[http2]>=0.27,<1
+dnspython>=2.6,<3
 psutil>=5.9
 cryptography>=42
 websockets>=12

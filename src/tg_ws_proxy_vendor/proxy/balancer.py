@@ -1,18 +1,18 @@
 import random
 from collections import Counter
 
-from typing import Dict, List, Iterator 
+from typing import Dict, List, Iterator
 
 
 class _Balancer:
     def __init__(self):
         self.domains: List[str] = []
         self._dc_to_domain: Dict[int, str] = {}
-    
+
     def update_domains_list(self, domains_list: List[str]) -> None:
         if Counter(self.domains) == Counter(domains_list):
             return
-        
+
         self.domains = domains_list[:]
 
         self._dc_to_domain = {
@@ -23,7 +23,7 @@ class _Balancer:
     def update_domain_for_dc(self, dc_id: int, domain: str) -> bool:
         if self._dc_to_domain.get(dc_id) == domain:
             return False
-        
+
         self._dc_to_domain[dc_id] = domain
         return True
 

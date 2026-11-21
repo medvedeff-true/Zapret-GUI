@@ -316,11 +316,113 @@ class ToggleSwitch(QCheckBox):
         p.end()
 
 
+class HoverHelpPopup(QObject):
+    """Interactive help styled like the game-mode help, without stealing focus."""
+
+    def __init__(self, anchor, text="", accent="#8ee6ad", keep_on_popup=True):
+        super().__init__(anchor)
+        self.anchor = anchor
+        self.keep_on_popup = keep_on_popup
+        self.popup = QFrame(anchor.window(), Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+                            | Qt.WindowType.WindowDoesNotAcceptFocus)
+        self.popup.setObjectName("hoverHelpPopup")
+        self.popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.popup.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not keep_on_popup)
+        self.popup.setStyleSheet(
+            f"QFrame#hoverHelpPopup {{ background:#242424; border:1px solid {accent}; border-radius:10px; }}"
+            "QLabel { color:#f3f3f3; background:transparent; border:none; font-size:12px; }"
+        )
+        layout = QVBoxLayout(self.popup)
+        layout.setContentsMargins(14, 12, 14, 12)
+        self.label = QLabel(self.popup)
+        self.label.setWordWrap(True)
+        self.label.setTextFormat(Qt.TextFormat.RichText)
+        self.label.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self.label.linkActivated.connect(lambda url: QDesktopServices.openUrl(QUrl(url)))
+        layout.addWidget(self.label)
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(240)
+        self.timer.timeout.connect(self._hide_if_outside)
+        self.animation = QPropertyAnimation(self.popup, b"windowOpacity", self)
+        self.animation.setDuration(130)
+        self.popup.installEventFilter(self)
+        self.label.installEventFilter(self)
+        anchor.installEventFilter(self)
+        anchor.window().installEventFilter(self)
+        self.setText(text)
+
+    def setText(self, text):
+        self.label.setText(text)
+        if self.popup.isVisible():
+            self._position()
+
+    def _position(self):
+        screen = self.anchor.screen()
+        available = screen.availableGeometry()
+        width = min(400, available.width() - 32)
+        self.label.setFixedWidth(max(180, width - 28))
+        self.popup.adjustSize()
+        point = self.anchor.mapToGlobal(QPoint(0, self.anchor.height() + 6))
+        x = max(available.left() + 8, min(point.x(), available.right() - self.popup.width() - 8))
+        y = point.y()
+        if y + self.popup.height() > available.bottom() - 8:
+            y = self.anchor.mapToGlobal(QPoint(0, 0)).y() - self.popup.height() - 6
+        self.popup.move(x, max(available.top() + 8, y))
+
+    def show_help(self):
+        self.timer.stop()
+        if not self.anchor.isVisible():
+            return
+        self._position()
+        if not self.popup.isVisible():
+            self.animation.stop()
+            self.popup.setWindowOpacity(0.0)
+            self.popup.show()
+            self.animation.setStartValue(0.0)
+            self.animation.setEndValue(1.0)
+            self.animation.start()
+        self.popup.raise_()
+
+    def _hide_if_outside(self):
+        pos = QCursor.pos()
+        if (self.keep_on_popup and self.popup.frameGeometry().contains(pos)) or self.anchor.rect().contains(self.anchor.mapFromGlobal(pos)):
+            return
+        self.popup.hide()
+
+    def eventFilter(self, obj, event):
+        kind = event.type()
+        if obj is self.anchor.window() and kind in (QEvent.Type.Hide, QEvent.Type.Close):
+            self.timer.stop()
+            self.popup.hide()
+        if obj is self.anchor:
+            if kind in (QEvent.Type.Enter, QEvent.Type.ToolTip):
+                self.show_help()
+                return kind == QEvent.Type.ToolTip
+            if kind in (QEvent.Type.Leave, QEvent.Type.Hide):
+                if self.keep_on_popup and kind == QEvent.Type.Leave:
+                    self.timer.start()
+                else:
+                    self.animation.stop()
+                    self.popup.hide()
+        elif obj in (self.popup, self.label):
+            if not self.keep_on_popup:
+                return False
+            if kind == QEvent.Type.Enter:
+                self.timer.stop()
+            elif kind == QEvent.Type.Leave:
+                self.timer.start()
+        return False
+
+
 class ModernCheckBox(QCheckBox):
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet("QCheckBox { background: transparent; spacing: 0; }")
+        self.toggled.connect(lambda _checked: self.update())
+        self.setMinimumHeight(24)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
     def sizeHint(self) -> QSize:
         fm = self.fontMetrics()
@@ -369,7 +471,8 @@ class ModernCheckBox(QCheckBox):
 
         text_rect = QRectF(box.right() + 8, 0, max(0, self.width() - box.right() - 8), self.height())
         p.setPen(QColor(242, 242, 242, 245 if enabled else 120))
-        p.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.text())
+        text = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, int(text_rect.width()))
+        p.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
         p.end()
 
 
@@ -436,6 +539,7 @@ class StableComboBox(QComboBox):
         self.setObjectName("stableComboBox")
         self._hovered = False
         self._popup_open = False
+        self.highlight_selection = False
         self._arrow_progress = 0.0
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
@@ -450,6 +554,8 @@ class StableComboBox(QComboBox):
         popup_view = StableComboPopupView(self)
         self.setView(popup_view)
         self.setMaxVisibleItems(10)
+        self.currentIndexChanged.connect(lambda _index: self.update())
+        self.currentTextChanged.connect(lambda _text: self.update())
 
     def getArrowProgress(self) -> float:
         return float(self._arrow_progress)
@@ -538,7 +644,7 @@ class StableComboBox(QComboBox):
 
         rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         enabled = self.isEnabled()
-        active = self._popup_open or self.hasFocus()
+        active = self._popup_open or self.hasFocus() or (self.highlight_selection and bool(self.currentText().strip()))
         bg_grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
         if active:
             bg_grad.setColorAt(0.00, QColor("#313a35"))
@@ -695,7 +801,7 @@ class ProfileScopeSwitch(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         frame = QRectF(self.rect()).adjusted(0.7, 0.7, -0.7, -0.7)
         hover_alpha = 12 if self._hovered else 0
-        painter.setPen(QPen(QColor(86, 103, 95, 190 if self._hovered else 135), 1.0))
+        painter.setPen(QPen(QColor(70, 82, 77, 150 if self._hovered else 105), 1.0))
         painter.setBrush(QColor(23, 28, 27, 245))
         painter.drawRoundedRect(frame, 12.0, 12.0)
 
@@ -1129,6 +1235,354 @@ class SegmentedControl(QWidget):
             """)
 
 
+def _draw_traffic_mode_icon(painter, center, index, color, size=18):
+    """Resolution-independent icons shared by both traffic selectors."""
+    painter.save()
+    painter.translate(center)
+    painter.scale(size / 18.0, size / 18.0)
+    pen = QPen(color, 1.5)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    if index == 0:
+        painter.drawEllipse(QRectF(-7, -7, 14, 14))
+        painter.drawEllipse(QRectF(-3.2, -7, 6.4, 14))
+        painter.drawLine(QPointF(-6.5, -2.5), QPointF(6.5, -2.5))
+        painter.drawLine(QPointF(-6.5, 2.5), QPointF(6.5, 2.5))
+    elif index == 1:
+        for x in (-6.5, 1.5):
+            for y in (-6.5, 1.5):
+                painter.drawRoundedRect(QRectF(x, y, 5, 5), 0.8, 0.8)
+    elif index == 2:
+        ProfileScopeSwitch._draw_list_icon(painter, QPointF(0, 0), color)
+    else:
+        for y in (-4, 0, 4):
+            path = QPainterPath()
+            path.moveTo(-8, y)
+            path.lineTo(0, y + 4)
+            path.lineTo(8, y)
+            if y == -4:
+                path.lineTo(0, y - 4)
+                path.closeSubpath()
+            painter.drawPath(path)
+    painter.restore()
+
+
+class TrafficModeSegmentButton(QPushButton):
+    def __init__(self, label, index, vertical, parent):
+        super().__init__(label, parent)
+        self.mode_index = index
+        self.vertical = vertical
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor("#ffffff" if self.parent().currentIndex() == self.mode_index else "#c7d0cc")
+        if self.vertical:
+            _draw_traffic_mode_icon(painter, QPointF(self.rect().center()), self.mode_index, color, 16)
+        else:
+            font = QFont(self.font())
+            font.setPixelSize(12)
+            font.setWeight(QFont.Weight.DemiBold)
+            painter.setFont(font)
+            metrics = QFontMetrics(font)
+            text = metrics.elidedText(self.text(), Qt.TextElideMode.ElideRight, max(0, self.width() - 35))
+            group_width = metrics.horizontalAdvance(text) + 27
+            left = (self.width() - group_width) / 2
+            _draw_traffic_mode_icon(painter, QPointF(left + 9, self.height() / 2), self.mode_index, color)
+            painter.setPen(color)
+            painter.drawText(QRectF(left + 26, 0, max(0, self.width() - left - 27), self.height()),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+
+
+class TrafficModeSelector(QWidget):
+    """Animated three-position selector used by the Settings dialog."""
+
+    currentChanged = pyqtSignal(int)
+
+    def __init__(self, labels: list[str] | tuple[str, ...] | None = None, parent=None, *, vertical=False):
+        super().__init__(parent)
+        self._labels = tuple(labels or ("Весь трафик", "Приложения", "Только списки"))
+        if len(self._labels) != 3:
+            raise ValueError("TrafficModeSelector requires exactly three labels")
+        self._index = 0
+        self._position = 0.0
+        self._hovered = False
+        self._vertical = vertical
+        if vertical:
+            self.setFixedSize(32, 90)
+        else:
+            self.setFixedHeight(44)
+            self.setMinimumWidth(0)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setAccessibleName("Traffic processing mode")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        self._animation = QPropertyAnimation(self, b"selectorPosition", self)
+        self._animation.setDuration(240)
+        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        layout = QVBoxLayout(self) if vertical else QHBoxLayout(self)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(2)
+        self._buttons = []
+        for index, label in enumerate(self._labels):
+            button = TrafficModeSegmentButton(label, index, vertical, self)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.setFlat(True)
+            button.setMinimumSize(0, 0)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            button.setAccessibleName(label)
+            button.setToolTip(label)
+            button.clicked.connect(lambda _checked=False, i=index: self.setCurrentIndex(i))
+            button.setStyleSheet("""
+                QPushButton {
+                    border: none;
+                    border-radius: 8px;
+                    background: transparent;
+                    color: #e8e8e8;
+                    font-size: 11px;
+                    font-weight: 650;
+                    padding: 0 3px;
+                }
+                QPushButton:hover {
+                    color: #ffffff;
+                }
+            """)
+            layout.addWidget(button, 1)
+            self._buttons.append(button)
+        self._buttons[0].setAccessibleDescription("Selected")
+
+    def getSelectorPosition(self) -> float:
+        return float(self._position)
+
+    def setSelectorPosition(self, value: float) -> None:
+        self._position = max(0.0, min(2.0, float(value)))
+        self.update()
+
+    selectorPosition = pyqtProperty(float, fget=getSelectorPosition, fset=setSelectorPosition)
+
+    def currentIndex(self) -> int:
+        return self._index
+
+    def setCurrentIndex(self, index: int, animated: bool = True, emit: bool = True) -> None:
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            index = 0
+        index = max(0, min(2, index))
+        changed = index != self._index
+        self._index = index
+        if animated:
+            self._animation.stop()
+            self._animation.setStartValue(self._position)
+            self._animation.setEndValue(float(index))
+            self._animation.start()
+        else:
+            self._animation.stop()
+            self.setSelectorPosition(float(index))
+        for i, button in enumerate(self._buttons):
+            button.setAccessibleDescription("Selected" if i == index else "")
+            button.update()
+        if changed and emit and not self.signalsBlocked():
+            self.currentChanged.emit(index)
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down,
+                           Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Up):
+                target = self._index - 1
+            elif event.key() in (Qt.Key.Key_Right, Qt.Key.Key_Down):
+                target = self._index + 1
+            else:
+                target = (self._index + 1) % 3
+            self.setCurrentIndex(target)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        frame = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(QPen(QColor(82, 98, 91, 190 if self._hovered else 130), 1.0))
+        if self._vertical:
+            painter.setBrush(QColor(20, 26, 24, 235))
+            # The vertical selector is used as an overlay on the main window.
+            # Keep its shell neutral; the active segment supplies the accent.
+            painter.setPen(QPen(QColor(82, 98, 91, 150), 1.0))
+        else:
+            background = QLinearGradient(frame.topLeft(), frame.bottomRight())
+            background.setColorAt(0, QColor("#1d2524"))
+            background.setColorAt(1, QColor("#101615"))
+            painter.setBrush(background)
+        painter.drawRoundedRect(frame, 11.0, 11.0)
+
+        rects = [QRectF(button.geometry()) for button in self._buttons]
+        low = min(1, int(self._position))
+        fraction = self._position - low
+        first, second = rects[low], rects[low + 1]
+        thumb = QRectF(first.x() + (second.x() - first.x()) * fraction,
+                       first.y() + (second.y() - first.y()) * fraction,
+                       first.width() + (second.width() - first.width()) * fraction,
+                       first.height() + (second.height() - first.height()) * fraction)
+        if not self._vertical:
+            painter.setPen(QPen(QColor(91, 111, 102, 60), 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for rect in rects:
+                painter.drawRoundedRect(rect.adjusted(.5, .5, -.5, -.5), 8, 8)
+        if self._vertical:
+            painter.setPen(QPen(QColor(62, 145, 91, 190), 1))
+            painter.setBrush(QColor(43, 62, 52, 235))
+        else:
+            gradient = QLinearGradient(thumb.topLeft(), thumb.bottomRight())
+            gradient.setColorAt(0, QColor("#2f6f4d"))
+            gradient.setColorAt(1, QColor("#234f39"))
+            painter.setPen(QPen(QColor(80, 145, 105, 180), 1))
+            painter.setBrush(gradient)
+        painter.drawRoundedRect(thumb, 8.0, 8.0)
+        if not self._vertical and self.hasFocus():
+            painter.setPen(QPen(QColor("#87dfb0"), 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(frame.adjusted(1, 1, -1, -1), 10, 10)
+        painter.end()
+
+
+class TrafficApplicationIconButton(QPushButton):
+    """Plain application icon; a same-sized removal overlay appears on hover."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(30, 30)
+        self.setStyleSheet("QPushButton { min-height: 0; min-width: 0; padding: 0; border: none; background: transparent; }")
+        self.setIconSize(QSize(26, 26))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._hovered = False
+        self._remove_opacity = 0.0
+        self._hover_animation = QPropertyAnimation(self, b"removeOpacity", self)
+        self._hover_animation.setDuration(130)
+        self._hover_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def getRemoveOpacity(self):
+        return self._remove_opacity
+
+    def setRemoveOpacity(self, value):
+        self._remove_opacity = float(value)
+        self.update()
+
+    removeOpacity = pyqtProperty(float, fget=getRemoveOpacity, fset=setRemoveOpacity)
+
+    def _animate_remove_overlay(self, target):
+        self._hover_animation.stop()
+        self._hover_animation.setStartValue(self._remove_opacity)
+        self._hover_animation.setEndValue(target)
+        self._hover_animation.start()
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self._animate_remove_overlay(1.0)
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._animate_remove_overlay(0.0)
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        rect = QRectF(2, 2, 26, 26)
+        pixels = max(1, round(26 * self.devicePixelRatioF()))
+        pixmap = self.icon().pixmap(pixels, pixels)
+        if not pixmap.isNull():
+            painter.drawPixmap(rect, pixmap, QRectF(pixmap.rect()))
+        if self._remove_opacity > 0 or self.isDown():
+            painter.setOpacity(1.0 if self.isDown() else self._remove_opacity)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(205, 55, 65, 225))
+            painter.drawEllipse(rect)
+            painter.setPen(QPen(QColor("white"), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(QPointF(11, 11), QPointF(19, 19))
+            painter.drawLine(QPointF(19, 11), QPointF(11, 19))
+        painter.end()
+
+
+class TrafficListOptionButton(QPushButton):
+    """Compact red/green list selector with a grey empty-list state."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._available = True
+        self.toggled.connect(lambda _checked=False: self._sync_style())
+        self._sync_style()
+
+    def setAvailable(self, available: bool) -> None:
+        self._available = bool(available)
+        # Keep the widget enabled so Qt can deliver hover events and display
+        # the explanatory tooltip for an empty list.  Clicks are ignored
+        # below while the grey state remains visible.
+        self.setEnabled(True)
+        self.setToolTip("" if self._available else "Список пуст")
+        self._sync_style()
+
+    def isAvailable(self) -> bool:
+        return self._available
+
+    def mousePressEvent(self, event):
+        if not self._available:
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _sync_style(self) -> None:
+        if not self._available:
+            border, bg, color = "#666666", "rgba(110,110,110,28)", "#929292"
+        elif self.isChecked():
+            border, bg, color = "#2db45f", "rgba(45,180,95,48)", "#7ff0a8"
+        else:
+            border, bg, color = "#d34e54", "rgba(211,78,84,30)", "#ff9b9f"
+        self.setStyleSheet(f"""
+            QPushButton {{
+                min-height: 29px;
+                border: 1px solid {border};
+                border-radius: 8px;
+                background: {bg};
+                color: {color};
+                font-size: 11px;
+                font-weight: 650;
+                padding: 0 8px;
+            }}
+            QPushButton:hover {{
+                background: rgba(255,255,255,18);
+            }}
+            QPushButton:disabled {{
+                border-color: #666666;
+                background: rgba(110,110,110,28);
+                color: #929292;
+            }}
+        """)
+
+
 class ClickableLabel(QLabel):
     clicked = pyqtSignal()
 
@@ -1154,6 +1608,7 @@ class SmallCircleButton(QPushButton):
         self._pixmap_scale = 1.0
         self._pixmap_offset = QPoint(0, 0)
         self._busy = False
+        self._status_color = None
         self._busy_phase = 0.0
         self._busy_timer = QTimer(self)
         self._busy_timer.setInterval(28)
@@ -1170,6 +1625,12 @@ class SmallCircleButton(QPushButton):
         active = bool(active)
         if self._visual_active != active:
             self._visual_active = active
+            self.update()
+
+    def setStatusColor(self, color: str | None) -> None:
+        normalized = (color or "").strip() or None
+        if normalized != self._status_color:
+            self._status_color = normalized
             self.update()
 
     def setIconKind(self, icon_kind: str) -> None:
@@ -1272,6 +1733,24 @@ class SmallCircleButton(QPushButton):
         return c
 
     def _colors(self) -> tuple[QColor, QColor, QColor]:
+        if self._status_color:
+            base = QColor(self._status_color)
+            border = QColor(base)
+            border.setAlpha(242)
+            fill = QColor(base)
+            fill.setAlpha(56)
+            symbol = QColor(base)
+            symbol.setAlpha(255)
+            if self.underMouse():
+                fill.setAlpha(min(255, fill.alpha() + 18))
+            if self.isDown():
+                fill.setAlpha(min(255, fill.alpha() + 28))
+            if not self.isEnabled():
+                border = self._alpha(border, 0.84)
+                fill = self._alpha(fill, 0.90)
+                symbol = self._alpha(symbol, 0.88)
+            return border, fill, symbol
+
         if self._visual_active:
             border = QColor(45, 180, 95, 238)
             fill = QColor(45, 180, 95, 54)

@@ -18,6 +18,8 @@ TOOLS_DIR = ROOT / "tools"
 PACKAGING_DIR = ROOT / "packaging"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+from bypass_service import APP_ENGINE_FILES
+
 SCRIPT_NAME = "src/zapret_gui/app.py"
 BASE_NAME = "ZapretGUI"
 EXE_NAME = f"{BASE_NAME}.exe"
@@ -44,15 +46,24 @@ APP_MODULE_FILES = (
     "list_management.py",
     "updates.py",
     "dialogs_and_workers.py",
+    "traffic_applications_ui.py",
     "adaptive_ui.py",
     "ui_controls.py",
     "site_manager.py",
     "main_window.py",
     "application_lifecycle.py",
 )
+APP_SOURCE_FILES = (
+    SRC_DIR / "zapret_gui" / "traffic_modes.py",
+    SRC_DIR / "zapret_gui" / "traffic_processing.py",
+    SRC_DIR / "zapret_gui" / "traffic_mode_builder.py",
+    SRC_DIR / "zapret_gui" / "traffic_apps.py",
+)
 AI_DNS_SEED_PATH = CORE_DIR / "lists" / "dns_malw_hosts_seed.txt"
 SERVICE_DIR = RESOURCES_DIR / "background_service"
 SERVICE_SOURCE_DIR = TOOLS_DIR / "background_service"
+MEDVEDEFF_WINWS_PATH = CORE_DIR / "bin" / "medvedeff-winws" / "medvedeff-winws.exe"
+SERVICE_EXE_PATH = SERVICE_DIR / "ZapretGUI.Service.exe"
 BUILD_DIR = ROOT / "build"
 DIST_DIR = ROOT / "dist"
 AI_DNS_MAIN_SOURCES = (
@@ -83,6 +94,9 @@ required_modules = {
     "PyInstaller": "pyinstaller",
     "PyQt6": "PyQt6",
     "requests": "requests",
+    "httpx": "httpx[http2]",
+    "h2": "httpx[http2]",
+    "dns": "dnspython",
     "certifi": "certifi",
     "charset_normalizer": "charset-normalizer",
     "idna": "idna",
@@ -315,6 +329,23 @@ def validate_adaptive_runtime() -> None:
             continue
         seen_paths.add(path_key)
 
+        destination_text = entry.get("destination")
+        if destination_text is not None:
+            destination_text = str(destination_text)
+            project_prefix = "project/"
+            destination_path = PurePosixPath(destination_text[len(project_prefix):])
+            if (
+                not destination_text.startswith(project_prefix)
+                or "\\" in destination_text
+                or destination_path.is_absolute()
+                or any(
+                    part in {"", ".", ".."} or ":" in part
+                    for part in destination_text[len(project_prefix):].split("/")
+                )
+            ):
+                errors.append(f"{relative_text}: unsafe destination {destination_text!r}")
+                continue
+
         expected_size = entry.get("size")
         expected_hash = str(entry.get("sha256") or "").casefold()
         if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
@@ -365,6 +396,8 @@ def validate_resources() -> None:
         (TG_WS_PROXY_VENDOR_DIR / "proxy" / "utils.py", "vendored TG WS proxy utils"),
         (TG_WS_PROXY_VENDOR_DIR / "proxy" / "raw_websocket.py", "vendored TG WS proxy websocket"),
         (TG_WS_PROXY_VENDOR_DIR / "proxy" / "fake_tls.py", "vendored TG WS proxy fake TLS"),
+        *((TG_WS_PROXY_VENDOR_DIR / "proxy" / name, f"vendored TG WS proxy: {name}")
+          for name in ("_aes.py", "cf_h2.py", "event_loop.py", "h2_transport.py", "network_debug.py", "pool.py")),
         (VERSION_FILE, "version resource"),
         (FLAGS_DIR, "flags folder"),
         (CORE_DIR, "core folder"),
@@ -373,6 +406,7 @@ def validate_resources() -> None:
         (APP_MODULES_DIR, "application source modules"),
         (APP_MODULES_DIR / "__init__.py", "application source modules init"),
         *[(APP_MODULES_DIR / name, f"application source module: {name}") for name in APP_MODULE_FILES],
+        *[(path, f"traffic processing module: {path.name}") for path in APP_SOURCE_FILES],
         (ADAPTIVE_STRATEGY_DIR / "catalog.py", "adaptive strategy catalog"),
         (ADAPTIVE_STRATEGY_DIR / "engine.py", "adaptive strategy engine"),
         (ADAPTIVE_STRATEGY_DIR / "generator.py", "adaptive strategy generator"),
@@ -402,6 +436,7 @@ def validate_resources() -> None:
         (CORE_DIR / "bin" / "WinDivert.dll", "WinDivert DLL"),
         (CORE_DIR / "bin" / "WinDivert64.sys", "WinDivert driver"),
         (CORE_DIR / "bin" / "cygwin1.dll", "winws Cygwin compatibility DLL"),
+        *((CORE_DIR / "bin" / name, f"Applications backend: {name}") for name in APP_ENGINE_FILES),
         (CORE_DIR / "bin" / "tls_clienthello_www_google_com.bin", "Google TLS payload"),
         (CORE_DIR / "bin" / "tls_clienthello_max_ru.bin", "MAX TLS payload"),
         (CORE_DIR / "bin" / "tls_clienthello_4pda_to.bin", "4PDA TLS payload"),
@@ -418,6 +453,9 @@ def validate_resources() -> None:
         (CORE_DIR / "lists" / "ipset-exclude.txt", "exclude IP list"),
         (CORE_DIR / "lists" / "telegram-domains.txt", "Telegram domain runtime list"),
         (CORE_DIR / "lists" / "telegram-ipset.txt", "Telegram IP runtime list"),
+        (AI_DNS_SEED_PATH, "offline Ai DNS relay seed"),
+        (CORE_DIR / "user" / "medvedeff-game-list-all.txt", "offline gaming domain seed"),
+        (CORE_DIR / "user" / "medvedeff-game-ipset.txt", "offline gaming IP seed"),
         (CORE_DIR / "utils" / "targets.txt", "auto-test targets"),
         (CORE_DIR / "utils" / "check_updates.enabled", "core update flag"),
     ]
@@ -432,25 +470,26 @@ def validate_resources() -> None:
 
     validate_adaptive_runtime()
 
-    optional_release_files = [
-        CORE_DIR / "user" / "medvedeff-game-list-all.txt",
-        CORE_DIR / "user" / "medvedeff-game-ipset.txt",
-    ]
-    missing_optional = [path for path in optional_release_files if not path.exists()]
-    if missing_optional:
-        print("Warning: optional bundled gaming list seeds are missing:")
-        for path in missing_optional:
-            print(f"  - {path}")
+    if not ai_dns_hosts_looks_useful(AI_DNS_SEED_PATH.read_text(encoding="utf-8")):
+        raise RuntimeError("Invalid offline Ai DNS relay seed")
+    for name in ("medvedeff-game-list-all.txt", "medvedeff-game-ipset.txt"):
+        if not (CORE_DIR / "user" / name).read_bytes().strip():
+            raise RuntimeError(f"Empty offline gaming seed: {name}")
 
-    referenced_optional_scripts = [
-        CORE_DIR / "fast" / "install_service.bat",
-        CORE_DIR / "fast" / "install_discord_service.bat",
-    ]
-    missing_referenced = [path for path in referenced_optional_scripts if not path.exists()]
-    if missing_referenced:
-        print("Warning: settings UI references optional service installer scripts that are missing:")
-        for path in missing_referenced:
-            print(f"  - {path}")
+    from tg_ws_proxy_vendor.proxy import __version__ as tg_version
+    importlib.import_module("zapret_gui.telegram_proxy")
+    config = (APP_MODULES_DIR / "app_config.py").read_text(encoding="utf-8")
+    flowseal_ver = (CORE_DIR / ".service" / "version.txt").read_text(encoding="utf-8").strip()
+    if (f'FLOWSEAL_DEFAULT_VER = "{flowseal_ver}"' not in config
+            or f'set "LOCAL_VERSION={flowseal_ver}"' not in (CORE_DIR / "service.bat").read_text(encoding="utf-8")):
+        raise RuntimeError("Inconsistent bundled Flowseal core version")
+    if f'TG_WS_PROXY_VENDOR_VERSION = "{tg_version}"' not in config:
+        raise RuntimeError("Inconsistent bundled TG WS proxy version")
+
+    for profile in CORE_DIR.glob("general*.bat"):
+        text = profile.read_text(encoding="utf-8-sig")
+        for filename in re.findall(r'%BIN%([^"\r\n]+\.bin)"', text, flags=re.IGNORECASE):
+            require_path(CORE_DIR / "bin" / filename.lstrip("\\/"), f"payload for {profile.name}")
 
 
 def build_background_service() -> None:
@@ -461,6 +500,15 @@ def build_background_service() -> None:
         cwd=str(ROOT),
         stdout=subprocess.DEVNULL,
     )
+
+
+def write_release_checksums(paths: list[Path]) -> Path:
+    checksum_path = DIST_DIR / "SHA256SUMS.txt"
+    checksum_path.write_text(
+        "".join(f"{file_sha256(path)}  {path.name}\n" for path in paths),
+        encoding="ascii",
+    )
+    return checksum_path
 
 
 def run_preflight() -> None:
@@ -535,6 +583,8 @@ def write_release_zip(exe_path: Path, version: str) -> Path:
 
 # Clean previous build
 for folder in (BUILD_DIR, DIST_DIR):
+    if folder.resolve() != ROOT / folder.name:
+        raise RuntimeError(f"Build output points outside its expected location: {folder}")
     remove_tree(folder)
 
 sep = os.pathsep
@@ -561,6 +611,7 @@ cmd = [
     add_data(ADAPTIVE_RUNTIME_DIR, "adaptive-runtime"),
     add_data(APP_MODULES_DIR, "app_modules"),
     add_data(SERVICE_DIR / "ZapretGUI.Service.exe", "background_service"),
+    add_data(TG_WS_PROXY_VENDOR_DIR / "LICENSE", "licenses/tg-ws-proxy"),
     "--version-file", str(VERSION_FILE),
     "--collect-data=certifi",
     "--collect-submodules=tg_ws_proxy_vendor",
@@ -568,6 +619,9 @@ cmd = [
     "--hidden-import=PyQt6.sip",
     "--hidden-import=psutil",
     "--hidden-import=requests",
+    "--hidden-import=httpcore._sync.http2",
+    "--hidden-import=h2",
+    "--hidden-import=zapret_gui.ai_dns_sources",
     "--hidden-import=cryptography",
     "--hidden-import=zapret_gui.telegram_proxy",
     "--hidden-import=bypass_service",
@@ -594,9 +648,21 @@ print("Build completed!", flush=True)
 src_exe = DIST_DIR / EXE_NAME
 assert src_exe.exists(), f"Build result not found: {src_exe}"
 
+# Publish the embedded components as separate optional release assets as well,
+# so users can verify them independently of the bundled executable.
+medvedeff_release = DIST_DIR / "medvedeff-winws.exe"
+service_release = DIST_DIR / "ZapretGUI.Service.exe"
+shutil.copy2(MEDVEDEFF_WINWS_PATH, medvedeff_release)
+shutil.copy2(SERVICE_EXE_PATH, service_release)
+
 app_version = read_app_version()
 release_zip = write_release_zip(src_exe, app_version)
+write_release_checksums(
+    [src_exe, release_zip, medvedeff_release, service_release]
+)
 
 print(f"\nReady exe: {src_exe}", flush=True)
 print(f"Ready release zip: {release_zip}", flush=True)
+print(f"Bundled component: {medvedeff_release}", flush=True)
+print(f"Bundled service: {service_release}", flush=True)
 print(f"Release zip SHA256: {file_sha256(release_zip)}", flush=True)

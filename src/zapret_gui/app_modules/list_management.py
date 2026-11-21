@@ -218,9 +218,11 @@ def _sync_gaming_lists(settings: QSettings | None = None, session: requests.Sess
                     if not download_url:
                         raise
                     remote_data = _download_sync_bytes(session, download_url)
+                if not _managed_list_has_data(remote_data):
+                    raise ValueError(f"Invalid downloaded list: {name}")
                 remote_hash = _sha256_bytes(remote_data)
                 if remote_hash != local_hash:
-                    _atomic_write_bytes(dst, remote_data)
+                    _atomic_hosts_write(dst, remote_data)
                     result["updated"] += 1
                 local_hash = remote_hash
 
@@ -426,56 +428,76 @@ def _merge_unique(*lists: list[str]) -> list[str]:
     return out
 
 
-def _rebuild_runtime_lists(settings: QSettings | None = None) -> None:
+def _is_valid_runtime_ipset_entry(value: str) -> bool:
+    candidate = str(value or "").split("#", 1)[0].strip()
+    if not candidate:
+        return False
     try:
-        _ensure_flowseal_source_lists()
-        _ensure_user_lists_initialized()
-        game_mode_enabled = _is_game_mode_enabled(settings)
-        effective_options = _get_effective_game_mode_options(settings)
-        main_bypass_enabled = bool(effective_options["main_bypass_enabled"])
-        user_lists_enabled = bool(effective_options["user_lists_enabled"])
-        discord_enabled = bool(effective_options["discord_enabled"])
+        ipaddress.ip_network(candidate, strict=False)
+        return True
+    except ValueError:
+        return False
 
-        core_general = _read_flowseal_base_lines("list-general.txt") if main_bypass_enabled else []
-        core_exclude = _read_flowseal_base_lines("list-exclude.txt") if main_bypass_enabled else []
-        core_google = _read_flowseal_base_lines("list-google.txt") if main_bypass_enabled else []
-        core_ip_all = _read_flowseal_base_lines("ipset-all.txt") if main_bypass_enabled else []
-        core_ip_exclude = _read_flowseal_base_lines("ipset-exclude.txt") if main_bypass_enabled else []
 
-        user_general = _read_lines_utf8(USER_GENERAL_FILE) if user_lists_enabled else []
-        user_exclude = _read_lines_utf8(USER_EXCLUDE_FILE) if user_lists_enabled else []
-        user_ip_all = _read_lines_utf8(USER_IP_ALL_FILE) if user_lists_enabled else []
-        user_ip_exclude = _read_lines_utf8(USER_IP_EXCLUDE_FILE) if user_lists_enabled else []
-        user_game_domains = _read_lines_utf8(USER_GAME_DOMAIN_FILE) if game_mode_enabled else []
-        user_game_ip = _read_lines_utf8(USER_GAME_IP_FILE) if game_mode_enabled else []
-        discord_domains = _read_lines_utf8(RUNTIME_DISCORD_FILE) if (game_mode_enabled and discord_enabled) else []
-        telegram_enabled = _is_telegram_mode_enabled(settings)
-        if telegram_enabled:
-            if not os.path.exists(USER_TELEGRAM_DOMAIN_FILE) or not os.path.exists(USER_TELEGRAM_IP_FILE):
-                _write_telegram_managed_lists()
-            telegram_domains = _read_lines_utf8(USER_TELEGRAM_DOMAIN_FILE)
-            telegram_ip = _read_lines_utf8(USER_TELEGRAM_IP_FILE)
-        else:
-            telegram_domains = []
-            telegram_ip = []
-
-        merged_general = _merge_unique(core_general, telegram_domains, user_general, user_game_domains, discord_domains)
-        merged_exclude = _merge_unique(core_exclude, user_exclude)
-        merged_google = _merge_unique(core_google)
-        merged_ip_all = _merge_unique(core_ip_all, telegram_ip, user_ip_all, user_game_ip)
-        merged_ip_exclude = _merge_unique(core_ip_exclude, user_ip_exclude)
-
-        _write_lines_utf8(RUNTIME_GENERAL_FILE, merged_general)
-        _write_lines_utf8(RUNTIME_EXCLUDE_FILE, merged_exclude)
-        _write_lines_utf8(RUNTIME_GOOGLE_FILE, merged_google)
-        _write_lines_utf8(RUNTIME_IP_ALL_FILE, merged_ip_all)
-        _write_lines_utf8(RUNTIME_IP_EXCLUDE_FILE, merged_ip_exclude)
-        for runtime_user_path in _runtime_user_list_paths():
-            _write_lines_utf8(runtime_user_path, [])
-        _apply_game_mode_state_to_core(settings)
-        _sync_telegram_runtime_lists(settings)
+def _rebuild_runtime_lists(settings: QSettings | None = None, *, strict: bool = False) -> None:
+    try:
+        _rebuild_runtime_list_files(settings)
     except Exception:
-        pass
+        # Startup/UI refresh is best-effort as before. The start worker uses
+        # strict=True so a failed merge can never silently launch a stale list.
+        if strict:
+            raise
+
+
+def _rebuild_runtime_list_files(settings: QSettings | None = None) -> None:
+    # File-based merge keeps large lists off Python's object heap and caches
+    # unchanged results. Failures must reach the launch worker, not silently
+    # launch a stale/partial list after an out-of-space or encoding error.
+    _ensure_user_lists_initialized()
+    game_mode_enabled = _is_game_mode_enabled(settings)
+    effective_options = _get_effective_game_mode_options(settings)
+    main_bypass_enabled = bool(effective_options["main_bypass_enabled"])
+    user_lists_enabled = bool(effective_options["user_lists_enabled"])
+    discord_enabled = bool(effective_options["discord_enabled"])
+
+    def base(name):
+        return [_large_list_base_path(_flowseal_base_paths(name))] if main_bypass_enabled else []
+
+    def user(path):
+        return [path] if user_lists_enabled else []
+
+    telegram_enabled = _is_telegram_mode_enabled(settings)
+    if telegram_enabled:
+        if not all(_managed_list_has_data(_read_file_bytes(path))
+                   for path in (USER_TELEGRAM_DOMAIN_FILE, USER_TELEGRAM_IP_FILE)):
+            _write_telegram_managed_lists()
+        telegram_domains = [USER_TELEGRAM_DOMAIN_FILE]
+        telegram_ip = [USER_TELEGRAM_IP_FILE]
+    else:
+        telegram_domains = []
+        telegram_ip = []
+
+    _merge_runtime_list_files(RUNTIME_GENERAL_FILE, [
+        *base("list-general.txt"), *telegram_domains, *user(USER_GENERAL_FILE),
+        *([USER_GAME_DOMAIN_FILE] if game_mode_enabled else []),
+        *([RUNTIME_DISCORD_FILE] if game_mode_enabled and discord_enabled else []),
+    ])
+    _merge_runtime_list_files(RUNTIME_EXCLUDE_FILE, [*base("list-exclude.txt"), *user(USER_EXCLUDE_FILE)])
+    _merge_runtime_list_files(RUNTIME_GOOGLE_FILE, base("list-google.txt"))
+    _merge_runtime_list_files(RUNTIME_IP_ALL_FILE, [
+        *base("ipset-all.txt"), *telegram_ip, *user(USER_IP_ALL_FILE),
+        *([USER_GAME_IP_FILE] if game_mode_enabled else []),
+    ], validate=_is_valid_runtime_ipset_entry, validation_tag="ipset-v2")
+    _merge_runtime_list_files(
+        RUNTIME_IP_EXCLUDE_FILE,
+        [*base("ipset-exclude.txt"), *user(USER_IP_EXCLUDE_FILE)],
+        validate=_is_valid_runtime_ipset_entry,
+        validation_tag="ipset-v2",
+    )
+    for runtime_user_path in _runtime_user_list_paths():
+        _write_lines_utf8(runtime_user_path, [])
+    _apply_game_mode_state_to_core(settings)
+    _sync_telegram_runtime_lists(settings)
 
 
 def _sync_flowseal_lists(
@@ -525,6 +547,8 @@ def _sync_flowseal_lists(
             local_data = _read_file_bytes(dst)
             try:
                 remote_data = _download_flowseal_list_bytes(session, fn)
+                if not _managed_list_has_data(remote_data):
+                    raise ValueError(f"Invalid downloaded list: {fn}")
             except Exception as e:
                 if local_data:
                     flowseal_errors.append(f"{fn}: {e}")
@@ -535,7 +559,7 @@ def _sync_flowseal_lists(
                 flowseal_updates.append((dst, remote_data))
 
         for dst, data in flowseal_updates:
-            _atomic_write_bytes(dst, data)
+            _atomic_hosts_write(dst, data)
 
         gaming_result = _sync_gaming_lists(settings, session=session)
         _ensure_user_lists_initialized()
@@ -549,7 +573,8 @@ def _sync_flowseal_lists(
         result["gaming_error"] = gaming_result.get("error", "")
         result["gaming_offline"] = bool(gaming_result.get("offline"))
         result["gaming_silent_missing"] = bool(gaming_result.get("silent_missing"))
-        qs.setValue(LISTS_SYNC_LAST_SUCCESS_KEY, int(time.time()))
+        if not flowseal_errors and gaming_result.get("ok"):
+            qs.setValue(LISTS_SYNC_LAST_SUCCESS_KEY, int(time.time()))
         qs.sync()
     except requests.exceptions.RequestException as e:
         result["offline"] = True
@@ -742,11 +767,78 @@ def _build_telegram_mode_winws_segments(core_dir: str, settings: QSettings | Non
     ]
 
 
+def _traffic_launch_mode(settings: QSettings | None) -> str:
+    settings = _load_settings_if_needed(settings)
+    return _get_traffic_processing_mode(settings)
+
+
+class EmptyTrafficSelection(RuntimeError):
+    """A scoped mode has nothing to process, not a backend failure."""
+
+    def __init__(self, mode: str):
+        self.mode = mode
+        super().__init__(
+            "Select at least one available application (.exe) in Settings."
+            if mode == TRAFFIC_MODE_APPLICATIONS else
+            "In Lists only mode, no selected non-empty lists are available."
+        )
+
+
+def _selected_traffic_lists(settings) -> UserListSelection:
+    options = _get_traffic_processing_list_options(settings)
+
+    def selected(key, path):
+        return (path,) if options.get(key, True) and _traffic_list_file_has_entries(path) else ()
+
+    return UserListSelection(
+        domains_add=selected(TRAFFIC_PROCESSING_LIST_DOMAINS_ADD_KEY, USER_GENERAL_FILE),
+        domains_exclude=selected(TRAFFIC_PROCESSING_LIST_DOMAINS_EXCLUDE_KEY, USER_EXCLUDE_FILE),
+        ip_add=selected(TRAFFIC_PROCESSING_LIST_IP_ADD_KEY, USER_IP_ALL_FILE),
+        ip_exclude=selected(TRAFFIC_PROCESSING_LIST_IP_EXCLUDE_KEY, USER_IP_EXCLUDE_FILE),
+    )
+
+
+def _empty_traffic_selection(settings) -> str:
+    mode = _get_traffic_processing_mode(settings)
+    if mode == TRAFFIC_MODE_APPLICATIONS and not effective_application_paths(settings):
+        return mode
+    if mode == TRAFFIC_MODE_LISTS:
+        lists = _selected_traffic_lists(settings)
+        # Exclusions cannot select traffic to bypass on their own.
+        if not lists.domains_add and not lists.ip_add:
+            return mode
+    return ""
+
+
+def _application_launch_input(settings, core_dir: str) -> bytes:
+    settings = _load_settings_if_needed(settings)
+    messages = translations.get(settings.value("lang", "ru"), translations["en"])
+    paths = effective_application_paths(settings)
+    if not paths:
+        raise EmptyTrafficSelection(TRAFFIC_MODE_APPLICATIONS)
+    if not application_mode_available(os.path.join(core_dir, "bin")):
+        raise RuntimeError(messages["Traffic applications unavailable"])
+    if len(paths) > APPLICATION_SCOPE_MAX_APPS or any(
+        any(char in path for char in "\r\n\0") for path in paths
+    ):
+        raise RuntimeError(messages["Traffic applications invalid"])
+    data = ("\n".join(paths) + "\n").encode("utf-8")
+    if len(data) > MAX_APP_SCOPE_BYTES:
+        raise RuntimeError(messages["Traffic applications invalid"])
+    return data
+
+
 def _build_game_mode_winws_command(
     script_path: str,
     core_dir: str,
     settings: QSettings | None = None,
+    *,
+    traffic_mode: str | None = None,
+    app_scope_path: str | None = None,
 ) -> str:
+    """Render the profile; ownership of the scope file stays with the caller."""
+    settings = _load_settings_if_needed(settings)
+    traffic_mode = traffic_mode if traffic_mode is not None else _traffic_launch_mode(settings)
     preamble, segments = _extract_profile_launch_parts(script_path)
     game_filter_tcp, game_filter_udp = _get_game_filter_ports(settings)
     effective_options = _get_effective_game_mode_options(settings)
@@ -754,7 +846,12 @@ def _build_game_mode_winws_command(
     discord_enabled = bool(effective_options["discord_enabled"])
     include_discord_segments = main_bypass_enabled or discord_enabled
 
-    winws_path = os.path.join(core_dir, "bin", "winws.exe")
+    if traffic_mode == TRAFFIC_MODE_APPLICATIONS:
+        if not app_scope_path:
+            raise ValueError("Applications mode requires an application scope file")
+        winws_path = os.path.join(core_dir, "bin", "medvedeff-winws", "medvedeff-winws.exe")
+    else:
+        winws_path = os.path.join(core_dir, "bin", "winws.exe")
     expanded_segments = []
     for segment in segments:
         lower = segment.casefold()
@@ -766,7 +863,12 @@ def _build_game_mode_winws_command(
             _expand_profile_placeholders(segment, core_dir, game_filter_tcp, game_filter_udp)
         )
 
-    telegram_segments = _build_telegram_mode_winws_segments(core_dir, settings)
+    # Scoped modes do not change name resolution globally.
+    telegram_segments = (
+        _build_telegram_mode_winws_segments(core_dir, settings)
+        if traffic_mode == TRAFFIC_MODE_ALL
+        else []
+    )
     expanded_preamble = _expand_profile_placeholders(
         preamble,
         core_dir,
@@ -774,9 +876,20 @@ def _build_game_mode_winws_command(
         game_filter_udp,
     )
     command_parts = [f'"{winws_path}"']
+    if traffic_mode == TRAFFIC_MODE_APPLICATIONS:
+        command_parts.append(f'--app-scope-file="{app_scope_path}"')
     if expanded_preamble:
         command_parts.append(expanded_preamble)
     command_parts.extend(seg for seg in telegram_segments if seg)
+    if traffic_mode == TRAFFIC_MODE_LISTS:
+        expanded_segments = list(build_traffic_segments(
+            expanded_segments,
+            mode="lists",
+            selected_lists=_selected_traffic_lists(settings),
+            base_dir=core_dir,
+        ))
+        if not expanded_segments:
+            raise EmptyTrafficSelection(TRAFFIC_MODE_LISTS)
     command_parts.extend(seg for seg in expanded_segments if seg)
     return " ".join(command_parts).strip()
 
@@ -790,15 +903,33 @@ def _ensure_background_service(core_dir: str) -> None:
     _bypass_service.ensure(helper, os.path.join(core_dir, "bin"))
 
 
-def _launch_profile_process_core(script: str, core_dir: str, settings: QSettings | None = None):
+def _launch_profile_process_core(
+    script: str, core_dir: str, settings: QSettings | None = None, *,
+    traffic_mode: str | None = None, app_scope: bytes | None = None,
+):
     """BAT is data only. Never execute its START/runas/update preamble."""
     if APP_SHUTTING_DOWN.is_set():
         raise RuntimeError("Application is shutting down")
-    commandline = _build_game_mode_winws_command(script, core_dir, settings)
-    return _bypass_service.start(
-        commandline, os.path.join(core_dir, "bin"),
-        _bundled_path("background_service", "ZapretGUI.Service.exe"),
-    )
+    settings = _load_settings_if_needed(settings)
+    mode = traffic_mode if traffic_mode is not None else _traffic_launch_mode(settings)
+
+    def start(commandline):
+        return _bypass_service.start(
+            commandline, os.path.join(core_dir, "bin"),
+            _bundled_path("background_service", "ZapretGUI.Service.exe"),
+        )
+
+    if mode != TRAFFIC_MODE_APPLICATIONS:
+        return start(_build_game_mode_winws_command(script, core_dir, settings, traffic_mode=mode))
+
+    scope = app_scope if app_scope is not None else _application_launch_input(settings, core_dir)
+    # The service acknowledges the upload before returning from start().
+    with tempfile.TemporaryDirectory(prefix="zapret-app-scope-") as directory:
+        path = Path(directory) / "applications.txt"
+        path.write_bytes(scope)
+        return start(_build_game_mode_winws_command(
+            script, core_dir, settings, traffic_mode=mode, app_scope_path=str(path),
+        ))
 
 
 def _prepare_adaptive_profile_hosts_for_launch(script: str, settings: QSettings | None = None) -> bool:
@@ -807,7 +938,10 @@ def _prepare_adaptive_profile_hosts_for_launch(script: str, settings: QSettings 
     The returned flag records whether this launch owns that block and therefore
     has to remove it again when the bypass is stopped.
     """
-    if not profile_requires_telegram_hosts(os.path.abspath(str(script or ""))):
+    if (
+        _get_traffic_processing_mode(settings) != TRAFFIC_MODE_ALL
+        or not profile_requires_telegram_hosts(os.path.abspath(str(script or "")))
+    ):
         return False
     try:
         existing_text = _read_hosts_file_strict(DNS_MALW_HOSTS_PATH)
@@ -977,10 +1111,8 @@ def _is_winws_running_silent() -> bool:
     import psutil
     for process in psutil.process_iter(["name"]):
         try:
-            if str(process.info.get("name") or "").casefold() == "winws.exe":
+            if str(process.info.get("name") or "").casefold() in {"winws.exe", "medvedeff-winws.exe"}:
                 return True
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
     return False
-
-

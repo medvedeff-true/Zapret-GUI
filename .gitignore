@@ -21,6 +21,9 @@ htmlcov/
 /dist/
 /build_*/
 /dist_*/
+/.build-tools/
+/tools/medvedeff-winws/manifest.o
+/tools/medvedeff-winws/medvedeff-winws.exe
 *.pyinstaller/
 /ZapretGUI.spec
 /EzUnBlock.spec
@@ -35,6 +38,7 @@ autotest_last.log
 autotest_result.json
 _no_update_input.txt
 uninstall.bat
+!resources/core/fast/Uninstall.bat
 resources/background_service/telegram-hosts.txt
 
 # Test artifacts

@@ -1,7 +1,8 @@
 pusher.com
 twitch.tv
-api.steampowered.com
+steampowered.com
 steamcommunity.com
+steamusercontent.com
 nvidia.com
 msi.com
 marketplace.visualstudio.com
@@ -64,6 +65,7 @@ akamaitechnologies.com
 boosty.to
 tanki.su
 lesta.ru
+lesta.pw
 korabli.su
 tanksblitz.ru
 reg.ru

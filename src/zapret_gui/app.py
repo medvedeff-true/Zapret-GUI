@@ -15,13 +15,13 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from PyQt6.QtCore import (
-    Qt, QSettings, QSize, QTimer, QThread, pyqtSignal,
+    Qt, QObject, QSettings, QSize, QTimer, QThread, pyqtSignal,
     QElapsedTimer, QEvent, QEasingCurve, QPropertyAnimation, pyqtProperty,
     QParallelAnimationGroup, QPoint, QPointF, QRectF, QUrl, QVariantAnimation
 )
 from PyQt6.QtGui import (
     QIcon, QPixmap, QImage, QAction, QPalette, QPainter, QColor, QPen, QBrush,
-    QLinearGradient, QDesktopServices, QGuiApplication, QPainterPath, QRegion
+    QLinearGradient, QDesktopServices, QGuiApplication, QPainterPath, QRegion, QCursor, QFont, QFontMetrics
 )
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
     QSystemTrayIcon, QMenu, QTextBrowser, QProgressDialog, QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect, QStackedWidget,
     QListWidget, QListWidgetItem, QListView, QTabWidget, QToolButton, QFileDialog, QLineEdit,
-    QAbstractItemView, QStyle, QStyledItemDelegate, QTabBar, QFrame, QProgressBar
+    QAbstractItemView, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTabBar, QFrame, QProgressBar, QToolTip
 )
 import shutil
 import requests
@@ -44,7 +44,53 @@ import json
 import hashlib
 from urllib.parse import quote, urlsplit
 from zapret_gui.telegram_proxy import TelegramProxyController
-from bypass_service import controller as _bypass_service
+from zapret_gui.traffic_modes import (
+    TRAFFIC_MODE_ALL,
+    TRAFFIC_MODE_APPLICATIONS,
+    TRAFFIC_MODE_LISTS,
+    TRAFFIC_MODES,
+    TRAFFIC_MODE_KEY,
+    TRAFFIC_LIST_DOMAINS_ADD_KEY,
+    TRAFFIC_LIST_DOMAINS_EXCLUDE_KEY,
+    TRAFFIC_LIST_IP_ADD_KEY,
+    TRAFFIC_LIST_IP_EXCLUDE_KEY,
+    TRAFFIC_APPS_KEY,
+    APPLICATION_SCOPE_MAX_APPS,
+    enabled_nonempty_list_files,
+    list_has_values,
+    load_app_records,
+    mark_missing_records,
+    save_app_records,
+    effective_application_paths,
+)
+from zapret_gui.traffic_mode_builder import UserListSelection, build_traffic_segments
+from zapret_gui.traffic_apps import (
+    AppRecord,
+    TrafficAppStore,
+    SOURCE_FILE,
+    SOURCE_INSTALLED,
+    SOURCE_PROCESS,
+    enumerate_installed_applications,
+    enumerate_processes,
+    normalize_executable_path,
+)
+from zapret_gui.app_icons import ApplicationIcons, application_icons
+from zapret_gui.ai_dns import GROUPS as _AI_DNS_GROUPS, select_relays as _select_ai_dns_relays, summary as _ai_dns_summary
+from zapret_gui.ai_dns import RelaySelection as _AiDnsRelaySelection
+from zapret_gui import ai_dns_sources as _ai_dns_sources
+from zapret_gui.hosts_transaction import atomic_write as _atomic_hosts_write, hosts_lock as _ai_hosts_lock
+from bypass_service import APP_ENGINE_FILES, MAX_APP_SCOPE_BYTES, controller as _bypass_service
+from zapret_gui.large_lists import (
+    append_unique_value as _append_large_list_value,
+    base_list_path as _large_list_base_path,
+    iter_csv_values as _iter_large_csv_values,
+    iter_delimited_text_values as _iter_large_text_values,
+    iter_lines as _iter_large_list_lines,
+    merge_files as _merge_runtime_list_files,
+    merge_import_file as _merge_large_import_file,
+    normalized_values_file as _normalized_import_file,
+    remove_values as _remove_large_list_values,
+)
 from adaptive_strategy import (
     RuntimePaths as AdaptiveRuntimePaths,
     SearchEngine as AdaptiveSearchEngine,
@@ -56,6 +102,8 @@ from adaptive_strategy import (
 from adaptive_strategy.engine import SearchCancelled as AdaptiveSearchCancelled
 from adaptive_strategy.generator import profile_requires_telegram_hosts
 from adaptive_strategy.resources import ensure_adaptive_runtime
+
+DNS_MALW_AI_GROUP_LABELS = {key: group.label for key, group in _AI_DNS_GROUPS.items()}
 
 
 if __name__ == "__main__" and "--startup-self-test" in sys.argv:
@@ -91,6 +139,7 @@ _SOURCE_FRAGMENT_NAMES = (
     'list_management.py',
     'updates.py',
     'dialogs_and_workers.py',
+    'traffic_applications_ui.py',
     'adaptive_ui.py',
     'ui_controls.py',
     'site_manager.py',

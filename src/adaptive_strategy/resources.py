@@ -122,15 +122,24 @@ def ensure_adaptive_runtime(
     source_root: Path,
     destination_root: Path,
     progress: InstallProgress | None = None,
+    *,
+    project_root: Path | None = None,
 ) -> dict[str, int | str]:
-    """Install or repair the shared validator runtime without deleting user data.
+    """Install or repair adaptive runtime components without deleting user data.
 
     Existing files are reused only when both their size and SHA-256 match the
-    packaged manifest.  Unknown files are intentionally left untouched, apart
-    from the precisely identified obsolete NOTICE.txt from older releases.
+    packaged manifest. Entries can target either the validator runtime folder
+    or a safe path below ``project_root``. Unknown files are intentionally left
+    untouched, apart from the precisely identified obsolete NOTICE.txt from
+    older releases.
     """
     source_root = source_root.resolve()
     destination_root = _absolute_without_resolving(destination_root)
+    project_root = (
+        _absolute_without_resolving(project_root)
+        if project_root is not None
+        else None
+    )
     callback = progress or (lambda _done, _total, _name: None)
 
     with _INSTALL_LOCK:
@@ -154,7 +163,26 @@ def ensure_adaptive_runtime(
                 raise AdaptiveRuntimeError(f"Некорректная контрольная сумма {relative}")
 
             source = source_root / relative
-            destination = destination_root / relative
+            destination_spec = entry.get("destination")
+            if destination_spec is None:
+                install_root = destination_root
+                destination = destination_root / relative
+            else:
+                destination_text = str(destination_spec).replace("\\", "/")
+                project_prefix = "project/"
+                if not destination_text.startswith(project_prefix):
+                    raise AdaptiveRuntimeError(
+                        f"Неподдерживаемое назначение компонента runtime: {destination_spec!r}"
+                    )
+                if project_root is None:
+                    raise AdaptiveRuntimeError(
+                        f"Для компонента runtime {relative} не задан корень проекта"
+                    )
+                destination_relative = _safe_relative_path(
+                    destination_text[len(project_prefix):]
+                )
+                install_root = Path(project_root)
+                destination = install_root / destination_relative
             callback(index - 1, total, relative.as_posix())
 
             if destination.exists() and _is_reparse_point(destination):
@@ -185,7 +213,7 @@ def ensure_adaptive_runtime(
             if not source_ok:
                 raise AdaptiveRuntimeError(f"Компонент отсутствует или повреждён: {relative}")
 
-            _ensure_safe_directory(destination_root, destination.parent)
+            _ensure_safe_directory(install_root, destination.parent)
             temporary = _temporary_sibling(destination)
             try:
                 with source.open("rb") as source_handle, temporary.open("xb") as target_handle:

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "version": "cygwin-curl-2026.07-minimal",
+  "version": "cygwin-curl-2026.07-minimal+core-1",
   "source": "https://github.com/bol-van/zapret-win-bundle",
   "files": [
     {
@@ -102,6 +102,12 @@
       "path": "cygwin/usr/local/bin/idn2.exe",
       "size": 190005,
       "sha256": "95c8c52ea5f2abccc3225a6e4146fa05d8b97b96506d66dab4bcfb841015ea95"
+    },
+    {
+      "path": "core/bin/quic_initial_dbankcloud_ru.bin",
+      "destination": "project/core/bin/quic_initial_dbankcloud_ru.bin",
+      "size": 1250,
+      "sha256": "e065870cb0d13152e6132807bbf42218a9e7cd8d96f5602b61674cc540f3a56e"
     }
   ]
 }

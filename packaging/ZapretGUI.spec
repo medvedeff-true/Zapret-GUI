@@ -19,6 +19,7 @@ _datas = [
     (str(RESOURCES_DIR / "adaptive-runtime"), "adaptive-runtime"),
     (str(SRC_DIR / "zapret_gui" / "app_modules"), "app_modules"),
     (str(RESOURCES_DIR / "background_service" / "ZapretGUI.Service.exe"), "background_service"),
+    (str(SRC_DIR / "tg_ws_proxy_vendor" / "LICENSE"), "licenses/tg-ws-proxy"),
 ]
 _datas += collect_data_files("certifi")
 
@@ -26,6 +27,9 @@ _hiddenimports = [
     "PyQt6.sip",
     "psutil",
     "requests",
+    "httpcore._sync.http2",
+    "h2",
+    "zapret_gui.ai_dns_sources",
     "cryptography",
     "zapret_gui.telegram_proxy",
     "bypass_service",

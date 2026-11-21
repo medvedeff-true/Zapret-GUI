@@ -351,14 +351,14 @@ def main():
         _startup_log.info("Runtime initialization started")
         wipe_app_dir_if_new_version()
         extract_files_from_meipass()
-    except (RuntimeMigrationError, OSError) as error:
+        _ensure_user_lists_initialized()
+    except (RuntimeError, OSError) as error:
         _startup_log.exception("Runtime initialization failed")
         QMessageBox.critical(
             None,
             "Ошибка обновления runtime" if str(sys.argv).lower().find("ru") >= 0 else "Runtime update error",
             "Не удалось полностью обновить компоненты Zapret GUI.\n"
-            "Изменения отменены, старая рабочая версия сохранена. "
-            "Повторите запуск программы.\n\n"
+            "Проверьте доступ к папке приложения и повторите запуск.\n\n"
             f"Детали: {error}",
         )
         return
@@ -366,9 +366,9 @@ def main():
     unblock_core_tree(os.path.join(APP_DIR, "core"))
     create_delete_bat()
     settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
+    _migrate_dns_malw_mechanism(settings)
     _patch_profiles_if_core_outdated(os.path.join(APP_DIR, "core"), settings)
     _patch_profiles_hide_windows(os.path.join(APP_DIR, "core"))
-    _ensure_user_lists_initialized()
     _rebuild_runtime_lists(settings)
     if _was_started_after_update():
         try:

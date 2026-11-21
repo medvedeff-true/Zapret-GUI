@@ -43,8 +43,151 @@ class AiDnsBundleTests(unittest.TestCase):
         ):
             self.assertIn(hostname, text)
 
+    def test_ai_dns_mechanism_migration_forces_refresh_of_legacy_enabled_state(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            settings = QSettings(str(Path(root) / "settings.ini"), QSettings.Format.IniFormat)
+            settings.setValue(app.DNS_MALW_ENABLED_BY_APP_KEY, True)
+            settings.setValue(app.DNS_MALW_MECHANISM_VERSION_KEY, "legacy-3.0-hosts")
+            settings.setValue(app.DNS_MALW_LAST_SUCCESS_KEY, 123)
+            settings.sync()
+
+            self.assertTrue(app._migrate_dns_malw_mechanism(settings))
+            self.assertEqual(
+                0,
+                int(settings.value(app.DNS_MALW_LAST_ATTEMPT_KEY, -1)),
+            )
+            self.assertEqual(
+                "migration-pending",
+                str(settings.value(app.DNS_MALW_LAST_STATUS_KEY, "")),
+            )
+            self.assertNotEqual(
+                app.DNS_MALW_MECHANISM_VERSION,
+                str(settings.value(app.DNS_MALW_MECHANISM_VERSION_KEY, "")),
+            )
+
 
 class LifecycleTests(unittest.TestCase):
+    def test_file_in_place_of_user_directory_is_backed_up(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            user = root / "user"
+            user.write_bytes(b"preserve me")
+            with mock.patch.object(app, "USER_DIR", str(user)):
+                app._ensure_user_directory()
+                app._ensure_user_directory()
+            self.assertTrue(user.is_dir())
+            self.assertEqual([b"preserve me"], [p.read_bytes() for p in root.glob("user-backup-*/user")])
+
+    def test_offline_initialization_migrates_old_lists_and_keeps_user_files(self) -> None:
+        bundle = Path(app._bundled_root_dir())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for state in ("fresh", "3.0.0", "3.1.0"):
+                with self.subTest(state=state):
+                    target = root / state
+                    user = target / "user"
+                    names = {
+                        "USER_GENERAL_FILE": "list-general-user.txt",
+                        "USER_EXCLUDE_FILE": "list-exclude-user.txt",
+                        "USER_IP_ALL_FILE": "ipset-all-user.txt",
+                        "USER_IP_EXCLUDE_FILE": "ipset-exclude-user.txt",
+                        "USER_GAME_DOMAIN_FILE": "medvedeff-game-list-all.txt",
+                        "USER_GAME_IP_FILE": "medvedeff-game-ipset.txt",
+                    }
+                    marker = target / ".app_version"
+                    original = b"# custom\r\nmine.example\r\n"
+                    legacy = b"# legacy\r\nold.example\r\n"
+                    if state != "fresh":
+                        user.mkdir(parents=True)
+                        marker.write_text(state, encoding="ascii")
+                        (target / "settings.ini").write_bytes(b"[General]\nlang=en\n")
+                        (user / names["USER_GENERAL_FILE"]).write_bytes(original)
+                        (user / "unknown.txt").write_bytes(b"keep")
+                        (user / "flowseal-source-list-google.txt").write_bytes(b"<html>error</html>")
+                        (user / "flowseal-source-list-exclude.txt").write_bytes(b"keep.example\n")
+                        lists = target / "core" / "lists"
+                        lists.mkdir(parents=True)
+                        (lists / names["USER_EXCLUDE_FILE"]).write_bytes(legacy)
+                        (target / "core" / "my config.bat").write_bytes(b"@echo off\n")
+                        if state == "3.1.0":
+                            for relative in app.MANAGED_RUNTIME_CRITICAL_FILES:
+                                path = target / relative
+                                path.parent.mkdir(parents=True, exist_ok=True)
+                                path.write_bytes(b"old components")
+                            (target / "flags").mkdir()
+                            (target / "core" / "service.bat").write_text(
+                                'set "LOCAL_VERSION=1.10.2"\n', encoding="ascii")
+
+                    with (
+                        mock.patch.multiple(
+                            app, APP_DIR=str(target), USER_DIR=str(user), VERSION_FILE=str(marker),
+                            USER_STRATEGY_BACKUP_DIR=str(user / "strategy-backups"),
+                            REMOVE_BAT=str(target / "uninstall.bat"),
+                            **{key: str(user / value) for key, value in names.items()},
+                        ),
+                        mock.patch.object(app.sys, "_MEIPASS", str(bundle), create=True),
+                        mock.patch.object(app, "_force_stop_blockers"),
+                        mock.patch.object(app._bypass_service, "ensure") as elevate,
+                        mock.patch.object(app._bypass_service, "repair_runtime_access", return_value={"ok": False}),
+                    ):
+                        app.wipe_app_dir_if_new_version()
+                        app.extract_files_from_meipass()
+                        app._ensure_user_lists_initialized()
+                        app._ensure_user_lists_initialized()  # repeat startup; do not rewrite settings/lists
+                        elevate.assert_not_called()
+                        self.assertTrue(app._flowseal_source_lists_are_ready())
+
+                    self.assertEqual(app.APP_VERSION, marker.read_text().strip())
+                    self.assertIn(f'LOCAL_VERSION={app.FLOWSEAL_DEFAULT_VER}',
+                                  (target / "core" / "service.bat").read_text(encoding="utf-8"))
+                    self.assertTrue((target / "uninstall.bat").is_file())
+                    self.assertGreater((user / names["USER_GAME_DOMAIN_FILE"]).stat().st_size, 0)
+                    self.assertEqual((bundle / "core/lists/list-google.txt").read_bytes(),
+                                     (user / "flowseal-source-list-google.txt").read_bytes())
+                    if state != "fresh":
+                        self.assertEqual(original, (user / names["USER_GENERAL_FILE"]).read_bytes())
+                        self.assertEqual(legacy, (user / names["USER_EXCLUDE_FILE"]).read_bytes())
+                        self.assertEqual(b"keep.example\n", (user / "flowseal-source-list-exclude.txt").read_bytes())
+                        self.assertEqual(b"keep", (user / "unknown.txt").read_bytes())
+                        self.assertEqual(b"[General]\nlang=en\n", (target / "settings.ini").read_bytes())
+                        self.assertEqual(b"@echo off\n", (target / "core" / "my config.bat").read_bytes())
+
+    def test_ide_startup_does_not_rewrite_installed_autostart(self) -> None:
+        import winreg
+        from types import SimpleNamespace
+        window = SimpleNamespace()
+        for enabled in (True, False):
+            for provision in (True, False):
+                with self.subTest(enabled=enabled, provision=provision):
+                    with (
+                        mock.patch.object(app.sys, "frozen", False, create=True),
+                        mock.patch.object(winreg, "CreateKeyEx") as create_key,
+                        mock.patch.object(app, "_run_hidden") as run_hidden,
+                    ):
+                        app.MainWindow.set_autostart(window, enabled, provision=provision)
+                        create_key.assert_not_called()
+                        run_hidden.assert_not_called()
+
+    def test_ai_dns_completion_cannot_trigger_false_exit_popup(self) -> None:
+        import bypass_service as client
+        from types import SimpleNamespace
+
+        controller = client.Controller()
+        controller.pipe = mock.Mock()
+        controller.state = {"running": True, "pid": 1234, "exit_code": None, "log": "running"}
+        process = client.ServiceProcess(controller, 1234)
+        controller.pipe.request.return_value = {"ok": True, "applied": 1}
+        with mock.patch.object(controller, "ensure"):
+            controller.ai_dns_hosts("test", "0" * 64, "apply", "helper", "bin")
+        window = SimpleNamespace(process=process)
+        with (
+            mock.patch.object(app, "_bypass_service", controller),
+            mock.patch.object(app, "_show_centered_message") as warning,
+        ):
+            app.MainWindow._refresh_bypass_process_state(window)
+        self.assertIs(window.process, process)
+        warning.assert_not_called()
+
     def test_start_minimized_requires_the_scheduler_marker(self) -> None:
         self.assertFalse(app._should_start_minimized(True, False))
         self.assertFalse(app._should_start_minimized(False, True))
@@ -206,12 +349,72 @@ class LifecycleTests(unittest.TestCase):
                 mock.patch.object(app, "USER_STRATEGY_BACKUP_DIR", str(user_dir / "strategy-backups")),
                 mock.patch.object(app, "VERSION_FILE", str(target / ".app_version")),
                 mock.patch.object(app, "_force_stop_blockers"),
+                mock.patch.object(app._bypass_service, "repair_runtime_access", return_value={"ok": True}),
                 mock.patch.object(app.sys, "_MEIPASS", str(source), create=True),
             ):
                 app.wipe_app_dir_if_new_version()
 
             self.assertTrue((target / "core" / "bin" / "winws.exe").is_file())
             self.assertEqual("keep", (user_dir / "keep.txt").read_text(encoding="utf-8"))
+
+    def test_same_version_refreshes_only_the_private_application_engine(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "bundle"
+            target = Path(root) / "app"
+            for base in (source, target):
+                for name in app.MANAGED_RUNTIME_DIRS:
+                    (base / name).mkdir(parents=True)
+            for name in app.MANAGED_RUNTIME_CRITICAL_FILES:
+                for base, contents in ((source, b"fixed"), (target, b"old")):
+                    path = base / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(contents)
+            stock = target / "core" / "bin" / "winws.exe"
+            stock.write_bytes(b"independent core update")
+            version = target / ".app_version"
+            version.write_text(app.APP_VERSION, encoding="utf-8")
+
+            with (
+                mock.patch.object(app, "APP_DIR", str(target)),
+                mock.patch.object(app, "VERSION_FILE", str(version)),
+                mock.patch.object(app.sys, "_MEIPASS", str(source), create=True),
+                mock.patch.object(app, "_force_stop_blockers") as stop,
+            ):
+                app.wipe_app_dir_if_new_version()
+                stop.assert_not_called()
+                app.extract_files_from_meipass()
+                with mock.patch.object(app.tempfile, "mkdtemp") as stage:
+                    app.extract_files_from_meipass()
+                    stage.assert_not_called()
+
+            for name in app.APP_ENGINE_FILES:
+                self.assertEqual(b"fixed", (stock.parent / name).read_bytes())
+            self.assertEqual(b"independent core update", stock.read_bytes())
+            self.assertEqual(app.APP_VERSION, version.read_text(encoding="utf-8"))
+
+    def test_application_engine_update_restores_previous_directory_on_publish_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "bundle"
+            target = Path(root) / "app"
+            for name in app.APP_ENGINE_FILES:
+                for base, contents in ((source, b"fixed"), (target, b"old")):
+                    path = base / "core" / "bin" / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(contents)
+            real_rename = Path.rename
+
+            def rename(path, destination):
+                if path.parent.name.startswith(".application-engine-") and path.name == "medvedeff-winws":
+                    raise PermissionError("could not publish application engine")
+                return real_rename(path, destination)
+
+            with mock.patch.object(app, "APP_DIR", str(target)), mock.patch.object(Path, "rename", rename):
+                with self.assertRaises(PermissionError):
+                    app._refresh_bundled_app_engine(str(source))
+
+            for name in app.APP_ENGINE_FILES:
+                self.assertEqual(b"old", (target / "core" / "bin" / name).read_bytes())
+            self.assertFalse(list((target / "core" / "bin").glob(".application-engine-*")))
 
     def test_same_version_with_an_inaccessible_runtime_is_left_alone(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -223,11 +426,13 @@ class LifecycleTests(unittest.TestCase):
                 mock.patch.object(app, "VERSION_FILE", str(marker)),
                 mock.patch.object(app, "_force_stop_blockers") as stop_blockers,
                 mock.patch.object(app, "_migrate_bundled_runtime") as migrate,
+                mock.patch.object(app, "_repair_runtime_access_via_service", return_value=False) as repair,
                 mock.patch.object(app.sys, "_MEIPASS", str(root_path), create=True),
                 mock.patch.object(app.os.path, "lexists", side_effect=PermissionError("access denied")),
             ):
                 app.wipe_app_dir_if_new_version()
 
+            repair.assert_called_once_with()
             stop_blockers.assert_not_called()
             migrate.assert_not_called()
 
@@ -249,7 +454,7 @@ class LifecycleTests(unittest.TestCase):
             with (
                 mock.patch.object(app, "APP_DIR", str(root_path)),
                 mock.patch.object(app, "VERSION_FILE", str(marker)),
-                mock.patch.object(app, "_make_runtime_tree_accessible") as make_accessible,
+                mock.patch.object(app, "_repair_runtime_access_via_service", return_value=True) as repair,
                 mock.patch.object(app, "_force_stop_blockers") as stop_blockers,
                 mock.patch.object(app, "_migrate_bundled_runtime") as migrate,
                 mock.patch.object(app.sys, "_MEIPASS", str(root_path), create=True),
@@ -257,10 +462,7 @@ class LifecycleTests(unittest.TestCase):
             ):
                 app.wipe_app_dir_if_new_version()
 
-            self.assertEqual(
-                [mock.call(str(root_path / folder)) for folder in app.MANAGED_RUNTIME_DIRS],
-                make_accessible.call_args_list,
-            )
+            repair.assert_called_once_with()
             stop_blockers.assert_not_called()
             migrate.assert_not_called()
 
@@ -317,6 +519,10 @@ class LifecycleTests(unittest.TestCase):
             (core / "service.bat").write_text('set "LOCAL_VERSION=old"\n', encoding="utf-8")
             (core / "bin" / "winws.exe").write_bytes(b"old-winws")
             (core / "bin" / "WinDivert64.sys").write_bytes(b"old-driver")
+            for filename in app.APP_ENGINE_FILES:
+                path = core / "bin" / filename
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(filename.encode("ascii"))
             (core / "custom.bat").write_text(":: custom\n", encoding="utf-8")
             (core / "lists").mkdir()
             (core / "lists" / "telegram-domains.txt").write_text("telegram.example\n", encoding="utf-8")
@@ -327,6 +533,8 @@ class LifecycleTests(unittest.TestCase):
             with zipfile.ZipFile(archive_path, "w") as package:
                 package.writestr("flowseal/service.bat", 'set "LOCAL_VERSION=new"\n')
                 package.writestr("flowseal/bin/winws.exe", b"new-winws")
+                package.writestr("flowseal/bin/medvedeff-winws/medvedeff-winws.exe", b"unexpected")
+                package.writestr("flowseal/bin/medvedeff-winws/unused.dll", b"unexpected")
                 package.writestr("flowseal/general.bat", "@echo off\n")
 
             with mock.patch.object(app, "USER_STRATEGY_BACKUP_DIR", str(root_path / "strategy-backups")):
@@ -335,6 +543,9 @@ class LifecycleTests(unittest.TestCase):
 
             self.assertEqual(b"new-winws", (core / "bin" / "winws.exe").read_bytes())
             self.assertEqual(b"old-driver", (core / "bin" / "WinDivert64.sys").read_bytes())
+            for filename in app.APP_ENGINE_FILES:
+                self.assertEqual(filename.encode("ascii"), (core / "bin" / filename).read_bytes())
+            self.assertFalse((core / "bin/medvedeff-winws/unused.dll").exists())
             self.assertEqual(":: custom\n", (core / "custom.bat").read_text(encoding="utf-8"))
             self.assertEqual(
                 "telegram.example\n",
@@ -693,7 +904,7 @@ class LifecycleTests(unittest.TestCase):
             mock.patch.object(app.subprocess, "Popen") as popen,
         ):
             with self.assertRaisesRegex(RuntimeError, "UAC cancelled"):
-                app._launch_profile_process_core("test.bat", r"C:\core")
+                app._launch_profile_process_core("test.bat", r"C:\core", traffic_mode=app.TRAFFIC_MODE_ALL)
         popen.assert_not_called()
 
     def test_adaptive_hosts_helper_keeps_ownership_explicit(self) -> None:

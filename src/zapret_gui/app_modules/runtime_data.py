@@ -120,15 +120,6 @@ def _write_lines_utf8(path: str, lines: list[str]) -> None:
         f.write(content)
 
 
-def _copy_if_missing(src: str, dst: str) -> None:
-    try:
-        if os.path.exists(src) and not os.path.exists(dst):
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst)
-    except Exception:
-        pass
-
-
 def _bundled_root_dir() -> str:
     """Return the read-only bundled resource root in dev and frozen builds."""
     if hasattr(sys, "_MEIPASS"):
@@ -158,30 +149,6 @@ def _flowseal_base_paths(filename: str) -> tuple[str, ...]:
     )
 
 
-def _immutable_seeded_base_paths(filename: str) -> list[str]:
-    paths = []
-    seen = set()
-    for path in (
-        _flowseal_source_path(filename),
-        _bundled_path("core", "lists", filename),
-    ):
-        key = os.path.normcase(os.path.abspath(path))
-        if key in seen:
-            continue
-        seen.add(key)
-        paths.append(path)
-    return paths
-
-
-def _read_flowseal_base_lines(filename: str) -> list[str]:
-    for path in _flowseal_base_paths(filename):
-        if os.path.exists(path):
-            lines = _read_lines_utf8(path)
-            if lines or path != _flowseal_source_path(filename):
-                return lines
-    return []
-
-
 def _load_icon_preserving_modes(path: str, fallback: QIcon | None = None) -> QIcon:
     pixmap = QPixmap(path) if os.path.exists(path) else QPixmap()
     if pixmap.isNull():
@@ -208,14 +175,15 @@ def _runtime_user_list_paths() -> tuple[str, ...]:
     )
 
 
-def _normalized_value_keys(lines: list[str]) -> set[str]:
-    out = set()
-    for line in lines:
-        s = (line or "").strip()
-        if not s or s.startswith("#"):
-            continue
-        out.add(s.casefold())
-    return out
+def _managed_list_has_data(data: bytes) -> bool:
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeError:
+        return False
+    if "\x00" in text or text.lstrip().startswith(("<", "{", "[")):
+        return False
+    return any(line and not line.startswith(("#", ";"))
+               for line in map(str.strip, text.splitlines()))
 
 
 def _ensure_flowseal_source_lists() -> None:
@@ -223,139 +191,98 @@ def _ensure_flowseal_source_lists() -> None:
 
     for filename in FLOWSEAL_LIST_FILES:
         dst = _flowseal_source_path(filename)
-        if os.path.exists(dst):
+        cached = _read_file_bytes(dst)
+        # Replace known 1.10.2 seeds, not a user's newer downloaded cache.
+        old_seeds = {
+            "list-exclude.txt": "140adb9205bcc4477ed1dc3b8ef82ddc3ed05985126a606ff2b2c2d2b98694fd",
+            "list-google.txt": "1e59f9d487f7bce12091c838151713d0c3aae20afefebb38206f2cd8232",
+        }
+        if _managed_list_has_data(cached) and _sha256_bytes(cached) != old_seeds.get(filename):
             continue
 
-        copied = False
         for src in (
             _bundled_path("core", "lists", filename),
             os.path.join(runtime_lists_dir, filename),
         ):
-            if os.path.exists(src):
-                try:
-                    _copy_if_missing(src, dst)
-                    copied = os.path.exists(dst)
-                    if copied:
-                        break
-                except Exception:
-                    copied = False
-
-        if not copied:
-            try:
-                _write_lines_utf8(dst, [])
-            except Exception:
-                pass
+            data = _read_file_bytes(src)
+            if _managed_list_has_data(data):
+                _atomic_hosts_write(dst, data)
+                break
 
 
 def _flowseal_source_lists_are_ready() -> bool:
     try:
         for filename in FLOWSEAL_LIST_FILES:
             path = _flowseal_source_path(filename)
-            if not os.path.exists(path):
-                return False
-            if os.path.getsize(path) <= 0:
+            if not _managed_list_has_data(_read_file_bytes(path)):
                 return False
         return True
     except Exception:
         return False
 
 
-def _backup_user_list_before_migration(path: str) -> None:
-    backup_path = path + USER_LIST_SEEDED_BACKUP_SUFFIX
-    try:
-        if os.path.exists(path) and not os.path.exists(backup_path):
-            shutil.copy2(path, backup_path)
-    except Exception:
-        pass
+def _ensure_user_directory() -> None:
+    user = Path(USER_DIR)
+    if user.is_file() and not user.is_symlink():
+        # Preserve an unexpected legacy file that occupies the directory name.
+        backup = Path(tempfile.mkdtemp(prefix="user-backup-", dir=user.parent))
+        user.rename(backup / user.name)
+    user.mkdir(parents=True, exist_ok=True)
 
 
-def _prune_seeded_user_file(user_path: str, base_paths: list[str]) -> bool:
-    current_lines = _read_lines_utf8(user_path)
-    current_keys = _normalized_value_keys(current_lines)
-    if not current_keys:
-        return False
-
-    base_keys = set()
-    for base_path in base_paths:
-        base_keys.update(_normalized_value_keys(_read_lines_utf8(base_path)))
-
-    if not base_keys:
-        return False
-
-    overlap = current_keys & base_keys
-    if not overlap:
-        return False
-
-    overlap_ratio = len(overlap) / max(1, len(current_keys))
-    if overlap_ratio < USER_LIST_SEEDED_OVERLAP_RATIO and len(overlap) != len(current_keys):
-        return False
-
-    filtered_lines = [
-        line for line in current_lines
-        if (line or "").strip().casefold() not in base_keys
-    ]
-    if len(filtered_lines) == len(current_lines):
-        return False
-
-    try:
-        _backup_user_list_before_migration(user_path)
-        _write_lines_utf8(user_path, filtered_lines)
-        return True
-    except Exception:
-        return False
-
-
-def _migrate_seeded_user_lists() -> None:
-    _ensure_flowseal_source_lists()
-
-    _prune_seeded_user_file(
-        USER_GENERAL_FILE,
-        _immutable_seeded_base_paths("list-general.txt")
+def _migrate_legacy_user_files() -> None:
+    """Recover lists from older layouts before replacing the installed core."""
+    _ensure_user_directory()
+    legacy_files = (
+        ("list-general-user.txt", USER_GENERAL_FILE),
+        ("list-exclude-user.txt", USER_EXCLUDE_FILE),
+        ("ipset-all-user.txt", USER_IP_ALL_FILE),
+        ("ipset-exclude-user.txt", USER_IP_EXCLUDE_FILE),
+        ("medvedeff-game-list-all.txt", USER_GAME_DOMAIN_FILE),
+        ("medvedeff-game-ipset.txt", USER_GAME_IP_FILE),
     )
-    _prune_seeded_user_file(
-        USER_EXCLUDE_FILE,
-        _immutable_seeded_base_paths("list-exclude.txt")
-    )
-    _prune_seeded_user_file(
-        USER_IP_ALL_FILE,
-        _immutable_seeded_base_paths("ipset-all.txt")
-    )
-    _prune_seeded_user_file(
-        USER_IP_EXCLUDE_FILE,
-        _immutable_seeded_base_paths("ipset-exclude.txt")
-    )
+    for name, destination in legacy_files:
+        if os.path.lexists(destination):
+            continue
+        for source in (
+            os.path.join(APP_DIR, "core", "user", name),
+            os.path.join(APP_DIR, "core", "lists", name),
+        ):
+            if os.path.isfile(source) and not os.path.islink(source):
+                with open(source, "rb") as stream:
+                    if not any(line.strip() for line in stream):
+                        continue
+                    stream.seek(0)
+                    target = Path(destination)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as pending:
+                        temporary = Path(pending.name)
+                        try:
+                            shutil.copyfileobj(stream, pending)
+                            pending.close()
+                            # On Windows rename fails rather than replacing a
+                            # canonical user file created in the meantime.
+                            temporary.rename(target)
+                        except FileExistsError:
+                            pass
+                        finally:
+                            temporary.unlink(missing_ok=True)
+                    break
 
 
 def _ensure_user_lists_initialized() -> None:
-    os.makedirs(USER_DIR, exist_ok=True)
+    _migrate_legacy_user_files()
     _ensure_flowseal_source_lists()
-    _ensure_telegram_runtime_files()
+    for path in (USER_GAME_DOMAIN_FILE, USER_GAME_IP_FILE):
+        if not _managed_list_has_data(_read_file_bytes(path)):
+            data = _read_file_bytes(_bundled_path("core", "user", os.path.basename(path)))
+            if _managed_list_has_data(data):
+                _atomic_hosts_write(path, data)
 
-    if not os.path.exists(USER_GENERAL_FILE):
-        try:
-            _write_lines_utf8(USER_GENERAL_FILE, [])
-        except Exception:
-            pass
-    if not os.path.exists(USER_EXCLUDE_FILE):
-        try:
-            _write_lines_utf8(USER_EXCLUDE_FILE, [])
-        except Exception:
-            pass
-    if not os.path.exists(USER_IP_ALL_FILE):
-        try:
-            _write_lines_utf8(USER_IP_ALL_FILE, [])
-        except Exception:
-            pass
-    if not os.path.exists(USER_IP_EXCLUDE_FILE):
-        try:
-            _write_lines_utf8(USER_IP_EXCLUDE_FILE, [])
-        except Exception:
-            pass
-
-    try:
-        _migrate_seeded_user_lists()
-    except Exception:
-        pass
+    # Runtime merging handles duplicates without editing user-owned lists.
+    for path in (USER_GENERAL_FILE, USER_EXCLUDE_FILE, USER_IP_ALL_FILE, USER_IP_EXCLUDE_FILE):
+        if not os.path.lexists(path):
+            _atomic_hosts_write(path, b"")
 
 
 def _load_settings_if_needed(settings: QSettings | None = None) -> QSettings:
@@ -483,14 +410,6 @@ def _set_telegram_hosts_action_status(ok: bool, error: str = "", settings: QSett
         qs.setValue(TELEGRAM_MODE_HOSTS_LAST_STATUS_KEY, "ok" if ok else "error")
         qs.setValue(TELEGRAM_MODE_HOSTS_LAST_ERROR_KEY, str(error or "").strip())
         qs.sync()
-    except Exception:
-        pass
-
-
-def _ensure_telegram_runtime_files() -> None:
-    try:
-        _write_lines_utf8(RUNTIME_TELEGRAM_DOMAIN_FILE, _read_lines_utf8(RUNTIME_TELEGRAM_DOMAIN_FILE))
-        _write_lines_utf8(RUNTIME_TELEGRAM_IP_FILE, _read_lines_utf8(RUNTIME_TELEGRAM_IP_FILE))
     except Exception:
         pass
 

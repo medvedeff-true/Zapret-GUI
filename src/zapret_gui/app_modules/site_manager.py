@@ -1,5 +1,77 @@
 # --- Site and game list management dialogs ----------------------------------
 
+_SITE_LIST_WORKERS = set()
+
+
+class _SiteListSearchWorker(QThread):
+    ready = pyqtSignal(str, str, list, bool, str)
+
+    def __init__(self, path, query):
+        super().__init__()
+        self.path, self.query = path, query
+        self.cancelled = threading.Event()
+
+    def run(self):
+        values = []
+        try:
+            for value in _iter_large_list_lines(self.path):
+                if self.cancelled.is_set():
+                    return
+                if self.query not in value.casefold():
+                    continue
+                if len(values) == 1000:
+                    self.ready.emit(self.path, self.query, values, True, "")
+                    return
+                values.append(value)
+            self.ready.emit(self.path, self.query, values, False, "")
+        except Exception as error:
+            self.ready.emit(self.path, self.query, [], False, str(error))
+
+
+class _SiteListImportWorker(QThread):
+    ready = pyqtSignal(str, int, str)
+
+    def __init__(self, target, source):
+        super().__init__()
+        self.target, self.source = target, source
+
+    def run(self):
+        temporary = None
+        try:
+            suffix = os.path.splitext(self.source)[1].lower()
+            if suffix == ".json":
+                if os.path.getsize(self.source) > 16 * 1024 * 1024:
+                    raise ValueError("Большой JSON: сохраните список в TXT или CSV для потокового импорта.")
+                candidates = _extract_domain_candidates_from_file(self.source, _read_text(self.source))
+            elif suffix == ".csv":
+                candidates = _iter_large_csv_values(self.source)
+            else:
+                candidates = _iter_large_text_values(self.source)
+            temporary, count = _normalized_import_file(
+                self.target, candidates,
+                lambda value: _normalize_value_for_target_file(self.target, value),
+                lambda value: _is_valid_value_for_target_file(self.target, value),
+            )
+            if not count:
+                raise ValueError("В файле не найдено валидных записей.")
+            added = _merge_large_import_file(self.target, temporary)
+            self.ready.emit(self.target, added, "")
+        except Exception as error:
+            self.ready.emit(self.target, 0, str(error))
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+
+def _retain_site_list_worker(worker):
+    # Parentless workers may outlive a closed dialog; never destroy a running
+    # QThread, and never block the GUI waiting for a huge file scan.
+    _SITE_LIST_WORKERS.add(worker)
+    worker.finished.connect(lambda: _SITE_LIST_WORKERS.discard(worker))
+    worker.finished.connect(worker.deleteLater)
+    worker.start()
+
+
 class SiteManagerTutorialDialog(StyledDialog):
     def __init__(self, parent=None, lang="ru"):
         super().__init__(parent)
@@ -270,6 +342,14 @@ class SiteManagerDialog(StyledDialog):
         self._mode_activated = False
         self._add_button_acknowledged = False
         self._tutorial_dialog = None
+        self._large_list_mode = False
+        self._list_search_worker = None
+        self._list_import_worker = None
+        self._list_search_timer = QTimer(self)
+        self._list_search_timer.setSingleShot(True)
+        self._list_search_timer.setInterval(180)
+        self._list_search_timer.timeout.connect(self._start_large_list_search)
+        self.finished.connect(self._cancel_large_list_search)
 
         base_w = parent.width() if parent else 300
         self.setWindowTitle("Менеджер сайтов и ip" if self.lang == "ru" else "Site manager")
@@ -856,12 +936,26 @@ class SiteManagerDialog(StyledDialog):
             self.lazy_loaded[self.current_file] = True
 
     def reload_current_file(self):
+        self._cancel_large_list_search()
+        self._large_list_mode = False
         self.current_file = self._selected_file_path()
         self.sites_list.clear()
         self._refresh_mode_controls()
         self._update_list_info()
         if not self.current_file:
             self.update_delete_buttons()
+            return
+
+        # QListWidget is intentionally capped: a multi-million-entry source
+        # remains usable through search/import without allocating one Qt item
+        # per line. The file itself is still streamed by the runtime builder.
+        try:
+            file_size = os.path.getsize(self.current_file)
+        except OSError:
+            file_size = 0
+        if file_size > 4 * 1024 * 1024:
+            self._large_list_mode = True
+            self._start_large_list_search()
             return
 
         lines = _read_lines_utf8(self.current_file)
@@ -925,36 +1019,28 @@ class SiteManagerDialog(StyledDialog):
         if not source_path:
             return
 
-        raw_text = _read_text(source_path)
-        candidates = _extract_domain_candidates_from_file(source_path, raw_text)
-
-        imported_values = []
-        for value in candidates:
-            normalized = _normalize_value_for_target_file(target_file, value)
-            if not _is_valid_value_for_target_file(target_file, normalized):
-                continue
-            imported_values.append(normalized)
-
-        if not imported_values:
-            QMessageBox.warning(
-                self,
-                "Ошибка" if self.lang == "ru" else "Error",
-                "В файле не найдено валидных IP или подсетей."
-                if is_ip and self.lang == "ru" else
-                "В файле не найдено валидных доменов."
-                if self.lang == "ru" else
-                "No valid IPs or subnets were found in the file."
-                if is_ip else
-                "No valid domains were found in the file."
-            )
+        if self._list_import_worker is not None:
             return
+        worker = _SiteListImportWorker(target_file, source_path)
+        self._list_import_worker = worker
+        self.import_add_btn.setEnabled(False)
+        self.import_exclude_btn.setEnabled(False)
+        self.add_btn.setEnabled(False)
+        self.delete_btn.setEnabled(False)
+        worker.ready.connect(self._on_large_list_imported)
+        self.list_info_lbl.setText("Импорт списка…" if self.lang == "ru" else "Importing list…")
+        _retain_site_list_worker(worker)
 
-        existing = _read_lines_utf8(target_file)
-        before = {x.strip().casefold() for x in existing if x.strip()}
-        merged = _merge_unique(existing, imported_values)
-        after = {x.strip().casefold() for x in merged if x.strip()}
-        added_count = len(after - before)
-        _write_lines_utf8(target_file, merged)
+    def _on_large_list_imported(self, target_file, added_count, error):
+        self._list_import_worker = None
+        self.import_add_btn.setEnabled(True)
+        self.import_exclude_btn.setEnabled(True)
+        self.add_btn.setEnabled(True)
+        self.delete_btn.setEnabled(True)
+        if error:
+            QMessageBox.warning(self, "Ошибка" if self.lang == "ru" else "Error", error)
+            return
+        is_ip = _entity_kind_for_target_file(target_file) == "ip"
 
         self.lazy_loaded[target_file] = True
         if target_file == self._selected_file_path():
@@ -1028,9 +1114,7 @@ class SiteManagerDialog(StyledDialog):
             )
             return
 
-        lines = _read_lines_utf8(self.current_file)
-        lines = _merge_unique(lines, [value])
-        _write_lines_utf8(self.current_file, lines)
+        _append_large_list_value(self.current_file, value)
         self.lazy_loaded[self.current_file] = True
 
         if self.parent() and hasattr(self.parent(), "refresh_runtime_lists_after_user_change"):
@@ -1058,10 +1142,52 @@ class SiteManagerDialog(StyledDialog):
         ) == QMessageBox.StandardButton.Yes
 
     def filter_list(self, text):
+        if self._large_list_mode:
+            self._cancel_large_list_search()
+            self._list_search_timer.start()
+            return
         text = (text or "").strip().lower()
         for row in range(self.sites_list.count()):
             item = self.sites_list.item(row)
             item.setHidden(text not in item.text().lower())
+
+    def _cancel_large_list_search(self):
+        self._list_search_timer.stop()
+        if self._list_search_worker is not None:
+            self._list_search_worker.cancelled.set()
+            self._list_search_worker = None
+
+    def _start_large_list_search(self):
+        if not self._large_list_mode or not self.current_file:
+            return
+        self._cancel_large_list_search()
+        self.sites_list.clear()
+        self.list_info_lbl.setText("Поиск в списке…" if self.lang == "ru" else "Searching list…")
+        worker = _SiteListSearchWorker(self.current_file, self.search_input.text().strip().casefold())
+        self._list_search_worker = worker
+        worker.ready.connect(self._on_large_list_search)
+        _retain_site_list_worker(worker)
+
+    def _on_large_list_search(self, path, query, values, truncated, error):
+        if not self._large_list_mode or path != self.current_file or query != self.search_input.text().strip().casefold():
+            return
+        self._list_search_worker = None
+        self.sites_list.blockSignals(True)
+        self.sites_list.clear()
+        for value in values:
+            item = QListWidgetItem(value)
+            item.setData(Qt.ItemDataRole.UserRole, value)
+            item.setData(PLACEHOLDER_ITEM_ROLE, False)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            self.sites_list.addItem(item)
+        self.sites_list.blockSignals(False)
+        self.list_info_lbl.setText(error or (
+            ("Первые 1000 совпадений. Уточните поиск." if truncated else f"Найдено записей: {len(values)}")
+            if self.lang == "ru" else
+            ("First 1000 matches. Refine your search." if truncated else f"Entries found: {len(values)}")
+        ))
+        self.update_delete_buttons()
 
     def _visit_icon_rect(self, item_rect) -> QRectF:
         size = 18
@@ -1256,8 +1382,7 @@ class SiteManagerDialog(StyledDialog):
             return
 
         selected = {str((it.data(Qt.ItemDataRole.UserRole) or it.text())).strip().casefold() for it in items}
-        lines = [x for x in _read_lines_utf8(self.current_file) if x.strip().casefold() not in selected]
-        _write_lines_utf8(self.current_file, lines)
+        _remove_large_list_values(self.current_file, selected)
         self.lazy_loaded[self.current_file] = True
 
         if self.parent() and hasattr(self.parent(), "refresh_runtime_lists_after_user_change"):

@@ -1,0 +1,11 @@
+medvedeff-winws uses the Windows engine from zapret, with modifications for
+application-scoped traffic. The corresponding engine source is in
+tools/medvedeff-winws in the Zapret-GUI source tree.
+
+zapret (MIT): https://github.com/bol-van/zapret/tree/1e1d1e24c2ad5f9def2825e2eac7a89979a8a023
+WinDivert 2.2 (see WINDIVERT-LICENSE.txt): https://github.com/basil00/WinDivert/tree/v2.2.2
+Cygwin 3.6.12-1 (see CYGWIN-LICENSE.txt; LGPLv3 and GPLv3 texts
+are included in WINDIVERT-LICENSE.txt): https://cygwin.com/packages/summary/cygwin-src.html
+zlib 1.4-1 (see ZLIB-LICENSE.txt): https://cygwin.com/packages/summary/zlib-src.html
+
+The accompanying DLLs are loaded dynamically; they are not merged into the executable.

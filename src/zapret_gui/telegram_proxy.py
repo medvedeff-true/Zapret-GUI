@@ -4,7 +4,7 @@ import threading
 import time
 
 from tg_ws_proxy_vendor.proxy import tg_ws_proxy as flowseal_proxy
-from tg_ws_proxy_vendor.proxy.config import proxy_config
+from tg_ws_proxy_vendor.proxy.config import proxy_config, stop_cfproxy_domain_refresh
 from tg_ws_proxy_vendor.proxy.stats import stats as flowseal_stats
 
 
@@ -37,6 +37,8 @@ class TelegramProxyController:
                 if secret != self._secret:
                     raise TelegramProxyError("Telegram proxy already runs with another secret")
                 return
+            if self._thread is not None and self._thread.is_alive():
+                raise TelegramProxyError("Telegram MTProto proxy is still starting or stopping")
 
             self._port = port
             self._secret = secret
@@ -56,8 +58,8 @@ class TelegramProxyController:
             raise TelegramProxyError("Telegram MTProto proxy start timed out")
 
         err = self._last_error
-        if err and not self.is_running():
-            raise TelegramProxyError(err)
+        if err or not self.is_running():
+            raise TelegramProxyError(err or "Telegram MTProto proxy stopped during startup")
 
     def stop(self) -> None:
         loop = self._loop
@@ -71,6 +73,8 @@ class TelegramProxyController:
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=6.0)
+            if thread.is_alive():
+                raise TelegramProxyError("Telegram MTProto proxy stop timed out")
 
         with self._lock:
             self._thread = None
@@ -120,28 +124,33 @@ class TelegramProxyController:
             self._last_error = str(e)
             self._started.set()
         finally:
-            self._stopped.set()
+            stop_cfproxy_domain_refresh()
             try:
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
                 loop.close()
             except Exception:
                 pass
+            finally:
+                self._stopped.set()
 
     async def _run_flowseal_proxy(self) -> None:
         task = asyncio.create_task(flowseal_proxy._run(self._stop_event))
         try:
-            for _ in range(160):
-                if flowseal_proxy._server_instance is not None:
+            while not task.done():
+                server = flowseal_proxy._server_instance
+                if server is not None and server.is_serving():
                     self._started_at = time.time()
                     self._started.set()
                     break
-                if task.done():
-                    break
                 await asyncio.sleep(0.05)
 
-            if not self._started.is_set():
-                self._started.set()
-
             await task
+            if not self._started.is_set():
+                raise TelegramProxyError("Telegram MTProto proxy did not open its listener")
         finally:
             if not task.done():
                 task.cancel()
@@ -158,31 +167,19 @@ class TelegramProxyController:
         proxy_config.buffer_size = 256 * 1024
         proxy_config.pool_size = 4
         proxy_config.fallback_cfproxy = True
-        proxy_config.fallback_cfproxy_priority = True
-        proxy_config.cfproxy_user_domain = ""
+        proxy_config.cfproxy_user_domains = []
+        proxy_config.cfproxy_worker_domains = []
+        proxy_config.cfproxy_h2_media = True
+        proxy_config.disable_secure = False
+        proxy_config.force_test_dc = False
         proxy_config.fake_tls_domain = ""
         proxy_config.proxy_protocol = False
 
     @staticmethod
     def _reset_flowseal_stats() -> None:
-        for key in (
-            "connections_total",
-            "connections_active",
-            "connections_ws",
-            "connections_tcp_fallback",
-            "connections_cfproxy",
-            "connections_bad",
-            "connections_masked",
-            "ws_errors",
-            "bytes_up",
-            "bytes_down",
-            "pool_hits",
-            "pool_misses",
-        ):
-            try:
+        for key, value in vars(flowseal_stats).items():
+            if isinstance(value, int):
                 setattr(flowseal_stats, key, 0)
-            except Exception:
-                pass
 
     @staticmethod
     def _normalize_secret(secret: str | None) -> str:

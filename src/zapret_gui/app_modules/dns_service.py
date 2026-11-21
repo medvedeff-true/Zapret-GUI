@@ -774,38 +774,18 @@ def _write_hosts_file(content: str, path: str = DNS_MALW_HOSTS_PATH) -> None:
     normalized = (content or "").replace("\r\n", "\n").replace("\r", "\n")
     if normalized and not normalized.endswith("\n"):
         normalized += "\n"
+    is_system = os.path.normcase(str(path)) == os.path.normcase(DNS_MALW_HOSTS_PATH)
     data = normalized.encode("utf-8")
-    is_system_hosts = os.path.normcase(path) == os.path.normcase(DNS_MALW_HOSTS_PATH)
-    attempts = 8 if is_system_hosts else 1
-    last_error = None
-
-    for attempt in range(attempts):
+    with _ai_hosts_lock():
         try:
-            with open(path, "wb") as f:
-                f.write(data)
+            _atomic_hosts_write(path, data, system=is_system)
             return
-        except (PermissionError, OSError) as e:
-            last_error = e
-            is_permission_error = isinstance(e, PermissionError) or getattr(e, "errno", None) == 13 or getattr(e, "winerror", None) == 5
-            if not is_permission_error:
+        except (PermissionError, OSError) as error:
+            if not is_system:
                 raise
-            if attempt >= attempts - 1:
-                break
-            try:
-                os.chmod(path, 0o666)
-            except Exception:
-                pass
-            time.sleep(0.28 + attempt * 0.34)
-
-    if is_system_hosts:
-        ps_error = _write_system_hosts_file_via_powershell(data, path)
-        if not ps_error:
-            return
-        if last_error is None:
-            raise PermissionError(ps_error)
-
-    if last_error is not None:
-        raise last_error
+            ps_error = _write_system_hosts_file_via_powershell(data, path)
+            if ps_error:
+                raise error
 
 
 def _write_system_hosts_file_via_powershell(data: bytes, path: str = DNS_MALW_HOSTS_PATH) -> str:
@@ -814,43 +794,40 @@ def _write_system_hosts_file_via_powershell(data: bytes, path: str = DNS_MALW_HO
     try:
         os.makedirs(APP_DIR, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(prefix="hosts-write-", suffix=".tmp", dir=APP_DIR)
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
 
         script = r"""
 param([string]$src, [string]$dst)
 $ErrorActionPreference = 'Stop'
 $bytes = [System.IO.File]::ReadAllBytes($src)
 $lastError = $null
-
 for ($i = 0; $i -lt 8; $i++) {
     try {
+        $backup = "$dst.zapretgui-rollback"
         if (Test-Path -LiteralPath $dst) {
-            try { & attrib.exe -R -S -H $dst 2>$null | Out-Null } catch {}
+            [System.IO.File]::Replace($src, $dst, $backup, $true)
+            if (Test-Path -LiteralPath $backup) {
+                Remove-Item -LiteralPath $backup -Force
+            }
+        } else {
+            [System.IO.File]::Move($src, $dst)
         }
-        [System.IO.File]::WriteAllBytes($dst, $bytes)
         exit 0
     } catch {
         $lastError = $_.Exception.Message
         Start-Sleep -Milliseconds (260 + ($i * 280))
     }
 }
-
 throw $lastError
 """
         fd_script, script_path = tempfile.mkstemp(prefix="hosts-write-", suffix=".ps1", dir=APP_DIR)
-        with os.fdopen(fd_script, "w", encoding="utf-8") as f:
-            f.write(script.lstrip())
-
+        with os.fdopen(fd_script, "w", encoding="utf-8") as stream:
+            stream.write(script.lstrip())
         completed = _run_hidden(
             [
-                "powershell",
-                "-NoProfile",
-                "-ExecutionPolicy", "Bypass",
-                "-File",
-                script_path,
-                tmp_path,
-                path,
+                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", script_path, tmp_path, path,
             ],
             timeout=12,
         )
@@ -859,8 +836,8 @@ throw $lastError
         if completed is None:
             return "powershell-hosts-write-failed"
         return (completed.stderr or completed.stdout or f"powershell-exit-{completed.returncode}").strip()
-    except Exception as e:
-        return str(e)
+    except Exception as error:
+        return str(error)
     finally:
         if tmp_path:
             try:
@@ -906,8 +883,11 @@ def _hosts_contains_dns_malw_managed_block(text: str) -> bool:
 
 
 def _hosts_bundle_looks_useful(text: str) -> bool:
-    hay = (text or "").casefold()
-    return any(token in hay for token in ("openai", "chatgpt", "claude", "gemini", "anthropic"))
+    from zapret_gui.ai_dns import parse_bundle
+    try:
+        return bool(parse_bundle(text or ""))
+    except ValueError:
+        return False
 
 
 def _strip_dns_malw_hosts_block(text: str) -> str:
@@ -1028,9 +1008,10 @@ def _repair_dns_malw_hosts_for_app_network(settings: QSettings | None = None) ->
         if not _hosts_contains_dns_malw_managed_block(current_hosts):
             cleaned_hosts = _strip_dns_malw_hosts_block(current_hosts)
             if cleaned_hosts != current_hosts:
-                _write_hosts_file(cleaned_hosts, DNS_MALW_HOSTS_PATH)
-                _run_hidden(["ipconfig", "/flushdns"])
-                return True
+                # Do not mutate the protected system file during a background
+                # refresh. The next explicit enable goes through the SYSTEM
+                # service and publishes a verified block atomically.
+                return False
             return False
 
         block_body = _extract_dns_malw_hosts_block_body(current_hosts)
@@ -1040,9 +1021,7 @@ def _repair_dns_malw_hosts_for_app_network(settings: QSettings | None = None) ->
         if filtered_body.strip() == block_body.strip() and recomposed_hosts == current_hosts:
             return False
 
-        _write_hosts_file(recomposed_hosts, DNS_MALW_HOSTS_PATH)
-        _run_hidden(["ipconfig", "/flushdns"])
-        return True
+        return False
     except Exception:
         return False
 
@@ -1071,6 +1050,184 @@ def _load_dns_malw_seed_hosts() -> str:
     return ""
 
 
+def _load_dns_malw_last_good() -> str:
+    if not os.path.exists(DNS_MALW_HOSTS_LAST_GOOD_PATH):
+        return ""
+    text = _read_hosts_file(DNS_MALW_HOSTS_LAST_GOOD_PATH)
+    return text if _hosts_bundle_looks_useful(text) else ""
+
+
+def _ai_dns_fallback_profiles(current_hosts: str) -> list[tuple[str, str]]:
+    """Keep independent candidates before a download replaces the cache."""
+    profiles = []
+    seen = set()
+    candidates = [
+        ("last-known-good", _load_dns_malw_last_good()),
+        ("current-managed", _extract_dns_malw_hosts_block_body(current_hosts)),
+    ]
+    for label, path in (
+        ("previous-cache", DNS_MALW_HOSTS_CACHE_PATH),
+        ("installed-seed", DNS_MALW_HOSTS_SEED_PATH),
+        ("bundled-seed", _bundled_path("core", "lists", "dns_malw_hosts_seed.txt")),
+    ):
+        try:
+            text = Path(path).read_text(encoding="utf-8") if path else ""
+        except OSError:
+            text = ""
+        candidates.append((label, text))
+    for label, text in candidates:
+        if text.strip() and text not in seen and _hosts_bundle_looks_useful(text):
+            seen.add(text)
+            profiles.append((label, text))
+    return profiles
+
+
+def _download_ai_dns_previous_profiles() -> list[tuple[str, str]]:
+    """Bounded recovery from the canonical provider's own hosts history.
+
+    Historical mappings are candidates only: normal certificate/SNI/HTTP
+    checks are mandatory before any entry reaches the hosts service.
+    """
+    profiles = []
+    try:
+        with requests.Session() as session:
+            session.headers.update({"User-Agent": "ZapretGUI-AiDNS"})
+            response = session.get(
+                "https://api.github.com/repos/ImMALWARE/dns.malw.link/commits",
+                params={"path": "hosts", "per_page": 4}, timeout=(3.0, 8.0),
+            )
+            response.raise_for_status()
+            entries = response.json()
+            if not isinstance(entries, list):
+                return profiles
+            seen = set()
+            for entry in entries[1:4]:
+                sha = str(entry.get("sha", "")) if isinstance(entry, dict) else ""
+                if not re.fullmatch(r"[0-9a-f]{40}", sha):
+                    continue
+                try:
+                    data = _download_github_contents_bytes(session, "ImMALWARE/dns.malw.link", "hosts", ref=sha)
+                    if len(data) > 2 * 1024 * 1024:
+                        continue
+                    text = data.decode("utf-8")
+                    filtered = _filter_dns_malw_hosts_bundle(text)
+                    if filtered not in seen and _hosts_bundle_looks_useful(filtered):
+                        seen.add(filtered)
+                        profiles.append(("upstream-history-" + sha[:12], filtered))
+                        if len(profiles) == 2:
+                            break
+                except Exception as error:
+                    _startup_log.warning("Could not load Ai DNS previous profile: %s", error)
+    except Exception as error:
+        _startup_log.warning("Ai DNS source history unavailable: %s", error)
+    return profiles
+
+
+def _save_dns_malw_last_good(text: str) -> None:
+    if not text.strip():
+        return
+    _write_hosts_file(text, DNS_MALW_HOSTS_LAST_GOOD_PATH)
+
+
+def _resolve_ai_dns_profiles(current_hosts: str) -> tuple[str, dict]:
+    """Manual/startup refresh: verified local -> cached -> fresh -> history.
+
+    A successful group is never probed or replaced again in this operation.
+    Download/cache errors are independent from usable local relay candidates.
+    """
+    selection = _AiDnsRelaySelection()
+    local = _ai_dns_fallback_profiles(current_hosts)
+    selected = selection.add([item for item in local if item[0] in {
+        "last-known-good", "current-managed",
+    }], timeout=8.0)
+    # Also discover optional groups that failed on the preceding activation
+    # and therefore are absent from last-known-good. This is local I/O only;
+    # successful groups are excluded by RelaySelection.add.
+    try:
+        cached = _ai_dns_sources.load_profiles(AI_DNS_SOURCE_CACHE_PATH)
+    except Exception as error:
+        _startup_log.warning("Ai DNS source cache unavailable: %s", error)
+        cached = []
+    selected = selection.add([*cached, *[
+        item for item in local if item[0] not in {"last-known-good", "current-managed"}
+    ]], timeout=8.0)
+    if selection.missing:
+        from concurrent.futures import ThreadPoolExecutor
+        missing = selection.missing
+        fresh = []
+        # Download independent sources together, before probing their address
+        # alternatives. Exhausting every dead GeoHide IP must not delay a
+        # usable DoH candidate by minutes.
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="ai-sources") as pool:
+            jobs = [
+                ("MALW", pool.submit(_download_ai_hosts_bundle)),
+                ("hosts", pool.submit(_ai_dns_sources.download_hosts, missing)),
+                ("DoH", pool.submit(_ai_dns_sources.download_doh, missing)),
+            ]
+            for label, job in jobs:
+                try:
+                    value = job.result()
+                    if label == "DoH":
+                        # Current exact DoH mappings before a long sequence of
+                        # static alternate-provider addresses.
+                        fresh = [*value, *fresh]
+                    else:
+                        fresh.extend([("upstream", value[0])] if label == "MALW" else value)
+                except Exception as error:
+                    _startup_log.warning("Ai DNS %s sources unavailable: %s", label, error)
+        try:
+            _ai_dns_sources.save_profiles(AI_DNS_SOURCE_CACHE_PATH, fresh)
+        except Exception as error:
+            _startup_log.warning("Could not cache Ai DNS sources: %s", error)
+        selected = selection.add(fresh)
+    if selection.missing and time.monotonic() < selection.deadline:
+        selected = selection.add(_download_ai_dns_previous_profiles())
+    return selected
+
+
+def _load_dns_malw_group_status(settings: QSettings | None = None) -> dict:
+    try:
+        qs = _load_settings_if_needed(settings)
+        raw = str(qs.value(DNS_MALW_GROUP_STATUS_KEY, "") or "").strip()
+        payload = json.loads(raw) if raw else {}
+        return {key: value for key, value in payload.items() if key in _AI_DNS_GROUPS} if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_dns_malw_group_status(status: dict, settings: QSettings | None = None) -> None:
+    try:
+        qs = _load_settings_if_needed(settings)
+        qs.setValue(DNS_MALW_GROUP_STATUS_KEY, json.dumps(status or {}, ensure_ascii=False))
+        qs.sync()
+    except Exception:
+        pass
+
+
+def _migrate_dns_malw_mechanism(settings: QSettings | None = None) -> bool:
+    """Invalidate the old startup skip after the 3.1 relay/service migration."""
+    qs = _load_settings_if_needed(settings)
+    previous = str(qs.value(DNS_MALW_MECHANISM_VERSION_KEY, "") or "").strip()
+    if previous == DNS_MALW_MECHANISM_VERSION:
+        return False
+    enabled = bool(qs.value(DNS_MALW_ENABLED_BY_APP_KEY, False, type=bool))
+    if enabled:
+        # Force the first startup refresh through adaptive relay checks. The
+        # old managed hosts block remains untouched until a verified candidate
+        # is ready, so a failed migration cannot break existing access.
+        qs.setValue(DNS_MALW_LAST_ATTEMPT_KEY, 0)
+        qs.setValue(DNS_MALW_LAST_STATUS_KEY, "migration-pending")
+        qs.setValue(DNS_MALW_LAST_ERROR_KEY, "")
+    else:
+        qs.setValue(DNS_MALW_MECHANISM_VERSION_KEY, DNS_MALW_MECHANISM_VERSION)
+    qs.sync()
+    return enabled
+
+
+def _dns_malw_status_summary(status: dict) -> str:
+    return _ai_dns_summary(status)
+
+
 def _save_dns_malw_backup_if_safe(current_hosts: str, settings: QSettings | None = None) -> str:
     qs = _load_settings_if_needed(settings)
     existing = _load_dns_malw_backup()
@@ -1094,9 +1251,23 @@ def _download_ai_hosts_bundle() -> tuple[str, str]:
     errors = []
 
     def _fetch_text_url(url: str, timeout: tuple[float, float] = (4.0, 16.0)) -> str:
-        resp = session.get(url, timeout=timeout, allow_redirects=True)
-        resp.raise_for_status()
-        return (resp.content or b"").decode("utf-8", errors="replace")
+        deadline = time.monotonic() + 20
+        with session.get(url, timeout=timeout, allow_redirects=True, stream=True) as resp:
+            resp.raise_for_status()
+            data = bytearray()
+            for chunk in resp.iter_content(chunk_size=16384):
+                data.extend(chunk)
+                if len(data) > 2 * 1024 * 1024 or time.monotonic() > deadline:
+                    raise ValueError("Ai DNS MALW source exceeds download limits")
+        return data.decode("utf-8", errors="replace")
+
+    def _validate_source(data: bytes | str) -> str:
+        if len(data) > 2 * 1024 * 1024:
+            raise ValueError("Ai DNS MALW source exceeds 2 MiB")
+        text = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else data
+        if not _hosts_bundle_looks_useful(text):
+            raise ValueError("Ai DNS source contains no usable AI mappings")
+        return text
 
     def _record_error(source: str, error: Exception) -> None:
         msg = str(error).replace("\r", " ").replace("\n", " ").strip()
@@ -1106,12 +1277,12 @@ def _download_ai_hosts_bundle() -> tuple[str, str]:
 
     def _download_main_hosts() -> str:
         try:
-            return _download_github_contents_bytes(
+            return _validate_source(_download_github_contents_bytes(
                 session,
                 "ImMALWARE/dns.malw.link",
                 "hosts",
                 ref="master",
-            ).decode("utf-8", errors="replace")
+            ))
         except Exception as e:
             _record_error("github-api", e)
 
@@ -1119,7 +1290,7 @@ def _download_ai_hosts_bundle() -> tuple[str, str]:
             (f"mirror-{idx}", url) for idx, url in enumerate(DNS_MALW_HOSTS_MIRROR_URLS, 1)
         ):
             try:
-                text = _fetch_text_url(url)
+                text = _validate_source(_fetch_text_url(url))
                 if text.strip():
                     return text
             except Exception as e:
@@ -1132,62 +1303,27 @@ def _download_ai_hosts_bundle() -> tuple[str, str]:
         detail = "; ".join(errors[-5:]) if errors else "all sources failed"
         raise RuntimeError(f"ai-hosts-download-failed: {detail}")
 
-    def _download_additional_hosts_text() -> str:
-        try:
-            return _download_github_contents_bytes(
-                session,
-                "AvenCores/Goida-AI-Unlocker",
-                "additional_hosts.py",
-                ref="main",
-            ).decode("utf-8", errors="replace")
-        except Exception:
-            pass
-
-        for url in (DNS_MALW_ADDITIONAL_URL,) + tuple(DNS_MALW_ADDITIONAL_MIRROR_URLS):
-            try:
-                text = _fetch_text_url(url, timeout=(4.0, 10.0))
-                if text.strip():
-                    return text
-            except Exception:
-                pass
-        return ""
-
     try:
         session = requests.Session()
         session.headers.update(headers)
         main_hosts = _download_main_hosts()
         main_hosts = main_hosts.replace("\r\n", "\n").replace("\r", "\n").strip()
 
-        additional_block = ""
-        additional_version = ""
-        try:
-            add_text = _download_additional_hosts_text()
-            m_ver = DNS_MALW_ADDITIONAL_VERSION_RE.search(add_text)
-            m_hosts = DNS_MALW_ADDITIONAL_HOSTS_RE.search(add_text)
-            if m_ver:
-                additional_version = m_ver.group(1).strip()
-            if m_hosts:
-                additional_block = (m_hosts.group("body") or "").strip()
-        except Exception:
-            additional_block = ""
-            additional_version = ""
-
-        pieces = [main_hosts]
-        if additional_block:
-            header = "# Goida-AI-Unlocker additional hosts"
-            if additional_version:
-                header += f" ({additional_version})"
-            pieces.append(header)
-            pieces.append(additional_block)
-
-        final_hosts = "\n\n".join(part for part in pieces if part).strip() + "\n"
+        # The former Goida-AI-Unlocker repository no longer exists. Do not
+        # serially retry its API/raw/CDN 404s on every manual activation.
+        final_hosts = main_hosts + "\n"
         if len([line for line in final_hosts.splitlines() if line.strip() and not line.lstrip().startswith("#")]) < 3:
             raise RuntimeError("downloaded-hosts-too-small")
         if not _hosts_bundle_looks_useful(final_hosts):
             raise RuntimeError("downloaded-hosts-do-not-contain-ai-domains")
         final_hosts = _filter_dns_malw_hosts_bundle(final_hosts)
-        _write_hosts_file(final_hosts, DNS_MALW_HOSTS_CACHE_PATH)
-        return final_hosts, additional_version
+        try:
+            _write_hosts_file(final_hosts, DNS_MALW_HOSTS_CACHE_PATH)
+        except OSError as error:
+            # Cache access is an optimization, not a reason to discard a
+            # successfully downloaded current profile in favour of old seeds.
+            _startup_log.warning("Could not cache Ai DNS source: %s", error)
+        return final_hosts, ""
     except Exception as e:
         seed_hosts = _load_dns_malw_seed_hosts()
         if seed_hosts.strip():
@@ -1213,8 +1349,13 @@ def _sync_ai_dns_if_enabled(
 
     if min_retry_seconds > 0:
         try:
+            mechanism_current = str(
+                qs.value(DNS_MALW_MECHANISM_VERSION_KEY, "") or ""
+            ).strip() == DNS_MALW_MECHANISM_VERSION
             last_success = _safe_int_setting(qs, DNS_MALW_LAST_SUCCESS_KEY, 0)
             if (
+                mechanism_current
+                and
                 last_success > 0
                 and (int(time.time()) - last_success) < max(60, int(min_retry_seconds))
                 and _hosts_contains_dns_malw_managed_block(_read_hosts_file(DNS_MALW_HOSTS_PATH))
@@ -1224,15 +1365,6 @@ def _sync_ai_dns_if_enabled(
                 return result
         except Exception:
             pass
-
-    try:
-        is_admin_now = bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        is_admin_now = False
-
-    if not is_admin_now:
-        result["skipped"] = True
-        return result
 
     sync_result = _enable_dns_malw_link(qs)
     result["ok"] = bool(sync_result.get("ok"))
@@ -1254,6 +1386,8 @@ def _get_dns_malw_link_status() -> dict:
     try:
         hosts_text = _read_hosts_file(DNS_MALW_HOSTS_PATH)
         result["active"] = _hosts_contains_ai_marker(hosts_text)
+        result["groups"] = _load_dns_malw_group_status()
+        result["summary"] = _dns_malw_status_summary(result["groups"])
     except Exception as e:
         result["ok"] = False
         result["error"] = str(e)
@@ -1273,6 +1407,8 @@ def _enable_dns_malw_link(settings: QSettings | None = None) -> dict:
         "doh": False,
         "method": "hosts",
         "snapshot": [],
+        "groups": {},
+        "summary": "none",
     }
 
     try:
@@ -1280,21 +1416,22 @@ def _enable_dns_malw_link(settings: QSettings | None = None) -> dict:
     except Exception:
         result["admin"] = False
 
-    if not result["admin"]:
-        result["error"] = "not-admin"
-    else:
-        try:
+    # The GUI user does not need elevation. The installed SYSTEM helper is the
+    # sole privilege boundary for hosts publication.
+    result["admin"] = True
+    try:
             try:
                 current_hosts = _read_hosts_file_strict(DNS_MALW_HOSTS_PATH)
             except FileNotFoundError:
                 current_hosts = ""
             backup_hosts = _save_dns_malw_backup_if_safe(current_hosts, qs)
-            network_safe_hosts = _strip_dns_malw_hosts_block(current_hosts)
-            if network_safe_hosts != current_hosts:
-                _write_hosts_file(network_safe_hosts, DNS_MALW_HOSTS_PATH)
-                _run_hidden(["ipconfig", "/flushdns"])
-                current_hosts = network_safe_hosts
-            new_hosts, additional_version = _download_ai_hosts_bundle()
+            candidate_hosts, group_status = _resolve_ai_dns_profiles(current_hosts)
+            summary = _ai_dns_summary(group_status)
+            result["groups"] = group_status
+            result["summary"] = summary
+            if summary == "none":
+                raise RuntimeError("ai-no-working-relays")
+            new_hosts = candidate_hosts
             base_hosts = _strip_dns_malw_hosts_block(current_hosts)
             if _hosts_contains_ai_marker(base_hosts):
                 if _is_dns_malw_backup_usable(backup_hosts):
@@ -1302,19 +1439,44 @@ def _enable_dns_malw_link(settings: QSettings | None = None) -> dict:
                 else:
                     raise RuntimeError("no-clean-snapshot")
             final_hosts = _compose_dns_malw_hosts(base_hosts, new_hosts)
-            _write_hosts_file(final_hosts, DNS_MALW_HOSTS_PATH)
+            try:
+                current_hash = hashlib.sha256(Path(DNS_MALW_HOSTS_PATH).read_bytes()).hexdigest()
+            except FileNotFoundError:
+                current_hash = hashlib.sha256(b"").hexdigest()
+            helper = _bundled_path("background_service", "ZapretGUI.Service.exe")
+            core_bin = os.path.join(APP_DIR, "core", "bin")
+            if os.path.isfile(helper) and os.path.isdir(core_bin):
+                try:
+                    reply = _bypass_service.ai_dns_hosts(
+                        final_hosts, current_hash, "apply", helper, core_bin,
+                    )
+                except Exception as error:
+                    # A stale pre-3.1 service is upgraded by ensure(); if its
+                    # installation is unavailable, do not silently use the old
+                    # GUI-elevation path.
+                    raise RuntimeError(f"ai-dns-service-failed: {error}") from error
+                if not reply.get("ok"):
+                    raise RuntimeError(reply.get("error") or "ai-dns-hosts-apply-failed")
+            else:
+                raise RuntimeError("ai-dns-service-missing")
             _run_hidden(["ipconfig", "/flushdns"])
             _run_hidden(["ipconfig", "/registerdns"])
+            try:
+                _save_dns_malw_last_good(new_hosts)
+            except Exception:
+                # A verified hosts block is already active; failure to update
+                # the local optimization cache must not report a false failure.
+                pass
             result["ok"] = True
             result["applied"] = 1
             result["updated"] = 1
             result["snapshot"] = [{
                 "backup": DNS_MALW_HOSTS_BACKUP_PATH,
                 "mode": "hosts-managed-block",
-                "additional_version": additional_version,
+                "additional_version": "",
             }]
-        except Exception as e:
-            result["error"] = str(e)
+    except Exception as e:
+        result["error"] = str(e)
 
     try:
         qs.setValue(DNS_MALW_LAST_ATTEMPT_KEY, int(time.time()))
@@ -1322,10 +1484,12 @@ def _enable_dns_malw_link(settings: QSettings | None = None) -> dict:
         qs.setValue(DNS_MALW_LAST_ERROR_KEY, str(result.get("error", "") or ""))
         qs.setValue(DNS_MALW_LAST_UPDATED_KEY, int(result.get("updated", 0) or 0))
         qs.setValue(DNS_MALW_LAST_DOH_KEY, bool(result.get("doh")))
+        _save_dns_malw_group_status(result.get("groups") or {}, qs)
         if result.get("ok"):
             qs.setValue(DNS_MALW_LAST_SUCCESS_KEY, int(time.time()))
             _save_dns_malw_link_snapshot(result.get("snapshot") or [], qs)
             qs.setValue(DNS_MALW_ENABLED_BY_APP_KEY, True)
+            qs.setValue(DNS_MALW_MECHANISM_VERSION_KEY, DNS_MALW_MECHANISM_VERSION)
         qs.sync()
     except Exception:
         pass
@@ -1342,16 +1506,16 @@ def _disable_dns_malw_link(settings: QSettings | None = None) -> dict:
         "applied": 0,
         "updated": 0,
         "method": "hosts",
+        "groups": {},
+        "summary": "none",
     }
     try:
         result["admin"] = bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
         result["admin"] = False
 
-    if not result["admin"]:
-        result["error"] = "not-admin"
-    else:
-        try:
+    result["admin"] = True
+    try:
             try:
                 current_hosts = _read_hosts_file_strict(DNS_MALW_HOSTS_PATH)
             except FileNotFoundError:
@@ -1370,14 +1534,30 @@ def _disable_dns_malw_link(settings: QSettings | None = None) -> dict:
                 restored_hosts = _strip_dns_malw_hosts_block(current_hosts)
                 if _hosts_contains_ai_marker(restored_hosts):
                     raise RuntimeError("no-clean-snapshot")
-            _write_hosts_file(restored_hosts, DNS_MALW_HOSTS_PATH)
+            try:
+                current_hash = hashlib.sha256(Path(DNS_MALW_HOSTS_PATH).read_bytes()).hexdigest()
+            except FileNotFoundError:
+                current_hash = hashlib.sha256(b"").hexdigest()
+            helper = _bundled_path("background_service", "ZapretGUI.Service.exe")
+            core_bin = os.path.join(APP_DIR, "core", "bin")
+            if os.path.isfile(helper) and os.path.isdir(core_bin):
+                try:
+                    reply = _bypass_service.ai_dns_hosts(
+                        restored_hosts, current_hash, "restore", helper, core_bin,
+                    )
+                except Exception as error:
+                    raise RuntimeError(f"ai-dns-service-failed: {error}") from error
+                if not reply.get("ok"):
+                    raise RuntimeError(reply.get("error") or "ai-dns-hosts-restore-failed")
+            else:
+                raise RuntimeError("ai-dns-service-missing")
             _run_hidden(["ipconfig", "/flushdns"])
             _run_hidden(["ipconfig", "/registerdns"])
             result["ok"] = True
             result["applied"] = 1
             result["updated"] = 1
-        except Exception as e:
-            result["error"] = str(e)
+    except Exception as e:
+        result["error"] = str(e)
 
     try:
         qs.setValue(DNS_MALW_LAST_ATTEMPT_KEY, int(time.time()))
@@ -1387,6 +1567,8 @@ def _disable_dns_malw_link(settings: QSettings | None = None) -> dict:
             qs.setValue(DNS_MALW_ENABLED_BY_APP_KEY, False)
             qs.setValue(DNS_MALW_RESTORE_SNAPSHOT_KEY, "")
             qs.setValue(DNS_MALW_LAST_UPDATED_KEY, int(result.get("updated", 0) or 0))
+            qs.setValue(DNS_MALW_GROUP_STATUS_KEY, "")
+            qs.setValue(DNS_MALW_MECHANISM_VERSION_KEY, DNS_MALW_MECHANISM_VERSION)
         qs.sync()
     except Exception:
         pass
@@ -1394,29 +1576,10 @@ def _disable_dns_malw_link(settings: QSettings | None = None) -> dict:
 
 
 def _run_self_as_admin_for_dns_action(action: str) -> bool:
-    try:
-        action = (action or "").strip().lower()
-        if action not in {"enable", "disable"}:
-            return False
-
-        if getattr(sys, "frozen", False):
-            executable = sys.executable
-            params = subprocess.list2cmdline([f"--app-dir={APP_DIR}", f"--dns-malw-link-action={action}"])
-        else:
-            executable = sys.executable
-            params = subprocess.list2cmdline([os.path.abspath(sys.argv[0]), f"--app-dir={APP_DIR}", f"--dns-malw-link-action={action}"])
-
-        res = ctypes.windll.shell32.ShellExecuteW(
-            None,
-            "runas",
-            executable,
-            params,
-            None,
-            0,
-        )
-        return int(res) > 32
-    except Exception:
-        return False
+    # Ai DNS mutations are now performed by ZapretGUI.Service.exe. Retain this
+    # helper only for compatibility with callers; never spawn a second elevated
+    # GUI process and never show a UAC prompt on every toggle.
+    return False
 
 
 def _run_self_as_admin_for_telegram_hosts_action(action: str) -> bool:
@@ -1766,5 +1929,3 @@ def _ensure_dns_malw_link(
         pass
 
     return result
-
-
