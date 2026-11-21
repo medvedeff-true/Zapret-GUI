@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import threading
 import time
@@ -8,15 +9,22 @@ from tg_ws_proxy_vendor.proxy.config import proxy_config, stop_cfproxy_domain_re
 from tg_ws_proxy_vendor.proxy.stats import stats as flowseal_stats
 
 
+log = logging.getLogger(__name__)
+
+
 class TelegramProxyError(RuntimeError):
     pass
 
 
 class TelegramProxyController:
+    STOP_TIMEOUT = 6.0
+    CLEANUP_TIMEOUT = 1.0
+
     def __init__(self) -> None:
         self._thread = None
         self._loop = None
         self._stop_event = None
+        self._stop_requested = threading.Event()
         self._started = threading.Event()
         self._stopped = threading.Event()
         self._lock = threading.RLock()
@@ -46,6 +54,7 @@ class TelegramProxyController:
             self._started_at = 0.0
             self._started.clear()
             self._stopped.clear()
+            self._stop_requested.clear()
             self._thread = threading.Thread(
                 target=self._thread_main,
                 name="ZapretGUI-TelegramMTProtoProxy",
@@ -62,30 +71,35 @@ class TelegramProxyController:
             raise TelegramProxyError(err or "Telegram MTProto proxy stopped during startup")
 
     def stop(self) -> None:
-        loop = self._loop
-        stop_event = self._stop_event
-        if loop is not None and loop.is_running() and stop_event is not None:
+        with self._lock:
+            self._stop_requested.set()
+            loop = self._loop
+            stop_event = self._stop_event
+            thread = self._thread
+        if loop is not None and stop_event is not None:
             try:
                 loop.call_soon_threadsafe(stop_event.set)
-            except Exception:
+            except RuntimeError:
                 pass
 
-        thread = self._thread
         if thread is not None and thread.is_alive():
-            thread.join(timeout=6.0)
+            thread.join(timeout=self.STOP_TIMEOUT)
             if thread.is_alive():
                 raise TelegramProxyError("Telegram MTProto proxy stop timed out")
 
         with self._lock:
-            self._thread = None
-            self._loop = None
-            self._stop_event = None
+            if self._thread is thread:
+                self._thread = None
+                self._loop = None
+                self._stop_event = None
 
     def is_running(self) -> bool:
+        thread = self._thread
         return bool(
-            self._thread is not None
-            and self._thread.is_alive()
+            thread is not None
+            and thread.is_alive()
             and self._started.is_set()
+            and not self._stop_requested.is_set()
             and not self._stopped.is_set()
         )
 
@@ -111,36 +125,49 @@ class TelegramProxyController:
         }
 
     def _thread_main(self) -> None:
-        loop = asyncio.new_event_loop()
-        self._loop = loop
-        asyncio.set_event_loop(loop)
-        self._stop_event = asyncio.Event()
-
+        loop = None
         try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            with self._lock:
+                self._loop = loop
+                self._stop_event = asyncio.Event()
+                if self._stop_requested.is_set():
+                    self._stop_event.set()
             self._configure_flowseal_proxy()
             self._reset_flowseal_stats()
             loop.run_until_complete(self._run_flowseal_proxy())
         except Exception as e:
             self._last_error = str(e)
-            self._started.set()
         finally:
-            stop_cfproxy_domain_refresh()
             try:
-                pending = asyncio.all_tasks(loop)
+                stop_cfproxy_domain_refresh()
+                pending = asyncio.all_tasks(loop) if loop is not None else ()
                 for task in pending:
                     task.cancel()
                 if pending:
-                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                loop.close()
+                    _, remaining = loop.run_until_complete(
+                        asyncio.wait(pending, timeout=self.CLEANUP_TIMEOUT)
+                    )
+                    if remaining:
+                        log.warning("Telegram proxy shutdown left %d cancelled tasks", len(remaining))
             except Exception:
-                pass
+                log.exception("Telegram proxy cleanup failed")
             finally:
-                self._stopped.set()
+                try:
+                    if loop is not None:
+                        loop.close()
+                finally:
+                    self._stopped.set()
+                    self._started.set()
 
     async def _run_flowseal_proxy(self) -> None:
+        if self._stop_event.is_set():
+            return
         task = asyncio.create_task(flowseal_proxy._run(self._stop_event))
+        stop = asyncio.create_task(self._stop_event.wait())
         try:
-            while not task.done():
+            while not task.done() and not self._stop_event.is_set():
                 server = flowseal_proxy._server_instance
                 if server is not None and server.is_serving():
                     self._started_at = time.time()
@@ -148,16 +175,21 @@ class TelegramProxyController:
                     break
                 await asyncio.sleep(0.05)
 
+            done, _ = await asyncio.wait((task, stop), return_when=asyncio.FIRST_COMPLETED)
+            if stop in done and not task.done():
+                # Reserve part of the caller's join budget for cancellation
+                # and final event-loop cleanup if a transport misbehaves.
+                done, _ = await asyncio.wait((task,), timeout=self.STOP_TIMEOUT * 0.5)
+                if not done:
+                    log.warning("Telegram proxy graceful shutdown timed out; cancelling")
+                    return
             await task
-            if not self._started.is_set():
+            if not self._started.is_set() and not self._stop_event.is_set():
                 raise TelegramProxyError("Telegram MTProto proxy did not open its listener")
         finally:
+            stop.cancel()
             if not task.done():
                 task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
 
     def _configure_flowseal_proxy(self) -> None:
         proxy_config.host = self._host

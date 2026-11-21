@@ -406,7 +406,10 @@ def _set_telegram_hosts_enabled_by_app(enabled: bool, settings: QSettings | None
 def _set_telegram_hosts_action_status(ok: bool, error: str = "", settings: QSettings | None = None) -> None:
     try:
         qs = _load_settings_if_needed(settings)
-        qs.setValue(TELEGRAM_MODE_HOSTS_LAST_ATTEMPT_KEY, int(time.time()))
+        # The elevated helper can finish in the same second as the first
+        # attempt; the GUI must still recognize it as a new result.
+        previous = _safe_int_setting(qs, TELEGRAM_MODE_HOSTS_LAST_ATTEMPT_KEY, 0)
+        qs.setValue(TELEGRAM_MODE_HOSTS_LAST_ATTEMPT_KEY, max(time.time_ns() // 1_000_000, previous + 1))
         qs.setValue(TELEGRAM_MODE_HOSTS_LAST_STATUS_KEY, "ok" if ok else "error")
         qs.setValue(TELEGRAM_MODE_HOSTS_LAST_ERROR_KEY, str(error or "").strip())
         qs.sync()

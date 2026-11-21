@@ -19,6 +19,7 @@ from .cf_h2 import bridge_h2
 log = logging.getLogger('tg-mtproto-proxy')
 _st_I_le = struct.Struct('<I')
 
+RELAY_INIT_TIMEOUT = 10.0
 TCP_BACKOFF_INITIAL = 30.0
 TCP_BACKOFF_MAX = 3600.0
 _tcp_failures: Dict[Tuple[str, int], int] = {}
@@ -226,10 +227,9 @@ async def _cfproxy_worker_fallback(reader, writer, relay_init, label,
             return False
 
     stats.connections_cfproxy += 1
-    await ws.send(relay_init)
     await bridge_ws_reencrypt(reader, writer, ws, label, ctx,
                               dc=dc, is_media=is_media,
-                              splitter=None)
+                              splitter=None, relay_init=relay_init)
     return True
 
 
@@ -265,10 +265,9 @@ async def _cfproxy_fallback(reader, writer, relay_init, label,
         log.info("[%s] Switched active CF domain", label)
 
     stats.connections_cfproxy += 1
-    await ws.send(relay_init)
     await bridge_ws_reencrypt(reader, writer, ws, label, ctx,
                                dc=dc, is_media=is_media,
-                               splitter=splitter)
+                               splitter=splitter, relay_init=relay_init)
     return True
 
 
@@ -307,17 +306,14 @@ async def _tcp_fallback(reader, writer, dst, port, relay_init, label, ctx: Crypt
         return True
     finally:
         if rw is not None:
-            rw.close()
-            try:
-                await rw.wait_closed()
-            except (OSError, ConnectionError):
-                pass
+            await close_stream(rw)
 
 
 async def bridge_ws_reencrypt(reader, writer, ws: RawWebSocket, label,
                                ctx: CryptoCtx,
                                dc=None, is_media=False,
-                               splitter: Optional[MsgSplitter] = None):
+                               splitter: Optional[MsgSplitter] = None,
+                               relay_init: Optional[bytes] = None):
     """
     Bidirectional TCP(client) <-> WS(telegram) with re-encryption.
     client ciphertext → decrypt(clt_key) → encrypt(tg_key) → WS
@@ -336,6 +332,8 @@ async def bridge_ws_reencrypt(reader, writer, ws: RawWebSocket, label,
     async def tcp_to_ws():
         nonlocal up_bytes, up_packets, close_reason
         try:
+            if relay_init is not None:
+                await asyncio.wait_for(ws.send(relay_init), RELAY_INIT_TIMEOUT)
             while True:
                 chunk = await reader.read(65536)
                 if not chunk:
@@ -344,7 +342,7 @@ async def bridge_ws_reencrypt(reader, writer, ws: RawWebSocket, label,
                         if tail:
                             if activity is not None:
                                 activity.send_started()
-                            await ws.send(tail[0])
+                            await asyncio.wait_for(ws.send(tail[0]), STREAM_CLOSE_TIMEOUT)
                             if activity is not None:
                                 activity.sent(len(tail[0]))
                     break
@@ -420,29 +418,19 @@ async def bridge_ws_reencrypt(reader, writer, ws: RawWebSocket, label,
     finally:
         for t in tasks:
             t.cancel()
-        for t in tasks:
-            try:
-                await t
-            except BaseException:
-                pass
-        elapsed = asyncio.get_running_loop().time() - start_time
-        if activity is not None:
-            activity.close()
-        log.info("[%s] %s WS session closed (%s): "
-                 "^%s (%d pkts) v%s (%d pkts) in %.1fs",
-                 label, dc_tag, close_reason,
-                 human_bytes(up_bytes), up_packets,
-                 human_bytes(down_bytes), down_packets,
-                 elapsed)
         try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            if activity is not None:
+                activity.close()
+            elapsed = asyncio.get_running_loop().time() - start_time
+            log.info("[%s] %s WS session closed (%s): "
+                     "^%s (%d pkts) v%s (%d pkts) in %.1fs",
+                     label, dc_tag, close_reason,
+                     human_bytes(up_bytes), up_packets,
+                     human_bytes(down_bytes), down_packets,
+                     elapsed)
             await ws.close()
-        except BaseException:
-            pass
-        try:
-            writer.close()
-            await writer.wait_closed()
-        except BaseException:
-            pass
 
 
 async def _bridge_tcp_reencrypt(reader, writer, remote_reader, remote_writer,
@@ -480,14 +468,4 @@ async def _bridge_tcp_reencrypt(reader, writer, remote_reader, remote_writer,
     finally:
         for t in tasks:
             t.cancel()
-        for t in tasks:
-            try:
-                await t
-            except BaseException:
-                pass
-        for w in (writer, remote_writer):
-            try:
-                w.close()
-                await w.wait_closed()
-            except BaseException:
-                pass
+        await asyncio.gather(*tasks, return_exceptions=True)

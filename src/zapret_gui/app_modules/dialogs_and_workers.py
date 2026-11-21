@@ -1621,14 +1621,13 @@ class TelegramModeWorker(QThread):
         self.proxy_controller = proxy_controller
 
     def run(self):
-        settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
+        settings = None
         result = {
             "ok": False,
             "enabled": False,
             "proxy_running": False,
-            "proxy_port": _get_telegram_proxy_port(settings),
-            "proxy_secret": _get_telegram_proxy_secret(settings),
-            "proxy_link": _get_telegram_proxy_link(settings),
+            "proxy_port": 0,
+            "proxy_link": "",
             "hosts_ok": True,
             "hosts_error": "",
             "hosts_permission_error": False,
@@ -1651,65 +1650,60 @@ class TelegramModeWorker(QThread):
             if hosts_error:
                 result["error"] = hosts_error
 
+        def _start_proxy() -> None:
+            if self.proxy_controller is None:
+                raise RuntimeError("Telegram proxy controller is not available")
+            port = _get_telegram_proxy_port(settings)
+            secret = _get_telegram_proxy_secret(settings)
+            self.proxy_controller.start(port, secret)
+            result["proxy_port"] = port
+            result["proxy_running"] = self.proxy_controller.is_running()
+            result["proxy_link"] = self.proxy_controller.proxy_link()
+
         try:
-            if self.action == "enable":
-                _set_telegram_mode_enabled(True, settings)
+            settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
+            if self.action == "enable" or (
+                self.action == "restore" and _is_telegram_mode_enabled(settings)
+            ):
+                # Do not persist enabled or touch hosts if the local proxy
+                # cannot start (for example, if another program owns its port).
+                try:
+                    _start_proxy()
+                except Exception:
+                    _set_telegram_mode_enabled(False, settings)
+                    if self.action == "restore":
+                        _apply_telegram_mode_files(False, settings)
+                        _rebuild_runtime_lists(settings)
+                    raise
+                if self.action == "enable":
+                    _set_telegram_mode_enabled(True, settings)
                 _set_telegram_last_error("", settings)
                 _record_hosts_result(_apply_telegram_mode_files(True, settings))
                 _rebuild_runtime_lists(settings)
-                if self.proxy_controller is None:
-                    raise RuntimeError("Telegram proxy controller is not available")
-                self.proxy_controller.start(result["proxy_port"], result["proxy_secret"])
                 result["enabled"] = True
-                result["proxy_running"] = self.proxy_controller.is_running()
-                result["proxy_link"] = self.proxy_controller.proxy_link()
                 result["ok"] = True
-            elif self.action == "disable":
+            elif self.action in {"disable", "cleanup"}:
                 _set_telegram_mode_enabled(False, settings)
-                if self.proxy_controller is not None:
-                    self.proxy_controller.stop()
-                _record_hosts_result(_apply_telegram_mode_files(False, settings))
-                _rebuild_runtime_lists(settings)
+                try:
+                    if self.proxy_controller is not None:
+                        self.proxy_controller.stop()
+                finally:
+                    # Restore runtime state even if stopping the proxy fails.
+                    _record_hosts_result(_apply_telegram_mode_files(False, settings))
+                    _rebuild_runtime_lists(settings)
                 if result["hosts_ok"]:
                     _set_telegram_last_error("", settings)
-                result["enabled"] = False
-                result["proxy_running"] = False
                 result["ok"] = bool(result["hosts_ok"])
             elif self.action == "restore":
-                if _is_telegram_mode_enabled(settings):
-                    _record_hosts_result(_apply_telegram_mode_files(True, settings))
-                    _rebuild_runtime_lists(settings)
-                    if self.proxy_controller is None:
-                        raise RuntimeError("Telegram proxy controller is not available")
-                    self.proxy_controller.start(result["proxy_port"], result["proxy_secret"])
-                    result["enabled"] = True
-                    result["proxy_running"] = self.proxy_controller.is_running()
-                    result["proxy_link"] = self.proxy_controller.proxy_link()
-                else:
-                    _record_hosts_result(True)
-                    _rebuild_runtime_lists(settings)
-                    result["enabled"] = False
-                    result["proxy_running"] = False
-                if result["hosts_ok"]:
-                    _set_telegram_last_error("", settings)
-                result["ok"] = True
-            elif self.action == "cleanup":
-                _set_telegram_mode_enabled(False, settings)
-                if self.proxy_controller is not None:
-                    self.proxy_controller.stop()
-                _record_hosts_result(_apply_telegram_mode_files(False, settings))
                 _rebuild_runtime_lists(settings)
-                if result["hosts_ok"]:
-                    _set_telegram_last_error("", settings)
-                result["enabled"] = False
-                result["proxy_running"] = False
                 result["ok"] = True
             else:
                 raise RuntimeError("Unknown Telegram Mode action")
         except Exception as e:
-            result["error"] = str(e)
-            result["hosts_permission_error"] = _is_hosts_permission_error_message(result["error"])
-            result["enabled"] = _is_telegram_mode_enabled(settings)
+            result["error"] = str(e) or type(e).__name__
+            if settings is not None:
+                result["enabled"] = _is_telegram_mode_enabled(settings)
+                _set_telegram_last_error(result["error"], settings)
             try:
                 result["proxy_running"] = bool(
                     self.proxy_controller is not None and self.proxy_controller.is_running()
@@ -1718,6 +1712,5 @@ class TelegramModeWorker(QThread):
                     result["proxy_link"] = self.proxy_controller.proxy_link()
             except Exception:
                 result["proxy_running"] = False
-            _set_telegram_last_error(result["error"], settings)
-
-        self.finished_telegram.emit(self.action, result)
+        finally:
+            self.finished_telegram.emit(self.action, result)

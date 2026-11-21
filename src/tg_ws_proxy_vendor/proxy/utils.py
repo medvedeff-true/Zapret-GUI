@@ -1,3 +1,4 @@
+import asyncio
 import socket as _socket
 import urllib.request
 import http.client
@@ -11,6 +12,21 @@ import certifi
 
 from typing import Optional, Dict, List
 from urllib.request import Request
+
+
+STREAM_CLOSE_TIMEOUT = 1.0
+
+
+async def close_stream(writer, timeout: float = STREAM_CLOSE_TIMEOUT) -> None:
+    """Bound stream shutdown even if the peer never finishes closing."""
+    writer.close()
+    try:
+        await asyncio.wait_for(writer.wait_closed(), timeout)
+    except (OSError, asyncio.TimeoutError):
+        writer.transport.abort()
+    except asyncio.CancelledError:
+        writer.transport.abort()
+        raise
 
 
 ZERO_64 = b'\x00' * 64

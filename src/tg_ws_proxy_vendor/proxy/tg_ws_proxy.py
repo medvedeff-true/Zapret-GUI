@@ -10,6 +10,7 @@ import hashlib
 import argparse
 import logging
 import socket as _socket
+from contextlib import suppress
 
 from typing import Optional, Set, Tuple
 
@@ -343,11 +344,9 @@ async def _handle_client(reader, writer, secret: bytes):
         except Exception:
             pass
 
-        await ws.send(relay_init)
-
         await bridge_ws_reencrypt(clt_reader, clt_writer, ws, label, ctx,
                                    dc=dc, is_media=is_media,
-                                   splitter=splitter)
+                                   splitter=splitter, relay_init=relay_init)
 
     except asyncio.TimeoutError:
         log.warning("[%s] timeout during handshake", label)
@@ -365,12 +364,10 @@ async def _handle_client(reader, writer, secret: bytes):
     except Exception as exc:
         log.error("[%s] unexpected: %s", label, exc, exc_info=True)
     finally:
-        stats.connections_active -= 1
         try:
-            writer.close()
-            await writer.wait_closed()
-        except BaseException:
-            pass
+            await close_stream(writer)
+        finally:
+            stats.connections_active -= 1
 
 
 _server_instance = None
@@ -397,6 +394,7 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
 
     secret_bytes = bytes.fromhex(proxy_config.secret)
     stopping = False
+    client_writers = {}
 
     # Probe before listening so a domain that resolves to this proxy fails
     # fast instead of answering itself
@@ -413,13 +411,28 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
 
     def client_cb(r, w):
         if stopping:
-            w.close()
+            w.transport.abort()
             return
         task = asyncio.create_task(_handle_client(r, w, secret_bytes))
         _client_tasks.add(task)
-        task.add_done_callback(_client_tasks.discard)
+        client_writers[task] = w
 
-    server = await asyncio.start_server(client_cb, proxy_config.host, proxy_config.port)
+        def client_done(completed):
+            _client_tasks.discard(completed)
+            client_writers.pop(completed, None)
+            w.close()
+            if not completed.cancelled():
+                error = completed.exception()
+                if error:
+                    log.error("Client task failed: %r", error)
+
+        task.add_done_callback(client_done)
+
+    try:
+        server = await asyncio.start_server(client_cb, proxy_config.host, proxy_config.port)
+    except BaseException:
+        _server_stop_event = cf_h2_pool = None
+        raise
     _server_instance = server
 
     for sock in server.sockets:
@@ -493,20 +506,30 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
 
     log_stats_task = asyncio.create_task(log_stats())
 
-    await ws_pool.warmup()
-    await cf_worker_pool.warmup()
-
-    async def _quiet_cancel(t):
-        if not t.done():
-            t.cancel()
-        try:
-            await t
-        except (asyncio.CancelledError, Exception):
-            pass
+    async def close_listener():
+        # On Python 3.13 wait_closed() waits for client transports too.
+        # Abort them first, including clients cancelled before their handler ran.
+        server.close()
+        clients = tuple(client_writers.items())
+        for task, writer in clients:
+            writer.transport.abort()
+            task.cancel()
+        tasks = [t for t in (serve_task, watchdog_task, stop_task) if t is not None]
+        for task in tasks:
+            task.cancel()
+        tasks.extend(task for task, _ in clients)
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=2 * STREAM_CLOSE_TIMEOUT)
+            for task in pending:
+                task.cancel()
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(server.wait_closed(), STREAM_CLOSE_TIMEOUT)
 
     serve_task = stop_task = watchdog_task = None
     try:
-        while True:
+        await ws_pool.warmup()
+        await cf_worker_pool.warmup()
+        while stop_event is None or not stop_event.is_set():
             serve_task = asyncio.create_task(server.serve_forever())
             stop_task = (asyncio.create_task(stop_event.wait())
                          if stop_event else None)
@@ -529,24 +552,25 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
             if stop_task is not None and stop_task in done:
                 break
 
-            await _quiet_cancel(watchdog_task)
-            await _quiet_cancel(serve_task)
-            if stop_task is not None:
-                await _quiet_cancel(stop_task)
             log.warning(
                 "Listening socket died, restarting server")
-            server.close()
-            try:
-                await server.wait_closed()
-            except Exception:
-                pass
-            await asyncio.sleep(LISTENER_RESTART_DELAY)
+            stopping = True
+            await close_listener()
+            if stop_event is None:
+                await asyncio.sleep(LISTENER_RESTART_DELAY)
+            else:
+                try:
+                    await asyncio.wait_for(stop_event.wait(), LISTENER_RESTART_DELAY)
+                    break
+                except asyncio.TimeoutError:
+                    pass
             try:
                 server = await asyncio.start_server(
                     client_cb, proxy_config.host, proxy_config.port)
             except OSError as exc:
                 log.error("Failed to restart server: %s", repr(exc))
-                break
+                raise
+            stopping = False
             _server_instance = server
             for sock in server.sockets:
                 try:
@@ -558,32 +582,17 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
                         proxy_config.host, proxy_config.port)
     finally:
         stopping = True
-        server.close()
-        clients = list(_client_tasks)
-        for task in clients:
-            task.cancel()
-        await asyncio.gather(*clients, return_exceptions=True)
-        for task in (serve_task, watchdog_task, stop_task):
-            if task is not None:
-                await _quiet_cancel(task)
-        await server.wait_closed()
-        await ws_pool.close()
-        await cf_worker_pool.close()
-        if cf_h2_pool is not None:
-            await cf_h2_pool.close()
-            cf_h2_pool = None
-        _server_instance = _server_stop_event = None
         log_stats_task.cancel()
         try:
-            await log_stats_task
-        except asyncio.CancelledError:
-            pass
-        try:
-            server.close()
-            await server.wait_closed()
-        except Exception:
-            pass
-    _server_instance = None
+            await close_listener()
+        finally:
+            try:
+                closing = [ws_pool.close(), cf_worker_pool.close(), log_stats_task]
+                if cf_h2_pool is not None:
+                    closing.append(cf_h2_pool.close())
+                await asyncio.gather(*closing, return_exceptions=True)
+            finally:
+                _server_instance = _server_stop_event = cf_h2_pool = None
 
 
 def run_proxy(stop_event: Optional[asyncio.Event] = None):

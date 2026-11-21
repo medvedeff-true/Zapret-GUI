@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -12,6 +13,91 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtCore import QSettings
 
 import EzUnBlock as app
+
+
+class TelegramModeLifecycleTests(unittest.TestCase):
+    def _run_worker(self, action, controller, filename):
+        results = []
+        worker = app.TelegramModeWorker(action, controller)
+        worker.finished_telegram.connect(lambda action, result: results.append(result))
+        with mock.patch.object(app, "SETTINGS_FILE", str(filename)):
+            worker.run()
+        self.assertEqual(len(results), 1)
+        return results[0]
+
+    def test_failed_proxy_start_does_not_enable_mode_or_touch_hosts(self):
+        with tempfile.TemporaryDirectory() as root:
+            filename = Path(root) / "settings.ini"
+            controller = mock.Mock()
+            controller.start.side_effect = RuntimeError("port occupied")
+            controller.is_running.return_value = False
+            with mock.patch.object(app, "_apply_telegram_mode_files") as hosts:
+                result = self._run_worker("enable", controller, filename)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "port occupied")
+            self.assertFalse(app._is_telegram_mode_enabled(QSettings(str(filename), QSettings.Format.IniFormat)))
+            hosts.assert_not_called()
+
+    def test_disable_restores_hosts_and_lists_even_when_proxy_stop_fails(self):
+        with tempfile.TemporaryDirectory() as root:
+            filename = Path(root) / "settings.ini"
+            settings = QSettings(str(filename), QSettings.Format.IniFormat)
+            app._set_telegram_mode_enabled(True, settings)
+            controller = mock.Mock()
+            controller.stop.side_effect = RuntimeError("stop timed out")
+            controller.is_running.return_value = False
+            with (
+                mock.patch.object(app, "_apply_telegram_mode_files", return_value=True) as hosts,
+                mock.patch.object(app, "_rebuild_runtime_lists") as rebuild,
+            ):
+                result = self._run_worker("disable", controller, filename)
+            self.assertEqual(result["error"], "stop timed out")
+            self.assertFalse(result["enabled"])
+            self.assertTrue(result["hosts_ok"])
+            self.assertFalse(app._is_telegram_mode_enabled(settings))
+            self.assertFalse(hosts.call_args.args[0])
+            hosts.assert_called_once()
+            rebuild.assert_called_once()
+
+    def test_fast_elevated_hosts_result_is_not_missed(self):
+        with tempfile.TemporaryDirectory() as root:
+            settings = QSettings(str(Path(root) / "settings.ini"), QSettings.Format.IniFormat)
+            app._set_telegram_hosts_action_status(False, "access denied", settings)
+            baseline = app._safe_int_setting(settings, app.TELEGRAM_MODE_HOSTS_LAST_ATTEMPT_KEY)
+            window = SimpleNamespace(
+                settings=settings,
+                _telegram_mode_hosts_poll_anchor=0,
+                _start_telegram_hosts_poll=mock.Mock(),
+                _set_telegram_mode_busy=mock.Mock(),
+                _update_telegram_mode_ui=mock.Mock(),
+                _resume_pending_toggle_if_ready=mock.Mock(),
+            )
+
+            def run_helper(_action):
+                app._set_telegram_hosts_action_status(True, "", settings)
+                return True
+
+            with mock.patch.object(app, "_run_self_as_admin_for_telegram_hosts_action", side_effect=run_helper):
+                app.MainWindow._on_telegram_mode_worker_finished(
+                    window, "disable", {"hosts_permission_error": True, "error": "access denied"}
+                )
+            self.assertEqual(window._telegram_mode_hosts_poll_anchor, baseline)
+            self.assertGreater(app._safe_int_setting(settings, app.TELEGRAM_MODE_HOSTS_LAST_ATTEMPT_KEY), baseline)
+            window._start_telegram_hosts_poll.assert_called_once_with("disable", expected_enabled=False)
+
+    def test_autoconnect_does_not_reopen_closed_telegram(self):
+        window = SimpleNamespace(
+            settings=object(),
+            _telegram_proxy_autoconnect_generation=1,
+            _telegram_proxy_has_client_connection=mock.Mock(return_value=False),
+            _send_telegram_proxy_link_if_still_needed=mock.Mock(),
+        )
+        with (
+            mock.patch.object(app, "_is_telegram_mode_enabled", return_value=True),
+            mock.patch.object(app, "_telegram_desktop_process_is_running", return_value=False),
+        ):
+            app.MainWindow._wait_for_telegram_proxy_connection_before_link(window, 1, 0)
+        window._send_telegram_proxy_link_if_still_needed.assert_not_called()
 
 
 class AiDnsBundleTests(unittest.TestCase):

@@ -7,7 +7,7 @@ import socket as _socket
 
 from typing import List, Optional, Tuple
 from .config import proxy_config
-from .utils import create_ssl_context
+from .utils import STREAM_CLOSE_TIMEOUT, close_stream, create_ssl_context
 
 log = logging.getLogger('tg-mtproto-proxy')
 
@@ -161,7 +161,7 @@ class RawWebSocket:
             raise WsHandshakeError(status_code, first_line, headers,
                                     location=headers.get('location'))
         except BaseException:
-            writer.close()
+            writer.transport.abort()
             raise
 
     async def send(self, data: bytes):
@@ -192,7 +192,9 @@ class RawWebSocket:
                     self.writer.write(self._build_frame(
                         self.OP_CLOSE,
                         payload[:2] if payload else b'', mask=True))
-                    await self.writer.drain()
+                    await asyncio.wait_for(self.writer.drain(), STREAM_CLOSE_TIMEOUT)
+                except (OSError, asyncio.TimeoutError):
+                    self.writer.transport.abort()
                 except Exception:
                     pass
                 return None
@@ -225,21 +227,20 @@ class RawWebSocket:
         return None
 
     async def close(self):
+        send_close = not self._closed
+        self._closed = True
         try:
-            if not self._closed:
-                self._closed = True
-                try:
-                    self.writer.write(
-                        self._build_frame(self.OP_CLOSE, b'', mask=True))
-                    await self.writer.drain()
-                except Exception:
-                    pass
-        finally:
-            try:
-                self.writer.close()
-                await self.writer.wait_closed()
-            except Exception:
-                pass
+            if send_close and not self.writer.is_closing():
+                self.writer.write(
+                    self._build_frame(self.OP_CLOSE, b'', mask=True))
+                await asyncio.wait_for(self.writer.drain(), STREAM_CLOSE_TIMEOUT)
+        except (OSError, asyncio.TimeoutError):
+            self.writer.transport.abort()
+            return
+        except asyncio.CancelledError:
+            self.writer.transport.abort()
+            raise
+        await close_stream(self.writer, STREAM_CLOSE_TIMEOUT)
 
     _WS_CLOSE_REASONS = {
         1000: 'normal', 1001: 'going_away', 1002: 'protocol_error',
