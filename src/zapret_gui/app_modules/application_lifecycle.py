@@ -293,7 +293,11 @@ def main():
 
     if telegram_hosts_cli_action in {"enable", "disable"}:
         settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
-        _apply_flowseal_telegram_hosts(telegram_hosts_cli_action == "enable", settings)
+        request_id = next(
+            (arg.split("=", 1)[1] for arg in sys.argv[1:] if arg.startswith("--telegram-mode-request=")),
+            "",
+        )
+        _apply_telegram_hosts_helper(telegram_hosts_cli_action, request_id, settings)
         return
 
     if sys.platform.startswith("win"):

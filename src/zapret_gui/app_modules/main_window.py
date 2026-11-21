@@ -289,13 +289,16 @@ class MainWindow(QWidget):
         self._telegram_help_msg = None
         self.game_mode_enabled = _is_game_mode_enabled(self.settings)
         self.telegram_mode_enabled = _is_telegram_mode_enabled(self.settings)
+        self._telegram_hosts_cleanup_pending = False
         self._telegram_mode_busy = False
         self._telegram_mode_worker = None
+        self._telegram_mode_workers = set()
+        self._telegram_mode_worker_watchdog = None
+        self._telegram_mode_proxy_ready = False
+        self._telegram_mode_request_id = ""
         self._telegram_mode_hosts_poll_timer = None
         self._telegram_mode_hosts_poll_attempts = 0
-        self._telegram_mode_hosts_poll_anchor = 0
-        self._telegram_mode_hosts_expected_enabled = False
-        self._telegram_mode_hosts_pending_action = ""
+        self._telegram_hosts_wait_error = ""
         self._telegram_proxy_autoconnect_generation = 0
         self._telegram_help_proxy_link_sent_this_session = False
         self.telegram_proxy = TelegramProxyController()
@@ -869,9 +872,16 @@ class MainWindow(QWidget):
 
         telegram_busy = bool(getattr(self, "_telegram_mode_busy", False))
         telegram_active = bool(getattr(self, "telegram_mode_enabled", False))
+        telegram_web_retry = (
+            telegram_active and getattr(self, "_telegram_mode_worker", None) is None
+            and not getattr(self, "_telegram_mode_request_id", "")
+            and bool(self.settings.value(TELEGRAM_MODE_LAST_ERROR_KEY, ""))
+        )
         if self.action_telegram_enable is not None and self.action_telegram_disable is not None:
-            self.action_telegram_enable.setEnabled((not telegram_busy) and (not telegram_active))
-            self.action_telegram_disable.setEnabled((not telegram_busy) and telegram_active)
+            self.action_telegram_enable.setEnabled(not telegram_busy and (not telegram_active or telegram_web_retry))
+            self.action_telegram_disable.setEnabled(
+                (not telegram_busy) and (telegram_active or getattr(self, "_telegram_hosts_cleanup_pending", False))
+            )
 
         game_active = bool(getattr(self, "game_mode_enabled", False))
         if self.action_game_mode_enable is not None and self.action_game_mode_disable is not None:
@@ -906,9 +916,13 @@ class MainWindow(QWidget):
         self.on_ai_mode_clicked(bool(enabled))
 
     def set_telegram_mode_from_tray(self, enabled: bool) -> None:
-        if bool(getattr(self, "_telegram_mode_busy", False)):
+        if self._exiting or self._telegram_mode_busy:
             return
-        if bool(getattr(self, "telegram_mode_enabled", False)) == bool(enabled):
+        if (
+            self.telegram_mode_enabled == bool(enabled)
+            and (enabled or not self._telegram_hosts_cleanup_pending)
+            and not (enabled and self.settings.value(TELEGRAM_MODE_LAST_ERROR_KEY, ""))
+        ):
             self.update_tray_status()
             return
         self._start_telegram_mode_worker("enable" if enabled else "disable")
@@ -1166,6 +1180,8 @@ class MainWindow(QWidget):
         except Exception:
             pass
 
+        if getattr(self, "_exiting", False):
+            return
         _ensure_user_lists_initialized()
         _rebuild_runtime_lists(self.settings)
 
@@ -1976,9 +1992,23 @@ class MainWindow(QWidget):
             return
         self._exiting = True
         APP_SHUTTING_DOWN.set()
+        if not getattr(self, "_gui_update_shutdown", False):
+            # Native I/O, UAC, or a worker may not honor interruption. Never
+            # leave our hidden GUI (and its proxy sockets) alive indefinitely.
+            watchdog = threading.Timer(7.0, os._exit, args=(0,))
+            watchdog.daemon = True
+            watchdog.start()
+        self.hide()
+        if getattr(self, "tray", None) is not None:
+            self.tray.hide()
+        proxy = getattr(self, "telegram_proxy", None)
+        if proxy is not None:
+            self._telegram_proxy_autoconnect_generation += 1
+            self._cancel_telegram_mode_request()
+            proxy.request_stop()
 
         self._shutdown_pending_workers = []
-        for worker_name in (
+        workers = [getattr(self, name, None) for name in (
             "_adaptive_worker",
             "_auto_worker",
             "_bypass_toggle_worker",
@@ -1987,10 +2017,14 @@ class MainWindow(QWidget):
             "_game_mode_restart_worker",
             "_gui_update_worker",
             "_lists_worker",
-            "_telegram_mode_worker",
-        ):
-            worker = getattr(self, worker_name, None)
-            if worker is None or not worker.isRunning():
+        )]
+        workers.extend(getattr(self, "_telegram_mode_workers", ()))
+        for worker in workers:
+            try:
+                running = worker is not None and worker.isRunning()
+            except RuntimeError:
+                running = False
+            if not running:
                 continue
             self._shutdown_pending_workers.append(worker)
             try:
@@ -2002,19 +2036,13 @@ class MainWindow(QWidget):
             except Exception:
                 pass
 
-        self.hide()
         if getattr(self, "_system_shutdown_requested", False):
             # Windows is ending the session: never wait for network/UAC/worker
             # operations and never show a dialog. Process exit closes the
             # named-pipe handle; the service owns winws in a kill-on-close job
             # and its owner watcher also terminates it independently.
             try:
-                _bypass_service.close()
-            except Exception:
-                pass
-            try:
-                if self.tray is not None:
-                    self.tray.hide()
+                _bypass_service.close(timeout=0)
             except Exception:
                 pass
             QApplication.instance().quit()
@@ -2069,13 +2097,12 @@ class MainWindow(QWidget):
                     return
                 QTimer.singleShot(100, self._finish_shutdown_when_idle)
                 return
-        stop_error = ""
-        try:
-            _force_stop_blockers(self.core_dir)
-        except Exception as error:
-            stop_error = str(error)
-
         if getattr(self, "_gui_update_shutdown", False):
+            stop_error = ""
+            try:
+                _force_stop_blockers(self.core_dir)
+            except Exception as error:
+                stop_error = str(error)
             try:
                 winws_still_running = _is_winws_running_silent()
             except Exception:
@@ -2119,8 +2146,10 @@ class MainWindow(QWidget):
 
         if getattr(self, "_gui_update_shutdown", False):
             _bypass_service.disconnect()
-        else:
-            _bypass_service.close()
+        elif _bypass_service.close(timeout=1.0) is False:
+            # Don't run Qt/Python destructors against a thread still in IPC.
+            # The shutdown watchdog now owns final process termination.
+            return
 
         if getattr(self, "_gui_update_shutdown", False):
             updater_args = list(getattr(self, "_pending_gui_updater_args", []) or [])
@@ -3714,6 +3743,12 @@ class MainWindow(QWidget):
                 if self.lang == "ru" else
                 f"Telegram Mode error: {last_error}"
             )
+        elif not active and self._telegram_hosts_cleanup_pending:
+            tooltip = (
+                "Telegram Mode выключен. Остались записи hosts: Telegram Mode → Выключить в трее."
+                if self.lang == "ru" else
+                "Telegram Mode is off. To remove leftover hosts entries, select Telegram Mode → Disable in the tray."
+            )
         elif active:
             tooltip = (
                 "Telegram Mode включён: Web через hosts, Desktop через MTProto proxy"
@@ -3730,67 +3765,126 @@ class MainWindow(QWidget):
         self.update_tray_status()
 
     def restore_telegram_mode_if_enabled(self) -> None:
-        if self._telegram_mode_busy:
+        if self._exiting or self._telegram_mode_busy or self._telegram_mode_worker is not None:
             return
         self.telegram_mode_enabled = _is_telegram_mode_enabled(self.settings)
-        _sync_telegram_runtime_lists(self.settings)
+        # hosts survives deletion of the app directory. A leftover Web mapping
+        # does not turn on Telegram Mode and must not run a privileged
+        # operation or lock the control at startup.
+        self._telegram_hosts_cleanup_pending = (
+            not self.telegram_mode_enabled and _is_telegram_hosts_enabled_by_app(self.settings)
+        )
         self._update_telegram_mode_ui()
         if self.telegram_mode_enabled:
             self._start_telegram_mode_worker("restore")
-        elif _is_telegram_hosts_enabled_by_app(self.settings):
-            self._start_telegram_mode_worker("cleanup")
 
     def _start_telegram_mode_worker(self, action: str) -> None:
-        if self._telegram_mode_worker is not None or self._telegram_mode_busy:
+        import psutil
+
+        if self._exiting or self._telegram_mode_busy:
             return
-        if action in {"disable", "cleanup"}:
+        self._cancel_telegram_mode_request()
+        if action == "disable":
             self._telegram_proxy_autoconnect_generation += 1
-        self._set_telegram_mode_busy(True)
-        worker = TelegramModeWorker(action, self.telegram_proxy, self)
+        self._telegram_mode_proxy_ready = False
+        self._telegram_mode_request_id = f"{os.getpid()}:{psutil.Process().create_time()}:{os.urandom(16).hex()}"
+        self.settings.setValue(TELEGRAM_MODE_REQUEST_KEY, self._telegram_mode_request_id)
+        self.settings.sync()
+        worker = TelegramModeWorker(
+            action, self.telegram_proxy, self, request_id=self._telegram_mode_request_id,
+        )
         self._telegram_mode_worker = worker
+        self._telegram_mode_workers.add(worker)
+        worker.proxy_ready.connect(self._on_telegram_mode_proxy_ready)
         worker.finished_telegram.connect(self._on_telegram_mode_worker_finished)
+        worker.finished.connect(self._forget_telegram_mode_worker)
         worker.finished.connect(worker.deleteLater)
+        if self._telegram_mode_worker_watchdog is None:
+            self._telegram_mode_worker_watchdog = QTimer(self)
+            self._telegram_mode_worker_watchdog.setSingleShot(True)
+            self._telegram_mode_worker_watchdog.timeout.connect(self._on_telegram_mode_worker_timeout)
+        self._telegram_mode_worker_watchdog.start(16000)
+        self._set_telegram_mode_busy(action != "restore")
         worker.start()
 
-    def _on_telegram_mode_worker_finished(self, action: str, result: dict) -> None:
-        self._telegram_mode_worker = None
+    def _forget_telegram_mode_worker(self) -> None:
+        self._telegram_mode_workers.discard(self.sender())
 
+    def _cancel_telegram_mode_request(self) -> None:
+        worker = self._telegram_mode_worker
+        self._telegram_mode_worker = None
+        if worker is not None:
+            worker.requestInterruption()
+        if self._telegram_mode_worker_watchdog is not None:
+            self._telegram_mode_worker_watchdog.stop()
+        if self._telegram_mode_hosts_poll_timer is not None:
+            self._telegram_mode_hosts_poll_timer.stop()
+        if self._telegram_mode_request_id:
+            self._telegram_mode_request_id = ""
+            self.settings.remove(TELEGRAM_MODE_REQUEST_KEY)
+            self.settings.remove(TELEGRAM_MODE_HELPER_RESULT_KEY)
+            self.settings.sync()
+
+    def _on_telegram_mode_proxy_ready(self, action: str, port: int) -> None:
+        if self._exiting or self.sender() is not self._telegram_mode_worker:
+            return
+        self._telegram_mode_proxy_ready = True
+        self.telegram_mode_enabled = bool(port)
+        self._telegram_mode_worker_watchdog.start(30000)
+        self._set_telegram_mode_busy(False)
+        if action == "enable" and port:
+            self._handle_telegram_proxy_ready_after_enable(port)
+        self._resume_pending_toggle_if_ready()
+
+    def _on_telegram_mode_worker_timeout(self) -> None:
+        if self._exiting or self._telegram_mode_worker is None:
+            return
+
+        waiting_for_proxy = not self._telegram_mode_proxy_ready
+        self._cancel_telegram_mode_request()
+        self.telegram_mode_enabled = self.telegram_proxy.is_running() and not waiting_for_proxy
+        if waiting_for_proxy:
+            self.telegram_proxy.request_stop()
+            _set_telegram_mode_enabled(False, self.settings)
+        self._telegram_hosts_cleanup_pending = (
+            not self.telegram_mode_enabled and _is_telegram_hosts_enabled_by_app(self.settings)
+        )
+        _startup_log.warning("Telegram Mode timed out waiting for %s", "local proxy" if waiting_for_proxy else "Web setup")
+        _set_telegram_last_error(
+            (
+                "Локальный прокси не ответил вовремя. Повторите попытку."
+                if waiting_for_proxy else "Telegram Web: операция не ответила вовремя."
+            ) if self.lang == "ru" else (
+                "The local proxy timed out. Try again."
+                if waiting_for_proxy else "Telegram Web setup timed out."
+            ),
+            self.settings,
+        )
+        self._set_telegram_mode_busy(False)
+        self._resume_pending_toggle_if_ready()
+
+    def _on_telegram_mode_worker_finished(self, action: str, result: dict) -> None:
+        if self._exiting or self.sender() is not self._telegram_mode_worker:
+            return
+        if self._telegram_mode_worker_watchdog is not None:
+            self._telegram_mode_worker_watchdog.stop()
+        self._telegram_mode_worker = None
         self.settings.sync()
         self.telegram_mode_enabled = _is_telegram_mode_enabled(self.settings)
+        self._telegram_hosts_cleanup_pending = (
+            not self.telegram_mode_enabled and _is_telegram_hosts_enabled_by_app(self.settings)
+        )
 
         error = str(result.get("error") or "").strip()
-        hosts_permission_error = bool(result.get("hosts_permission_error"))
-        launched_hosts_helper = False
-        if hosts_permission_error and action in {"enable", "disable"}:
-            self._telegram_mode_hosts_poll_anchor = _safe_int_setting(
-                self.settings, TELEGRAM_MODE_HOSTS_LAST_ATTEMPT_KEY, 0
-            )
-            launched_hosts_helper = _run_self_as_admin_for_telegram_hosts_action(action)
-            if launched_hosts_helper:
-                self._start_telegram_hosts_poll(action, expected_enabled=(action == "enable"))
-
-        if not launched_hosts_helper:
-            self._set_telegram_mode_busy(False)
-
-        should_show_error = bool(error) and action in {"enable", "disable"} and not launched_hosts_helper
-        if should_show_error:
-            title = "Telegram Mode"
-            text = (
-                f"Не удалось применить Telegram Mode:\n{error}"
-                if self.lang == "ru" else
-                f"Failed to apply Telegram Mode:\n{error}"
-            )
-            _show_centered_message(self, QMessageBox.Icon.Warning, title, text)
-
-        if (
-            not launched_hosts_helper and result.get("ok") and result.get("hosts_ok")
-            and action == "enable" and result.get("proxy_running")
-        ):
-            self._handle_telegram_proxy_ready_after_enable(int(result.get("proxy_port") or _get_telegram_proxy_port(self.settings)))
-
-        self._update_telegram_mode_ui()
-        if not launched_hosts_helper:
-            self._resume_pending_toggle_if_ready()
+        if result.get("hosts_helper_launched"):
+            self._telegram_hosts_wait_error = error
+            self._start_telegram_hosts_poll()
+        else:
+            self._cancel_telegram_mode_request()
+        if error:
+            _startup_log.warning("Telegram Mode action=%s: %s", action, error)
+        self._set_telegram_mode_busy(False)
+        self._resume_pending_toggle_if_ready()
 
     def _telegram_proxy_has_client_connection(self) -> bool:
         try:
@@ -3879,57 +3973,38 @@ class MainWindow(QWidget):
 
         self._open_telegram_proxy_link()
 
-    def _start_telegram_hosts_poll(self, action: str, expected_enabled: bool) -> None:
+    def _start_telegram_hosts_poll(self) -> None:
         if self._telegram_mode_hosts_poll_timer is None:
             self._telegram_mode_hosts_poll_timer = QTimer(self)
             self._telegram_mode_hosts_poll_timer.setInterval(900)
             self._telegram_mode_hosts_poll_timer.timeout.connect(self._poll_telegram_hosts_status)
-        self._telegram_mode_hosts_pending_action = (action or "").strip().lower()
-        self._telegram_mode_hosts_expected_enabled = bool(expected_enabled)
         self._telegram_mode_hosts_poll_attempts = 30
-        self._set_telegram_mode_busy(True)
         self._telegram_mode_hosts_poll_timer.start()
 
     def _poll_telegram_hosts_status(self) -> None:
-        self.settings.sync()
-        last_attempt = _safe_int_setting(self.settings, TELEGRAM_MODE_HOSTS_LAST_ATTEMPT_KEY, 0)
-        last_status = str(self.settings.value(TELEGRAM_MODE_HOSTS_LAST_STATUS_KEY, "") or "").strip().lower()
-        last_error = str(self.settings.value(TELEGRAM_MODE_HOSTS_LAST_ERROR_KEY, "") or "").strip()
-        self._telegram_mode_hosts_poll_attempts -= 1
-
-        if last_attempt <= self._telegram_mode_hosts_poll_anchor and self._telegram_mode_hosts_poll_attempts > 0:
+        if self._exiting or not self._telegram_mode_request_id:
             return
+        self.settings.sync()
+        try:
+            request_id, ok, error = json.loads(self.settings.value(TELEGRAM_MODE_HELPER_RESULT_KEY, "[]"))
+        except (ValueError, TypeError):
+            request_id, ok, error = "", False, ""
+        self._telegram_mode_hosts_poll_attempts -= 1
+        if request_id != self._telegram_mode_request_id:
+            if self._telegram_mode_hosts_poll_attempts > 0:
+                return
+            ok = False
+            error = "Telegram Web: hosts update timed out"
 
-        if self._telegram_mode_hosts_poll_timer is not None:
-            self._telegram_mode_hosts_poll_timer.stop()
-
-        action = self._telegram_mode_hosts_pending_action
-        expected_enabled = bool(self._telegram_mode_hosts_expected_enabled)
-        hosts_enabled = _is_telegram_hosts_enabled_by_app(self.settings)
-        timed_out = self._telegram_mode_hosts_poll_attempts <= 0 and last_attempt <= self._telegram_mode_hosts_poll_anchor
-        ok = bool(not timed_out and last_status == "ok" and hosts_enabled == expected_enabled)
-
-        self.telegram_mode_enabled = _is_telegram_mode_enabled(self.settings)
-        self._telegram_mode_hosts_pending_action = ""
-
-        if ok:
+        self._cancel_telegram_mode_request()
+        self._telegram_hosts_cleanup_pending = (
+            not self.telegram_mode_enabled and _is_telegram_hosts_enabled_by_app(self.settings)
+        )
+        if not ok:
+            _set_telegram_last_error(error or "Telegram Web: hosts update failed", self.settings)
+        elif str(self.settings.value(TELEGRAM_MODE_LAST_ERROR_KEY, "") or "") == self._telegram_hosts_wait_error:
             _set_telegram_last_error("", self.settings)
-            self._set_telegram_mode_busy(False)
-            if action == "enable" and self.telegram_proxy.is_running():
-                self._handle_telegram_proxy_ready_after_enable(_get_telegram_proxy_port(self.settings))
-        else:
-            error = "timeout" if timed_out else (last_error or "status-check-failed")
-            _set_telegram_last_error(error, self.settings)
-            self._set_telegram_mode_busy(False)
-            if action in {"enable", "disable"}:
-                text = (
-                    f"Не удалось изменить hosts для Telegram Mode:\n{error}"
-                    if self.lang == "ru" else
-                    f"Failed to update hosts for Telegram Mode:\n{error}"
-                )
-                _show_centered_message(self, QMessageBox.Icon.Warning, "Telegram Mode", text)
-
-        self._resume_pending_toggle_if_ready()
+        self._update_telegram_mode_ui()
 
     def show_telegram_mode_help(self) -> None:
         port = _get_telegram_proxy_port(self.settings)
@@ -3996,7 +4071,7 @@ class MainWindow(QWidget):
         self._update_telegram_mode_ui()
 
     def on_telegram_mode_clicked(self, checked: bool) -> None:
-        if getattr(self, "_telegram_mode_busy", False):
+        if self._exiting or self._telegram_mode_busy:
             return
         action = "disable" if self.telegram_mode_enabled else "enable"
         self._start_telegram_mode_worker(action)

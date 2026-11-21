@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import sys
 import threading
 import time
 
@@ -34,11 +35,13 @@ class TelegramProxyController:
         self._started_at = 0.0
         self._last_error = ""
 
-    def start(self, port: int = 1443, secret: str | None = None) -> None:
+    def start(self, port: int = 1443, secret: str | None = None, *, cancelled=None) -> None:
         port = int(port or 1443)
         secret = self._normalize_secret(secret)
 
         with self._lock:
+            if cancelled is not None and cancelled():
+                raise TelegramProxyError("Telegram proxy start cancelled")
             if self.is_running():
                 if port != self._port:
                     raise TelegramProxyError(f"Telegram proxy already runs on port {self._port}")
@@ -70,17 +73,8 @@ class TelegramProxyController:
         if err or not self.is_running():
             raise TelegramProxyError(err or "Telegram MTProto proxy stopped during startup")
 
-    def stop(self) -> None:
-        with self._lock:
-            self._stop_requested.set()
-            loop = self._loop
-            stop_event = self._stop_event
-            thread = self._thread
-        if loop is not None and stop_event is not None:
-            try:
-                loop.call_soon_threadsafe(stop_event.set)
-            except RuntimeError:
-                pass
+    def stop(self, *, cancelled=None) -> None:
+        thread = self.request_stop(cancelled=cancelled)
 
         if thread is not None and thread.is_alive():
             thread.join(timeout=self.STOP_TIMEOUT)
@@ -92,6 +86,23 @@ class TelegramProxyController:
                 self._thread = None
                 self._loop = None
                 self._stop_event = None
+
+    def request_stop(self, *, cancelled=None):
+        """Signal the proxy without waiting for its network thread."""
+        with self._lock:
+            if cancelled is not None and cancelled():
+                raise TelegramProxyError("Telegram proxy stop cancelled")
+            self._stop_requested.set()
+            loop = self._loop
+            stop_event = self._stop_event
+            thread = self._thread
+        if loop is not None and stop_event is not None:
+            try:
+                loop.call_soon_threadsafe(stop_event.set)
+            except RuntimeError:
+                pass
+
+        return thread
 
     def is_running(self) -> bool:
         thread = self._thread
@@ -127,7 +138,9 @@ class TelegramProxyController:
     def _thread_main(self) -> None:
         loop = None
         try:
-            loop = asyncio.new_event_loop()
+            # The embedded proxy only needs sockets. Keep it off Windows IOCP
+            # (including its special asyncio wakeup socket recovery path).
+            loop = asyncio.SelectorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             with self._lock:
                 self._loop = loop

@@ -770,7 +770,9 @@ def _decode_hosts_bytes(raw: bytes) -> str:
     return raw.decode("utf-8", errors="ignore")
 
 
-def _write_hosts_file(content: str, path: str = DNS_MALW_HOSTS_PATH) -> None:
+def _write_hosts_file(
+    content: str, path: str = DNS_MALW_HOSTS_PATH, *, allow_powershell: bool = True,
+) -> None:
     normalized = (content or "").replace("\r\n", "\n").replace("\r", "\n")
     if normalized and not normalized.endswith("\n"):
         normalized += "\n"
@@ -781,7 +783,7 @@ def _write_hosts_file(content: str, path: str = DNS_MALW_HOSTS_PATH) -> None:
             _atomic_hosts_write(path, data, system=is_system)
             return
         except (PermissionError, OSError) as error:
-            if not is_system:
+            if not is_system or not allow_powershell:
                 raise
             ps_error = _write_system_hosts_file_via_powershell(data, path)
             if ps_error:
@@ -1582,18 +1584,18 @@ def _run_self_as_admin_for_dns_action(action: str) -> bool:
     return False
 
 
-def _run_self_as_admin_for_telegram_hosts_action(action: str) -> bool:
+def _run_self_as_admin_for_telegram_hosts_action(action: str, request_id: str = "") -> bool:
     try:
         action = (action or "").strip().lower()
         if action not in {"enable", "disable"}:
             return False
 
-        if getattr(sys, "frozen", False):
-            executable = sys.executable
-            params = subprocess.list2cmdline([f"--app-dir={APP_DIR}", f"--telegram-mode-hosts-action={action}"])
-        else:
-            executable = sys.executable
-            params = subprocess.list2cmdline([os.path.abspath(sys.argv[0]), f"--app-dir={APP_DIR}", f"--telegram-mode-hosts-action={action}"])
+        executable = sys.executable
+        args = [] if getattr(sys, "frozen", False) else [os.path.abspath(sys.argv[0])]
+        args.extend([f"--app-dir={APP_DIR}", f"--telegram-mode-hosts-action={action}"])
+        if request_id:
+            args.append(f"--telegram-mode-request={request_id}")
+        params = subprocess.list2cmdline(args)
 
         res = ctypes.windll.shell32.ShellExecuteW(
             None,

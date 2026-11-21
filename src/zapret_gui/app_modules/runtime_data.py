@@ -382,14 +382,14 @@ def _hosts_contains_flowseal_telegram_block(text: str) -> bool:
 
 def _is_telegram_hosts_enabled_by_app(settings: QSettings | None = None) -> bool:
     try:
-        qs = _load_settings_if_needed(settings)
-        if bool(qs.value(TELEGRAM_MODE_HOSTS_ENABLED_KEY, False, type=bool)):
-            return True
-    except Exception:
+        return _hosts_contains_flowseal_telegram_block(_read_hosts_file_strict(DNS_MALW_HOSTS_PATH))
+    except FileNotFoundError:
+        return False
+    except OSError:
         pass
-
     try:
-        return _hosts_contains_flowseal_telegram_block(_read_hosts_file(DNS_MALW_HOSTS_PATH))
+        qs = _load_settings_if_needed(settings)
+        return bool(qs.value(TELEGRAM_MODE_HOSTS_ENABLED_KEY, False, type=bool))
     except Exception:
         return False
 
@@ -446,33 +446,46 @@ def _flowseal_telegram_hosts_block() -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _apply_flowseal_telegram_hosts(enabled: bool, settings: QSettings | None = None) -> bool:
+def _apply_flowseal_telegram_hosts(
+    enabled: bool, settings: QSettings | None = None, *, interactive: bool = False, cancelled=None,
+) -> bool:
     try:
         try:
             current_hosts = _read_hosts_file_strict(DNS_MALW_HOSTS_PATH)
         except FileNotFoundError:
             current_hosts = ""
 
+        current_hosts = current_hosts.replace("\r\n", "\n").replace("\r", "\n")
         updated = _strip_flowseal_telegram_hosts_block(current_hosts)
         if enabled:
             if updated and not updated.endswith("\n"):
                 updated += "\n"
             updated += _flowseal_telegram_hosts_block()
 
-        if updated != current_hosts:
+        needs_write = (updated != current_hosts if enabled
+                       else _hosts_contains_flowseal_telegram_block(current_hosts))
+        if cancelled is not None and cancelled():
+            return False
+        if needs_write:
             if _bypass_service.pipe is not None:
-                _bypass_service.telegram_hosts(bool(enabled))
+                _bypass_service.telegram_hosts(bool(enabled), cancelled=cancelled)
+            elif interactive:
+                # Fail fast as a standard user and let the existing UAC
+                # helper handle elevation, without an extra PowerShell retry.
+                _write_hosts_file(updated, DNS_MALW_HOSTS_PATH, allow_powershell=False)
             else:
                 _write_hosts_file(updated, DNS_MALW_HOSTS_PATH)
-        _run_hidden(["ipconfig", "/flushdns"], timeout=8)
+            _run_hidden(["ipconfig", "/flushdns"], timeout=3)
         _set_telegram_hosts_enabled_by_app(bool(enabled), settings)
         _set_telegram_hosts_action_status(True, "", settings)
-        _set_telegram_last_error("", settings)
+        if not interactive:
+            _set_telegram_last_error("", settings)
         return True
     except Exception as e:
         error = str(e)
         _set_telegram_hosts_action_status(False, error, settings)
-        _set_telegram_last_error(error, settings)
+        if not interactive:
+            _set_telegram_last_error(error, settings)
         print("Flowseal Telegram hosts error:", e)
         return False
 
@@ -480,6 +493,40 @@ def _apply_flowseal_telegram_hosts(enabled: bool, settings: QSettings | None = N
 def _write_telegram_managed_lists() -> None:
     _write_lines_utf8(USER_TELEGRAM_DOMAIN_FILE, list(TELEGRAM_WEB_DOMAINS))
     _write_lines_utf8(USER_TELEGRAM_IP_FILE, list(TELEGRAM_IP_RANGES))
+
+
+def _apply_telegram_hosts_helper(action: str, request_id: str, settings: QSettings) -> None:
+    """An old UAC prompt must not apply a superseded mode change."""
+    import psutil
+
+    def current() -> bool:
+        settings.sync()
+        if not request_id or settings.value(TELEGRAM_MODE_REQUEST_KEY, "") != request_id:
+            return False
+        try:
+            pid, started_at, _nonce = request_id.split(":", 2)
+            return psutil.Process(int(pid)).create_time() == float(started_at)
+        except (ValueError, psutil.Error):
+            return False
+
+    if not current():
+        return
+    error = ""
+    try:
+        with _ai_hosts_lock():
+            if not current():
+                return
+            ok = _apply_flowseal_telegram_hosts(
+                action == "enable", settings, interactive=True, cancelled=lambda: not current(),
+            )
+            if not ok:
+                error = str(settings.value(TELEGRAM_MODE_HOSTS_LAST_ERROR_KEY, "") or "hosts update failed")
+    except Exception as exc:
+        ok = False
+        error = str(exc) or type(exc).__name__
+    if current():
+        settings.setValue(TELEGRAM_MODE_HELPER_RESULT_KEY, json.dumps([request_id, ok, error]))
+        settings.sync()
 
 
 def _clear_telegram_managed_lists() -> None:
@@ -506,11 +553,15 @@ def _sync_telegram_runtime_lists(settings: QSettings | None = None) -> None:
         _set_telegram_last_error(str(e), settings)
 
 
-def _apply_telegram_mode_files(enabled: bool, settings: QSettings | None = None) -> bool:
+def _apply_telegram_runtime_files(enabled: bool, settings: QSettings | None = None) -> None:
     if enabled:
         _write_telegram_managed_lists()
     else:
         _clear_telegram_managed_lists()
     _sync_telegram_runtime_lists(settings)
+
+
+def _apply_telegram_mode_files(enabled: bool, settings: QSettings | None = None) -> bool:
+    _apply_telegram_runtime_files(enabled, settings)
     return _apply_flowseal_telegram_hosts(enabled, settings)
 

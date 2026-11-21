@@ -296,7 +296,7 @@ class Pipe:
             self.api.CloseHandle(self.handle)
             self.handle = None
 
-    def _io(self, buffer, size: int, write: bool) -> int:
+    def _io(self, buffer, size: int, write: bool, timeout_ms: int = 20000) -> int:
         event = self.api.CreateEventW(None, True, False, None)
         if not event:
             raise ctypes.WinError(ctypes.get_last_error())
@@ -308,10 +308,10 @@ class Pipe:
             if not ok:
                 if ctypes.get_last_error() != 997:
                     raise ctypes.WinError(ctypes.get_last_error())
-                if self.api.WaitForSingleObject(event, 20000) != 0:
+                if self.api.WaitForSingleObject(event, max(1000, int(timeout_ms))) != 0:
                     self.api.CancelIoEx(self.handle, ctypes.byref(pending))
                     self.api.GetOverlappedResult(self.handle, ctypes.byref(pending), ctypes.byref(transferred), True)
-                    raise TimeoutError("Фоновая служба не ответила за 20 секунд")
+                    raise TimeoutError(f"Фоновая служба не ответила за {timeout_ms // 1000} секунд")
                 if not self.api.GetOverlappedResult(self.handle, ctypes.byref(pending), ctypes.byref(transferred), False):
                     raise ctypes.WinError(ctypes.get_last_error())
             if transferred.value == 0:
@@ -320,33 +320,33 @@ class Pipe:
         finally:
             self.api.CloseHandle(event)
 
-    def _read(self, size: int) -> bytes:
+    def _read(self, size: int, timeout_ms: int = 20000) -> bytes:
         result = bytearray()
         while len(result) < size:
             buffer = ctypes.create_string_buffer(min(65536, size - len(result)))
-            count = self._io(buffer, len(buffer), False)
+            count = self._io(buffer, len(buffer), False, timeout_ms)
             result.extend(buffer.raw[:count])
         return bytes(result)
 
-    def _write(self, data: bytes) -> None:
+    def _write(self, data: bytes, timeout_ms: int = 20000) -> None:
         # One bounded ctypes copy, including when WriteFile completes partially.
         buffer = ctypes.create_string_buffer(data)
         offset = 0
         while offset < len(data):
-            offset += self._io(ctypes.byref(buffer, offset), len(data) - offset, True)
+            offset += self._io(ctypes.byref(buffer, offset), len(data) - offset, True, timeout_ms)
 
-    def _send_control(self, message: dict) -> None:
+    def _send_control(self, message: dict, timeout_ms: int = 20000) -> None:
         body = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(body) > MAX_CONTROL_BYTES:
             raise ValueError("Команда фоновой службе превышает 1 МиБ")
-        self._write(struct.pack("<I", len(body)))
-        self._write(body)
+        self._write(struct.pack("<I", len(body)), timeout_ms)
+        self._write(body, timeout_ms)
 
-    def _reply(self) -> dict:
-        size, = struct.unpack("<I", self._read(4))
+    def _reply(self, timeout_ms: int = 20000) -> dict:
+        size, = struct.unpack("<I", self._read(4, timeout_ms))
         if not 0 < size <= MAX_CONTROL_BYTES:
             raise ValueError("Invalid service response length")
-        reply = json.loads(self._read(size).decode("utf-8"))
+        reply = json.loads(self._read(size, timeout_ms).decode("utf-8"))
         if not reply.get("ok"):
             raise RuntimeError(reply.get("error") or "Background service failed")
         return reply
@@ -386,11 +386,11 @@ class Pipe:
         self._write(BLOCK_HEADER.pack(0, 0, 0))
         self._write(digest.digest())
 
-    def request(self, message: dict) -> dict:
+    def request(self, message: dict, *, timeout_ms: int = 20000) -> dict:
         if isinstance(message, ProfileRequest) and len(message["files"]) != len(message.sources):
             raise ValueError("Некорректное число файлов стратегии")
-        self._send_control(message)
-        reply = self._reply()
+        self._send_control(message, timeout_ms)
+        reply = self._reply(timeout_ms)
         if not isinstance(message, ProfileRequest):
             return reply
         if not reply.get("upload"):
@@ -407,7 +407,7 @@ class Pipe:
             raise UploadError(str(exc)) from exc
         # All binary input has been acknowledged. A normal launch/validation
         # failure does not corrupt the connection and must remain retryable.
-        return self._reply()
+        return self._reply(timeout_ms)
 
 
 def install_service(helper: str | Path, core_bin: str | Path, sid: str) -> None:
@@ -478,11 +478,14 @@ class Controller:
         # Assignment of the entire dictionary is atomic; never block Qt on pipe I/O.
         return dict(self.state)
 
-    def _request(self, message: dict) -> dict:
+    def _request(self, message: dict, *, timeout_ms: int = 20000) -> dict:
         try:
             if isinstance(message, ProfileRequest):
                 message.cancel_event = self._cancel_transfer
-            result = self.pipe.request(message)
+            if timeout_ms == 20000:
+                result = self.pipe.request(message)
+            else:
+                result = self.pipe.request(message, timeout_ms=timeout_ms)
         except (OSError, ValueError, ConnectionError):
             self.pipe.close()
             self.pipe = None
@@ -603,11 +606,17 @@ class Controller:
                 if reply.get("running"):
                     raise RuntimeError("Служба не подтвердила остановку winws")
 
-    def telegram_hosts(self, enabled: bool):
-        with self.lock:
+    def telegram_hosts(self, enabled: bool, *, cancelled=None):
+        if not self.lock.acquire(timeout=3.0):
+            raise TimeoutError("Background service is busy updating another setting")
+        try:
+            if self.closed or (cancelled is not None and cancelled()):
+                raise InterruptedError("Telegram Web operation cancelled")
             if self.pipe is None:
                 raise RuntimeError("Фоновая служба не подключена")
-            self._request({"op": "telegram-hosts-on" if enabled else "telegram-hosts-off"})
+            self._request({"op": "telegram-hosts-on" if enabled else "telegram-hosts-off"}, timeout_ms=7000)
+        finally:
+            self.lock.release()
 
     def ai_dns_hosts(self, content: str, expected_hash: str, mode: str, helper: str | Path, core_bin: str | Path) -> dict:
         """Ask the already-installed SYSTEM helper to publish hosts atomically."""
@@ -655,13 +664,18 @@ class Controller:
                 self.pipe = None
             self.state = {}
 
-    def close(self):
+    def close(self, *, timeout: float | None = None):
         self._cancel_transfer.set()
         self.closed = True
-        with self.lock:
+        if not self.lock.acquire(timeout=-1 if timeout is None else timeout):
+            return False  # Process exit closes the handle if an IPC call owns it.
+        try:
             if self.pipe is not None:
                 self.pipe.close()  # server finally + kill-on-close job handles GUI crashes too
                 self.pipe = None
+        finally:
+            self.lock.release()
+        return True
 
 
 controller = Controller()

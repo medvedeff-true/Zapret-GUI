@@ -87,6 +87,8 @@ TELEGRAM_MODE_HOSTS_ENABLED_KEY = "telegram_mode/hosts_enabled_by_app"
 TELEGRAM_MODE_HOSTS_LAST_ATTEMPT_KEY = "telegram_mode/hosts_last_attempt"
 TELEGRAM_MODE_HOSTS_LAST_STATUS_KEY = "telegram_mode/hosts_last_status"
 TELEGRAM_MODE_HOSTS_LAST_ERROR_KEY = "telegram_mode/hosts_last_error"
+TELEGRAM_MODE_REQUEST_KEY = "telegram_mode/request"
+TELEGRAM_MODE_HELPER_RESULT_KEY = "telegram_mode/helper_result"
 FLOWSEAL_TELEGRAM_HOSTS_BEGIN = "# ZapretGUI Flowseal Telegram Web hosts begin"
 FLOWSEAL_TELEGRAM_HOSTS_END = "# ZapretGUI Flowseal Telegram Web hosts end"
 
