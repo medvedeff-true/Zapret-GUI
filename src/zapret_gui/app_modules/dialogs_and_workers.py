@@ -1653,8 +1653,6 @@ class TelegramModeWorker(QThread):
             ).strip()
             result["hosts_error"] = hosts_error
             result["hosts_permission_error"] = _is_hosts_permission_error_message(hosts_error)
-            if hosts_error:
-                result["error"] = hosts_error
 
         try:
             settings = QSettings(SETTINGS_FILE, QSettings.Format.IniFormat)
@@ -1701,42 +1699,42 @@ class TelegramModeWorker(QThread):
             else:
                 raise RuntimeError("Unknown Telegram Mode action")
 
-            # The Desktop listener is usable already. Do not leave it in a
-            # perpetual "starting" state if Windows can't update Telegram Web.
+            # Publish the bypass lists before the optional system hosts
+            # operation (which can block on the service or wait for UAC).
             enabled = result["enabled"]
+            try:
+                _apply_telegram_runtime_files(enabled, settings)
+                _rebuild_runtime_lists(settings, strict=True)
+            except Exception as e:
+                prefix = f"{result['error']}\n" if result["error"] else ""
+                result["error"] = f"{prefix}Telegram runtime lists: {e}"
             if self._cancelled():
                 return
-            proxy_error = result["error"]
-            with _ai_hosts_lock():
-                if self._cancelled():
-                    return
-                _record_hosts_result(_apply_flowseal_telegram_hosts(
-                    enabled, settings, interactive=True, cancelled=self._cancelled,
-                ))
-            if self._cancelled():
-                return
-            if not enabled:
-                result["ok"] = bool(result["hosts_ok"] and not proxy_error)
-            if proxy_error:
-                result["error"] = proxy_error
-            if result["hosts_permission_error"] and self.action in {"enable", "disable"}:
-                if not self._cancelled():
-                    result["hosts_helper_launched"] = _run_self_as_admin_for_telegram_hosts_action(
-                        self.action, self.request_id,
-                    )
-            if self._cancelled():
-                return
+            if result["error"]:
+                _set_telegram_last_error(result["error"], settings)
             try:
                 with _ai_hosts_lock():
                     if self._cancelled():
                         return
-                    _apply_telegram_runtime_files(enabled, settings)
-                    _rebuild_runtime_lists(settings, strict=True)
+                    _record_hosts_result(_apply_flowseal_telegram_hosts(
+                        enabled, settings, interactive=True, cancelled=self._cancelled,
+                    ))
             except Exception as e:
-                if result["error"]:
-                    result["error"] += f"\nTelegram runtime lists: {e}"
-                else:
-                    result["error"] = f"Telegram runtime lists: {e}"
+                result["hosts_ok"] = False
+                result["hosts_error"] = str(e) or type(e).__name__
+                _set_telegram_hosts_action_status(False, result["hosts_error"], settings)
+            if self._cancelled():
+                return
+            if not enabled:
+                result["ok"] = not result["error"]
+            if result["hosts_permission_error"] and self.action in {"enable", "disable"}:
+                try:
+                    if not self._cancelled():
+                        result["hosts_helper_launched"] = _run_self_as_admin_for_telegram_hosts_action(
+                            self.action, self.request_id,
+                        )
+                except Exception as e:
+                    result["hosts_error"] = str(e) or type(e).__name__
         except Exception as e:
             result["error"] = str(e) or type(e).__name__
             if settings is not None:

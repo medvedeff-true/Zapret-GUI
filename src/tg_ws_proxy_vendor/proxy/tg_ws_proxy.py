@@ -24,7 +24,10 @@ if __name__ == '__main__' and (__package__ is None or __package__ == ''):
 from .utils import *
 from .stats import stats
 from .config import proxy_config, parse_dc_ip_list, start_cfproxy_domain_refresh, coerce_domain_list
-from .bridge import MsgSplitter, CryptoCtx, do_fallback, bridge_ws_reencrypt, reset_tcp_backoff
+from .bridge import (
+    MsgSplitter, CryptoCtx, do_fallback, bridge_ws_reencrypt, reset_route_backoff,
+    send_ws_relay_init, media_log,
+)
 from .raw_websocket import set_sock_opts
 from .fake_tls import (
     proxy_to_masking_domain, verify_client_hello, parse_client_hello, build_server_hello,
@@ -314,39 +317,36 @@ async def _handle_client(reader, writer, secret: bytes):
         ctx = _build_crypto_ctx(client_dec_prekey_iv, secret, relay_init)
 
         media_tag = " media" if is_media else ""
-        ws = await ws_pool.get(dc, is_media, is_test_dc=is_test_dc)
-        if ws is None:
-            log.info("[%s] DC%d%s WS pool unavailable -> fallback",
-                     label, dc, media_tag)
-            splitter_fb = None
-            try:
-                splitter_fb = MsgSplitter(proto_int)
-            except Exception:
-                pass
-            ok = await do_fallback(
-                clt_reader, clt_writer, relay_init, label,
-                dc, is_test_dc, is_media, media_tag,
-                ctx, splitter=splitter_fb, h2_pool=cf_h2_pool, proto_tag=proto_tag)
-            if ok:
-                log.info("[%s] DC%d%s fallback closed", label, dc, media_tag)
-            else:
-                log.warning("[%s] DC%d%s no fallback available", label, dc, media_tag)
+        relay_first = proxy_config.prefers_media_relay(dc, is_media, is_test_dc)
+
+        async def try_direct():
+            ws = await ws_pool.get(dc, is_media, is_test_dc=is_test_dc)
+            if ws is None:
+                ws = await ws_pool.connect_direct(dc, is_media, is_test_dc=is_test_dc)
+            if ws is None or not await send_ws_relay_init(ws, relay_init):
+                return False
+            log.info("[%s] DC%d%s -> direct WS", label, dc, media_tag)
+            if is_media:
+                media_log.info("Telegram Desktop media DC%d: direct WebSocket", dc)
+            stats.connections_ws += 1
+            await bridge_ws_reencrypt(
+                clt_reader, clt_writer, ws, label, ctx,
+                dc=dc, is_media=is_media, splitter=MsgSplitter(proto_int),
+            )
+            return True
+
+        if not relay_first and await try_direct():
             return
-
-        log.info("[%s] DC%d%s -> WS pool hit", label, dc, media_tag)
-        stats.connections_ws += 1
-
-        splitter = None
-        try:
-            splitter = MsgSplitter(proto_int)
-            log.debug("[%s] MsgSplitter activated for proto 0x%08X",
-                      label, proto_int)
-        except Exception:
-            pass
-
-        await bridge_ws_reencrypt(clt_reader, clt_writer, ws, label, ctx,
-                                   dc=dc, is_media=is_media,
-                                   splitter=splitter, relay_init=relay_init)
+        ok = await do_fallback(
+            clt_reader, clt_writer, relay_init, label,
+            dc, is_test_dc, is_media, media_tag,
+            ctx, splitter=MsgSplitter(proto_int), h2_pool=cf_h2_pool, proto_tag=proto_tag,
+            try_direct=try_direct if relay_first else None,
+        )
+        if not ok:
+            log.warning("[%s] DC%d%s no fallback available", label, dc, media_tag)
+            if is_media:
+                media_log.warning("Telegram Desktop media DC%d: all routes unavailable", dc)
 
     except asyncio.TimeoutError:
         log.warning("[%s] timeout during handshake", label)
@@ -380,7 +380,7 @@ async def _run(stop_event: Optional[asyncio.Event] = None):
     install_self_pipe_guard(asyncio.get_running_loop())
     _server_stop_event = stop_event
 
-    reset_tcp_backoff()
+    reset_route_backoff()
     ws_pool.reset()
     cf_worker_pool.reset()
     _client_tasks.clear()

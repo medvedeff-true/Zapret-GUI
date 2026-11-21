@@ -298,7 +298,6 @@ class MainWindow(QWidget):
         self._telegram_mode_request_id = ""
         self._telegram_mode_hosts_poll_timer = None
         self._telegram_mode_hosts_poll_attempts = 0
-        self._telegram_hosts_wait_error = ""
         self._telegram_proxy_autoconnect_generation = 0
         self._telegram_help_proxy_link_sent_this_session = False
         self.telegram_proxy = TelegramProxyController()
@@ -875,7 +874,7 @@ class MainWindow(QWidget):
         telegram_web_retry = (
             telegram_active and getattr(self, "_telegram_mode_worker", None) is None
             and not getattr(self, "_telegram_mode_request_id", "")
-            and bool(self.settings.value(TELEGRAM_MODE_LAST_ERROR_KEY, ""))
+            and self.settings.value(TELEGRAM_MODE_HOSTS_LAST_STATUS_KEY, "") == "error"
         )
         if self.action_telegram_enable is not None and self.action_telegram_disable is not None:
             self.action_telegram_enable.setEnabled(not telegram_busy and (not telegram_active or telegram_web_retry))
@@ -921,7 +920,7 @@ class MainWindow(QWidget):
         if (
             self.telegram_mode_enabled == bool(enabled)
             and (enabled or not self._telegram_hosts_cleanup_pending)
-            and not (enabled and self.settings.value(TELEGRAM_MODE_LAST_ERROR_KEY, ""))
+            and not (enabled and self.settings.value(TELEGRAM_MODE_HOSTS_LAST_STATUS_KEY, "") == "error")
         ):
             self.update_tray_status()
             return
@@ -3751,10 +3750,16 @@ class MainWindow(QWidget):
             )
         elif active:
             tooltip = (
-                "Telegram Mode включён: Web через hosts, Desktop через MTProto proxy"
+                "Telegram Mode включён: Desktop через локальный MTProto-прокси"
                 if self.lang == "ru" else
-                "Telegram Mode enabled: Web via hosts, Desktop via MTProto proxy"
+                "Telegram Mode enabled: Desktop via local MTProto proxy"
             )
+            if self.settings.value(TELEGRAM_MODE_HOSTS_LAST_STATUS_KEY, "") == "error":
+                tooltip += (
+                    "\nНастройка Telegram Web не завершена. Это не отключает Desktop-прокси."
+                    if self.lang == "ru" else
+                    "\nTelegram Web setup failed. The Desktop proxy stays on."
+                )
         else:
             tooltip = (
                 "Telegram Mode выключен"
@@ -3850,16 +3855,17 @@ class MainWindow(QWidget):
             not self.telegram_mode_enabled and _is_telegram_hosts_enabled_by_app(self.settings)
         )
         _startup_log.warning("Telegram Mode timed out waiting for %s", "local proxy" if waiting_for_proxy else "Web setup")
-        _set_telegram_last_error(
-            (
+        if waiting_for_proxy:
+            _set_telegram_last_error(
                 "Локальный прокси не ответил вовремя. Повторите попытку."
-                if waiting_for_proxy else "Telegram Web: операция не ответила вовремя."
-            ) if self.lang == "ru" else (
-                "The local proxy timed out. Try again."
-                if waiting_for_proxy else "Telegram Web setup timed out."
-            ),
-            self.settings,
-        )
+                if self.lang == "ru" else
+                "The local proxy timed out. Try again.",
+                self.settings,
+            )
+        else:
+            # Web hosts are optional. Never expose their timeout as a
+            # Telegram Desktop error or keep the mode in a failed state.
+            _set_telegram_hosts_action_status(False, "Telegram Web setup timed out", self.settings)
         self._set_telegram_mode_busy(False)
         self._resume_pending_toggle_if_ready()
 
@@ -3877,12 +3883,13 @@ class MainWindow(QWidget):
 
         error = str(result.get("error") or "").strip()
         if result.get("hosts_helper_launched"):
-            self._telegram_hosts_wait_error = error
             self._start_telegram_hosts_poll()
         else:
             self._cancel_telegram_mode_request()
         if error:
             _startup_log.warning("Telegram Mode action=%s: %s", action, error)
+        if not result.get("hosts_ok", True):
+            _startup_log.warning("Telegram Web action=%s: %s", action, result.get("hosts_error", ""))
         self._set_telegram_mode_busy(False)
         self._resume_pending_toggle_if_ready()
 
@@ -4000,10 +4007,7 @@ class MainWindow(QWidget):
         self._telegram_hosts_cleanup_pending = (
             not self.telegram_mode_enabled and _is_telegram_hosts_enabled_by_app(self.settings)
         )
-        if not ok:
-            _set_telegram_last_error(error or "Telegram Web: hosts update failed", self.settings)
-        elif str(self.settings.value(TELEGRAM_MODE_LAST_ERROR_KEY, "") or "") == self._telegram_hosts_wait_error:
-            _set_telegram_last_error("", self.settings)
+        _set_telegram_hosts_action_status(ok, "" if ok else error or "Telegram Web: hosts update failed", self.settings)
         self._update_telegram_mode_ui()
 
     def show_telegram_mode_help(self) -> None:

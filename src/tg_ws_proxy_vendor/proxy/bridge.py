@@ -17,20 +17,27 @@ from .cf_h2 import bridge_h2
 
 
 log = logging.getLogger('tg-mtproto-proxy')
+media_log = logging.getLogger('zapret_gui.startup.telegram_media')
 _st_I_le = struct.Struct('<I')
 
 RELAY_INIT_TIMEOUT = 10.0
+CF_WS_SETUP_TIMEOUT = 8.0
+CF_WS_ATTEMPT_TIMEOUT = 3.0
+CF_WS_RETRY_DELAY = 30.0
+CF_MEDIA_FIRST_REPLY_TIMEOUT = 12.0
 TCP_BACKOFF_INITIAL = 30.0
 TCP_BACKOFF_MAX = 3600.0
 _tcp_failures: Dict[Tuple[str, int], int] = {}
 _tcp_retry_after: Dict[Tuple[str, int], float] = {}
 _tcp_connecting: Set[Tuple[str, int]] = set()
+_media_cf_retry_after: Dict[int, float] = {}
 
 
-def reset_tcp_backoff() -> None:
+def reset_route_backoff() -> None:
     _tcp_failures.clear()
     _tcp_retry_after.clear()
     _tcp_connecting.clear()
+    _media_cf_retry_after.clear()
 
 
 class CryptoCtx:
@@ -138,7 +145,8 @@ class MsgSplitter:
 
 async def do_fallback(reader, writer, relay_init, label,
                        dc: int, is_test_dc: bool, is_media: bool, media_tag: str,
-                       ctx: CryptoCtx, splitter=None, *, h2_pool=None, proto_tag=None):
+                       ctx: CryptoCtx, splitter=None, *, h2_pool=None, proto_tag=None,
+                       try_direct=None):
     ip_table = DC_TEST_IPS if is_test_dc else DC_DEFAULT_IPS
     fallback_dst = ip_table.get(dc)
     use_cf = proxy_config.fallback_cfproxy and not is_test_dc
@@ -150,6 +158,8 @@ async def do_fallback(reader, writer, relay_init, label,
         methods.append('cf_worker')
     if use_cf:
         methods.append('cf')
+    if try_direct is not None:
+        methods.append('direct')
     if fallback_dst:
         methods.append('tcp')
 
@@ -162,9 +172,12 @@ async def do_fallback(reader, writer, relay_init, label,
             if ok:
                 return True
         elif method == 'cf':
-            if is_media and h2_pool is not None and proto_tag is not None:
+            # On relay-first routes go straight to WS instead of spending
+            # an extra setup deadline on the HTTP/2 probe.
+            if is_media and try_direct is None and h2_pool is not None and proto_tag is not None:
                 channel = await h2_pool.open(dc, label)
                 if channel is not None:
+                    media_log.info("Telegram Desktop media DC%d: CF HTTP/2", dc)
                     stats.connections_h2 += 1
                     stats.connections_cfproxy += 1
                     await bridge_h2(reader, writer, channel, ctx, proto_tag)
@@ -175,10 +188,13 @@ async def do_fallback(reader, writer, relay_init, label,
                 splitter=splitter)
             if ok:
                 return True
+        elif method == 'direct':
+            if await try_direct():
+                return True
         elif method == 'tcp' and fallback_dst:
             ok = await _tcp_fallback(
                 reader, writer, fallback_dst, 443,
-                relay_init, label, ctx)
+                relay_init, label, ctx, media_dc=dc if is_media else None)
             if ok:
                 return True
     return False
@@ -226,10 +242,12 @@ async def _cfproxy_worker_fallback(reader, writer, relay_init, label,
         if ws is None:
             return False
 
+    if not await send_ws_relay_init(ws, relay_init):
+        return False
     stats.connections_cfproxy += 1
     await bridge_ws_reencrypt(reader, writer, ws, label, ctx,
                               dc=dc, is_media=is_media,
-                              splitter=None, relay_init=relay_init)
+                              splitter=None)
     return True
 
 
@@ -245,11 +263,26 @@ async def _cfproxy_fallback(reader, writer, relay_init, label,
             label, dc, media_tag)
     connect_started = time.monotonic()
 
+    loop = asyncio.get_running_loop()
+    if is_media and loop.time() < _media_cf_retry_after.get(dc, 0):
+        return False
+    deadline = loop.time() + CF_WS_SETUP_TIMEOUT
     for base_domain in balancer.get_domains_for_dc(dc):
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
         domain = f'kws{dc}.{base_domain}'
         try:
-            ws = await RawWebSocket.connect(domain, domain, timeout=10.0,
-                                            secure=not proxy_config.disable_secure)
+            timeout = min(remaining, CF_WS_ATTEMPT_TIMEOUT)
+            candidate = await asyncio.wait_for(
+                RawWebSocket.connect(domain, domain, timeout=timeout,
+                                     secure=not proxy_config.disable_secure),
+                timeout,
+            )
+            remaining = deadline - loop.time()
+            if not await send_ws_relay_init(candidate, relay_init, timeout=remaining):
+                continue
+            ws = candidate
             chosen_domain = base_domain
             break
         except Exception as exc:
@@ -257,21 +290,47 @@ async def _cfproxy_fallback(reader, writer, relay_init, label,
                         label, dc, media_tag, repr(exc))
 
     if ws is None:
+        if is_media:
+            _media_cf_retry_after[dc] = loop.time() + CF_WS_RETRY_DELAY
         return False
 
+    if is_media:
+        _media_cf_retry_after.pop(dc, None)
     log.debug('[%s] WS CONNECT DC%d%s route=cf setup_ms=%.0f',
               label, dc, media_tag, (time.monotonic() - connect_started) * 1000)
+    if is_media:
+        media_log.info("Telegram Desktop media DC%d: CF WebSocket", dc)
     if chosen_domain and balancer.update_domain_for_dc(dc, chosen_domain):
         log.info("[%s] Switched active CF domain", label)
 
     stats.connections_cfproxy += 1
-    await bridge_ws_reencrypt(reader, writer, ws, label, ctx,
-                               dc=dc, is_media=is_media,
-                               splitter=splitter, relay_init=relay_init)
+    up, down = await bridge_ws_reencrypt(
+        reader, writer, ws, label, ctx, dc=dc, is_media=is_media, splitter=splitter,
+        first_reply_timeout=CF_MEDIA_FIRST_REPLY_TIMEOUT if is_media else None,
+    )
+    if is_media and up and not down:
+        # A successful WS upgrade can still lead to a dead relay. Let
+        # Desktop reconnect on another route; never replay encrypted data.
+        _media_cf_retry_after[dc] = loop.time() + CF_WS_RETRY_DELAY
     return True
 
 
-async def _tcp_fallback(reader, writer, dst, port, relay_init, label, ctx: CryptoCtx):
+async def send_ws_relay_init(ws, relay_init, *, timeout=RELAY_INIT_TIMEOUT) -> bool:
+    """Don't consume native payload before an upstream is ready."""
+    ready = False
+    try:
+        await asyncio.wait_for(ws.send(relay_init), timeout)
+        ready = True
+        return True
+    except (OSError, asyncio.TimeoutError):
+        return False
+    finally:
+        if not ready:
+            # An incomplete handshake isn't a live WebSocket session.
+            ws.writer.transport.abort()
+
+
+async def _tcp_fallback(reader, writer, dst, port, relay_init, label, ctx: CryptoCtx, *, media_dc=None):
     key = (dst, port)
     if key in _tcp_connecting or time.monotonic() < _tcp_retry_after.get(key, 0):
         log.debug("[%s] TCP fallback to %s:%d skipped (backoff or connecting)",
@@ -286,7 +345,7 @@ async def _tcp_fallback(reader, writer, dst, port, relay_init, label, ctx: Crypt
             rr, rw = await asyncio.wait_for(
                 asyncio.open_connection(dst, port), timeout=10)
             rw.write(relay_init)
-            await rw.drain()
+            await asyncio.wait_for(rw.drain(), RELAY_INIT_TIMEOUT)
         except Exception as exc:
             failures = _tcp_failures.get(key, 0) + 1
             _tcp_failures[key] = failures
@@ -302,6 +361,8 @@ async def _tcp_fallback(reader, writer, dst, port, relay_init, label, ctx: Crypt
         _tcp_failures.pop(key, None)
         _tcp_retry_after.pop(key, None)
         stats.connections_tcp_fallback += 1
+        if media_dc is not None:
+            media_log.info("Telegram Desktop media DC%d: TCP", media_dc)
         await _bridge_tcp_reencrypt(reader, writer, rr, rw, label, ctx)
         return True
     finally:
@@ -312,8 +373,8 @@ async def _tcp_fallback(reader, writer, dst, port, relay_init, label, ctx: Crypt
 async def bridge_ws_reencrypt(reader, writer, ws: RawWebSocket, label,
                                ctx: CryptoCtx,
                                dc=None, is_media=False,
-                               splitter: Optional[MsgSplitter] = None,
-                               relay_init: Optional[bytes] = None):
+                               splitter: Optional[MsgSplitter] = None, *,
+                               first_reply_timeout=None):
     """
     Bidirectional TCP(client) <-> WS(telegram) with re-encryption.
     client ciphertext → decrypt(clt_key) → encrypt(tg_key) → WS
@@ -328,12 +389,12 @@ async def bridge_ws_reencrypt(reader, writer, ws: RawWebSocket, label,
     start_time = asyncio.get_running_loop().time()
     close_reason = 'normal'
     activity = WsActivity(label, dc_tag) if log.isEnabledFor(logging.DEBUG) else None
+    first_upload = asyncio.Event() if first_reply_timeout is not None else None
+    first_download = asyncio.Event() if first_reply_timeout is not None else None
 
     async def tcp_to_ws():
         nonlocal up_bytes, up_packets, close_reason
         try:
-            if relay_init is not None:
-                await asyncio.wait_for(ws.send(relay_init), RELAY_INIT_TIMEOUT)
             while True:
                 chunk = await reader.read(65536)
                 if not chunk:
@@ -358,6 +419,8 @@ async def bridge_ws_reencrypt(reader, writer, ws: RawWebSocket, label,
                     parts = splitter.split(chunk, plain)
                     if not parts:
                         continue
+                    if first_upload is not None:
+                        first_upload.set()
                     if activity is not None:
                         activity.send_started()
                     if len(parts) > 1:
@@ -367,6 +430,8 @@ async def bridge_ws_reencrypt(reader, writer, ws: RawWebSocket, label,
                     if activity is not None:
                         activity.sent(sum(map(len, parts)))
                 else:
+                    if first_upload is not None:
+                        first_upload.set()
                     if activity is not None:
                         activity.send_started()
                     await ws.send(chunk)
@@ -390,6 +455,8 @@ async def bridge_ws_reencrypt(reader, writer, ws: RawWebSocket, label,
                         close_reason = 'upstream: ws_close'
                     break
                 n = len(data)
+                if n and first_download is not None:
+                    first_download.set()
                 if activity is not None:
                     activity.received(n)
                 stats.bytes_down += n
@@ -413,6 +480,19 @@ async def bridge_ws_reencrypt(reader, writer, ws: RawWebSocket, label,
 
     tasks = [asyncio.create_task(tcp_to_ws()),
              asyncio.create_task(ws_to_tcp())]
+    if first_upload is not None:
+        async def wait_first_reply():
+            nonlocal close_reason
+            await first_upload.wait()
+            try:
+                await asyncio.wait_for(first_download.wait(), first_reply_timeout)
+            except asyncio.TimeoutError:
+                close_reason = "upstream: first media reply timeout"
+            else:
+                # Once the first response arrives, normal Desktop retry
+                # and idle handling apply.
+                await asyncio.Future()
+        tasks.append(asyncio.create_task(wait_first_reply()))
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
@@ -430,7 +510,11 @@ async def bridge_ws_reencrypt(reader, writer, ws: RawWebSocket, label,
                      human_bytes(up_bytes), up_packets,
                      human_bytes(down_bytes), down_packets,
                      elapsed)
+            if is_media and up_bytes:
+                media_log.info("Telegram Desktop media DC%d: sent=%d received=%d elapsed=%.1fs",
+                               dc, up_bytes, down_bytes, elapsed)
             await ws.close()
+    return up_bytes, down_bytes
 
 
 async def _bridge_tcp_reencrypt(reader, writer, remote_reader, remote_writer,

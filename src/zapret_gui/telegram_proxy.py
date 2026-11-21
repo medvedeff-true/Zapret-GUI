@@ -208,7 +208,14 @@ class TelegramProxyController:
         proxy_config.host = self._host
         proxy_config.port = int(self._port)
         proxy_config.secret = self._secret
-        proxy_config.dc_redirects = {2: "149.154.167.220", 4: "149.154.167.220"}
+        # Keep direct DC2/DC4 for the ordinary MTProto connection.
+        proxy_config.dc_redirects = {
+            2: "149.154.167.220",
+            4: "149.154.167.220",
+        }
+        # Apply the Flowseal workaround only to DC2 media. Keep direct
+        # WS available if the relays cannot be reached.
+        proxy_config.media_cf_first = {2}
         proxy_config.buffer_size = 256 * 1024
         proxy_config.pool_size = 4
         proxy_config.fallback_cfproxy = True

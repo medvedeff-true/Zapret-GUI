@@ -215,7 +215,13 @@ class TelegramModeLifecycleTests(unittest.TestCase):
                 self.assertIsNone(window._telegram_mode_worker)
                 self.assertTrue(old.isRunning())
                 self.assertTrue(window.telegram_mode_btn.isEnabled())
-                self.assertIn("Telegram Web", settings.value(app.TELEGRAM_MODE_LAST_ERROR_KEY))
+                self.assertEqual(settings.value(app.TELEGRAM_MODE_LAST_ERROR_KEY), "")
+                self.assertEqual(settings.value(app.TELEGRAM_MODE_HOSTS_LAST_STATUS_KEY), "error")
+                window.telegram_proxy.request_stop.assert_not_called()
+                self.assertIn(
+                    mock.call(mock.ANY, strict=True),
+                    app._rebuild_runtime_lists.call_args_list,
+                )
 
                 QTest.mouseClick(window.telegram_mode_btn, app.Qt.MouseButton.LeftButton)
                 self.assertIsNotNone(window._telegram_mode_worker)

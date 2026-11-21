@@ -6,7 +6,7 @@ import socket as _socket
 import threading
 
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Set
 from urllib.request import Request
 
 from .balancer import balancer
@@ -65,6 +65,7 @@ class ProxyConfig:
     host: str = '127.0.0.1'
     secret: str = field(default_factory=lambda: os.urandom(16).hex())
     dc_redirects: Dict[int, str] = field(default_factory=lambda: {2: '149.154.167.220', 4: '149.154.167.220'})
+    media_cf_first: Set[int] = field(default_factory=set)
     buffer_size: int = 256 * 1024
     pool_size: int = 4
     fallback_cfproxy: bool = True
@@ -75,6 +76,9 @@ class ProxyConfig:
     fake_tls_domain: str = ''
     proxy_protocol: bool = False
     force_test_dc: bool = False
+
+    def prefers_media_relay(self, dc: int, is_media: bool, is_test_dc: bool) -> bool:
+        return self.fallback_cfproxy and is_media and not is_test_dc and dc in self.media_cf_first
 
     @property
     def h2_enabled(self) -> bool:

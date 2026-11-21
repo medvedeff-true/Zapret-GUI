@@ -13,6 +13,10 @@ from .config import proxy_config
 from .utils import ws_domains, DC_DEFAULT_IPS, WS_PATH, WS_PATH_TEST
 
 log = logging.getLogger('tg-mtproto-proxy')
+POOL_READY_TIMEOUT = 5.0
+POOL_READY_INTERVAL = 0.05
+DIRECT_WS_SETUP_TIMEOUT = 4.0
+DIRECT_MEDIA_ATTEMPT_TIMEOUT = 1.5
 
 
 class _WsPool:
@@ -34,14 +38,28 @@ class _WsPool:
         target_ip = proxy_config.dc_redirects.get(dc)
         if not target_ip or proxy_config.pool_size <= 0:
             return None
+
         key = (dc, is_media, is_test_dc)
         domains = ws_domains(dc, is_media)
-        now = time.monotonic()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + POOL_READY_TIMEOUT
+        while True:
+            ws = self._take_ready(key)
+            self._schedule_refill(key, target_ip, domains)
+            if ws is not None:
+                return ws
+            remaining = deadline - loop.time()
+            if remaining <= 0 or key not in self._refilling:
+                stats.pool_misses += 1
+                return None
+            # A cold pool isn't a failed route. A socket can become ready
+            # before the other connections in the refill batch finish.
+            await asyncio.sleep(min(remaining, POOL_READY_INTERVAL))
 
-        bucket = self._idle.get(key)
-        if bucket is None:
-            bucket = deque()
-            self._idle[key] = bucket
+    def _take_ready(self, key) -> Optional[RawWebSocket]:
+        dc, is_media, is_test_dc = key
+        now = time.monotonic()
+        bucket = self._idle.setdefault(key, deque())
         while bucket:
             ws, created = bucket.popleft()
             age = now - created
@@ -51,11 +69,7 @@ class _WsPool:
             stats.pool_hits += 1
             log.debug("WS pool hit DC%d%s%s (age=%.1fs, left=%d)",
                       dc, 't' if is_test_dc else '', 'm' if is_media else '', age, len(bucket))
-            self._schedule_refill(key, target_ip, domains)
             return ws
-
-        stats.pool_misses += 1
-        self._schedule_refill(key, target_ip, domains)
         return None
 
     def _is_stale(self, ws, created, now):
@@ -170,14 +184,17 @@ class _WsPool:
             if self._rotating.get(key) is asyncio.current_task():
                 self._rotating.pop(key, None)
 
-    async def _connect_one(self, target_ip, domains, path=WS_PATH) -> Optional[RawWebSocket]:
+    async def _connect_one(self, target_ip, domains, path=WS_PATH, *,
+                           attempt_timeout=None) -> Optional[RawWebSocket]:
         for domain in domains:
             modes = (True, False) if self.try_fronting_first else (False, True)
             for fronted in modes:
                 try:
-                    ws = await RawWebSocket.connect(
+                    connect = RawWebSocket.connect(
                         target_ip, domain, timeout=7 if fronted else 8, path=path,
                         sni="sprinthost.ru" if fronted else None)
+                    ws = (await connect if attempt_timeout is None else
+                          await asyncio.wait_for(connect, attempt_timeout))
                 except Exception as exc:
                     stats.ws_errors += 1
                     log.debug("WS pool connect %s%s via %s (fronting=%s): %r",
@@ -191,6 +208,25 @@ class _WsPool:
                 return ws
         return None
 
+    async def connect_direct(
+        self, dc: int, is_media: bool, *, is_test_dc: bool = False,
+    ) -> Optional[RawWebSocket]:
+        """Try one direct Telegram WS connection without waiting for the pool."""
+        target_ip = proxy_config.dc_redirects.get(dc)
+        if not target_ip or proxy_config.pool_size <= 0:
+            return None
+        try:
+            return await asyncio.wait_for(
+                self._connect_one(
+                    target_ip, ws_domains(dc, is_media),
+                    WS_PATH_TEST if is_test_dc else WS_PATH,
+                    attempt_timeout=DIRECT_MEDIA_ATTEMPT_TIMEOUT if is_media else None,
+                ),
+                DIRECT_WS_SETUP_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            return None
+
     async def _quiet_close(self, ws):
         try:
             await ws.close()
@@ -198,14 +234,17 @@ class _WsPool:
             pass
 
     async def warmup(self):
+        count = 0
+        is_test_dc = proxy_config.force_test_dc
         for dc, target_ip in proxy_config.dc_redirects.items():
             if target_ip is None:
                 continue
             for is_media in (False, True):
-                domains = ws_domains(dc, is_media)
-                key = (dc, is_media, proxy_config.force_test_dc)
-                self._schedule_refill(key, target_ip, domains)
-        log.info("WS pool warmup started for %d DC(s)", len(proxy_config.dc_redirects))
+                if proxy_config.prefers_media_relay(dc, is_media, is_test_dc):
+                    continue
+                self._schedule_refill((dc, is_media, is_test_dc), target_ip, ws_domains(dc, is_media))
+                count += 1
+        log.info("WS pool warmup started for %d route(s)", count)
 
     def reset(self):
         loop = asyncio.get_running_loop()

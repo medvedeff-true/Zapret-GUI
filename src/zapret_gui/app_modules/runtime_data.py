@@ -478,14 +478,10 @@ def _apply_flowseal_telegram_hosts(
             _run_hidden(["ipconfig", "/flushdns"], timeout=3)
         _set_telegram_hosts_enabled_by_app(bool(enabled), settings)
         _set_telegram_hosts_action_status(True, "", settings)
-        if not interactive:
-            _set_telegram_last_error("", settings)
         return True
     except Exception as e:
         error = str(e)
         _set_telegram_hosts_action_status(False, error, settings)
-        if not interactive:
-            _set_telegram_last_error(error, settings)
         print("Flowseal Telegram hosts error:", e)
         return False
 
