@@ -1,6 +1,5 @@
 <div align="center">
    
-[![Boosty](https://img.shields.io/badge/Поддержать-Boosty-orange?style=for-the-badge)](https://boosty.to/medvedeff)
 ## [Ru](#rus) | [En](#eng)
 
 <a name="rus"></a>
@@ -566,8 +565,6 @@
 
 ## ❤️ Поддержать проект
 
-Поддержать автора и развитие Zapret-GUI: [Boosty](https://boosty.to/medvedeff)
-
 Tron(TRC20) - TQJTGJjN5kNF6ZWoRvyFb1mBnDge6PLELg
 
 BTC - 12v3ZMUk9XiAUT6DTBuBrGArEbUAeFhCwr
@@ -613,8 +610,6 @@ TON - UQA5vNFPw88m1y7yO2VuIO_CVvOu1845wHZ3msuuGGlb2rUn
 <br>
 
 <div align="center">
-
-[![Boosty](https://img.shields.io/badge/Support-Boosty-orange?style=for-the-badge)](https://boosty.to/medvedeff)
 
 <a name="eng"></a>
 <img width="443,5" height="86" alt="logoreadme" src="https://github.com/user-attachments/assets/76dc2441-f9e0-4357-b2da-1a0408688079" />
@@ -1121,8 +1116,6 @@ The background service accepts restricted JSON commands through IPC, independent
 ---
 
 ## ❤️ Support project
-
-You can support the author and Zapret-GUI: [Boosty](https://boosty.to/medvedeff)
 
 Tron(TRC20) - TQJTGJjN5kNF6ZWoRvyFb1mBnDge6PLELg
 
